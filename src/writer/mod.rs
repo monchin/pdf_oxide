@@ -62,7 +62,8 @@ pub use annotation_builder::{
     AnnotationBuilder, BorderStyle, HighlightMode, LinkAction, LinkAnnotation,
 };
 pub use content_stream::{
-    BlendMode, ContentStreamBuilder, ContentStreamOp, LineCap, LineJoin, TextArrayItem,
+    BlendMode, ContentStreamBuilder, ContentStreamOp, LineCap, LineJoin, PendingImage,
+    TextArrayItem,
 };
 pub use document_builder::{
     DocumentBuilder, DocumentMetadata, FluentPageBuilder, PageSize, TextAlign, TextConfig,

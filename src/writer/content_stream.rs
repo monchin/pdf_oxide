@@ -3,7 +3,10 @@
 //! Builds PDF content streams containing graphics and text operators
 //! according to PDF specification ISO 32000-1:2008 Section 8-9.
 
-use crate::elements::{ContentElement, PathContent, PathOperation, StructureElement, TextContent};
+use crate::elements::{
+    ContentElement, ImageContent, PathContent, PathOperation, StructureElement, TableCellAlign,
+    TableContent, TextContent,
+};
 use crate::error::Result;
 use crate::layout::Color;
 use std::io::Write;
@@ -232,6 +235,19 @@ pub enum TextArrayItem {
     Adjustment(f32),
 }
 
+/// An image that needs to be registered as an XObject.
+///
+/// When ContentStreamBuilder encounters an ImageContent, it generates
+/// the content stream operators but also tracks the image data so it
+/// can be registered as an XObject when the PDF is saved.
+#[derive(Debug, Clone)]
+pub struct PendingImage {
+    /// The image content
+    pub image: ImageContent,
+    /// The resource ID assigned to this image (e.g., "Im1")
+    pub resource_id: String,
+}
+
 /// Builder for PDF content streams.
 ///
 /// Creates the byte sequence for a PDF content stream from operations
@@ -248,6 +264,10 @@ pub struct ContentStreamBuilder {
     in_text_object: bool,
     /// MCID (Marked Content ID) counter for tagged PDF structure
     mcid_counter: u32,
+    /// Images that need to be registered as XObjects
+    pending_images: Vec<PendingImage>,
+    /// Next image resource ID counter
+    next_image_id: u32,
 }
 
 impl ContentStreamBuilder {
@@ -721,9 +741,9 @@ impl ContentStreamBuilder {
         match element {
             ContentElement::Text(text) => self.add_text_content(text),
             ContentElement::Path(path) => self.add_path_content(path),
-            ContentElement::Image(_) => self, // Images require XObject - skip for now
-            ContentElement::Structure(_) => self, // Structure doesn't generate content stream ops
-            ContentElement::Table(_) => self, // Tables use Table::render() separately
+            ContentElement::Image(image) => self.add_image_content(image),
+            ContentElement::Structure(_) => self, // Structure elements recurse via add_structure_element
+            ContentElement::Table(table) => self.add_table_content(table),
         }
     }
 
@@ -807,6 +827,222 @@ impl ContentStreamBuilder {
         };
 
         self
+    }
+
+    /// Add table content element.
+    ///
+    /// Renders the table directly to the content stream using:
+    /// - Rectangle operations for cell backgrounds
+    /// - Line operations for borders
+    /// - Text operations for cell content
+    fn add_table_content(&mut self, table: &TableContent) -> &mut Self {
+        // End any text object first
+        self.end_text();
+
+        let style = &table.style;
+        let padding = style.cell_padding;
+
+        // Save graphics state for table rendering
+        self.op(ContentStreamOp::SaveState);
+
+        // Calculate row positions based on bounding boxes
+        let mut current_y = table.bbox.y + table.bbox.height;
+
+        for (row_idx, row) in table.rows.iter().enumerate() {
+            let row_height = row
+                .height
+                .unwrap_or_else(|| table.bbox.height / table.rows.len() as f32);
+            current_y -= row_height;
+
+            let mut current_x = table.bbox.x;
+
+            // Draw row background if specified
+            if let Some((r, g, b)) = row.background {
+                self.op(ContentStreamOp::SetFillColorRGB(r, g, b));
+                self.op(ContentStreamOp::Rectangle(
+                    table.bbox.x,
+                    current_y,
+                    table.bbox.width,
+                    row_height,
+                ));
+                self.op(ContentStreamOp::Fill);
+            }
+
+            // Draw stripe background for alternating rows
+            if row_idx % 2 == 1 {
+                if let Some((r, g, b)) = style.stripe_background {
+                    self.op(ContentStreamOp::SetFillColorRGB(r, g, b));
+                    self.op(ContentStreamOp::Rectangle(
+                        table.bbox.x,
+                        current_y,
+                        table.bbox.width,
+                        row_height,
+                    ));
+                    self.op(ContentStreamOp::Fill);
+                }
+            }
+
+            // Draw header background if this is a header row
+            if row.is_header {
+                if let Some((r, g, b)) = style.header_background {
+                    self.op(ContentStreamOp::SetFillColorRGB(r, g, b));
+                    self.op(ContentStreamOp::Rectangle(
+                        table.bbox.x,
+                        current_y,
+                        table.bbox.width,
+                        row_height,
+                    ));
+                    self.op(ContentStreamOp::Fill);
+                }
+            }
+
+            for (col_idx, cell) in row.cells.iter().enumerate() {
+                // Calculate cell width
+                let cell_width = if col_idx < table.column_widths.len() {
+                    table.column_widths[col_idx] * cell.colspan as f32
+                } else if !table.column_widths.is_empty() {
+                    table.column_widths[0]
+                } else {
+                    table.bbox.width / row.cells.len() as f32
+                };
+
+                // Draw cell background if specified
+                if let Some((r, g, b)) = cell.background {
+                    self.op(ContentStreamOp::SetFillColorRGB(r, g, b));
+                    self.op(ContentStreamOp::Rectangle(
+                        current_x, current_y, cell_width, row_height,
+                    ));
+                    self.op(ContentStreamOp::Fill);
+                }
+
+                // Draw cell text
+                if !cell.text.is_empty() {
+                    let font_size = cell.font_size.unwrap_or(10.0);
+                    let font_name = if cell.bold {
+                        "Helvetica-Bold"
+                    } else {
+                        "Helvetica"
+                    };
+
+                    // Calculate text position based on alignment
+                    let text_x = match cell.align {
+                        TableCellAlign::Left => current_x + padding,
+                        TableCellAlign::Center => current_x + cell_width / 2.0,
+                        TableCellAlign::Right => current_x + cell_width - padding,
+                    };
+
+                    // Position text at top of cell with padding
+                    let text_y = current_y + row_height - padding - font_size;
+
+                    self.begin_text();
+                    self.op(ContentStreamOp::SetFillColorRGB(0.0, 0.0, 0.0)); // Black text
+                    self.set_font(font_name, font_size);
+                    self.op(ContentStreamOp::SetTextMatrix(1.0, 0.0, 0.0, 1.0, text_x, text_y));
+                    self.op(ContentStreamOp::ShowText(cell.text.clone()));
+                    self.end_text();
+                }
+
+                current_x += cell_width;
+            }
+        }
+
+        // Draw borders
+        if style.border_width > 0.0 {
+            let (r, g, b) = style.border_color;
+            self.op(ContentStreamOp::SetStrokeColorRGB(r, g, b));
+            self.op(ContentStreamOp::SetLineWidth(style.border_width));
+
+            // Outer border
+            if style.outer_border {
+                self.op(ContentStreamOp::Rectangle(
+                    table.bbox.x,
+                    table.bbox.y,
+                    table.bbox.width,
+                    table.bbox.height,
+                ));
+                self.op(ContentStreamOp::Stroke);
+            }
+
+            // Horizontal borders
+            if style.horizontal_borders {
+                let mut y = table.bbox.y + table.bbox.height;
+                for row in &table.rows {
+                    let row_height = row
+                        .height
+                        .unwrap_or_else(|| table.bbox.height / table.rows.len() as f32);
+                    y -= row_height;
+                    if y > table.bbox.y {
+                        self.op(ContentStreamOp::MoveTo(table.bbox.x, y));
+                        self.op(ContentStreamOp::LineTo(table.bbox.x + table.bbox.width, y));
+                        self.op(ContentStreamOp::Stroke);
+                    }
+                }
+            }
+
+            // Vertical borders
+            if style.vertical_borders && !table.column_widths.is_empty() {
+                let mut x = table.bbox.x;
+                for (i, &width) in table.column_widths.iter().enumerate() {
+                    x += width;
+                    if i < table.column_widths.len() - 1 {
+                        self.op(ContentStreamOp::MoveTo(x, table.bbox.y));
+                        self.op(ContentStreamOp::LineTo(x, table.bbox.y + table.bbox.height));
+                        self.op(ContentStreamOp::Stroke);
+                    }
+                }
+            }
+        }
+
+        // Restore graphics state
+        self.op(ContentStreamOp::RestoreState);
+
+        self
+    }
+
+    /// Add image content element.
+    ///
+    /// Registers the image for XObject creation and emits a Do operator
+    /// to paint the image at its specified position.
+    ///
+    /// After calling `build()`, use `take_pending_images()` to retrieve
+    /// the images that need to be registered as XObjects.
+    fn add_image_content(&mut self, image: &ImageContent) -> &mut Self {
+        // End any text object first
+        self.end_text();
+
+        // Allocate resource ID for this image
+        self.next_image_id += 1;
+        let resource_id = format!("Im{}", self.next_image_id);
+
+        // Track the image for XObject registration
+        self.pending_images.push(PendingImage {
+            image: image.clone(),
+            resource_id: resource_id.clone(),
+        });
+
+        // Draw the image using the transformation matrix
+        self.draw_image(
+            &resource_id,
+            image.bbox.x,
+            image.bbox.y,
+            image.bbox.width,
+            image.bbox.height,
+        );
+
+        self
+    }
+
+    /// Take the pending images that need to be registered as XObjects.
+    ///
+    /// This should be called after `build()` to retrieve images that
+    /// need to be added to the page's Resources dictionary.
+    pub fn take_pending_images(&mut self) -> Vec<PendingImage> {
+        std::mem::take(&mut self.pending_images)
+    }
+
+    /// Get a reference to pending images without removing them.
+    pub fn pending_images(&self) -> &[PendingImage] {
+        &self.pending_images
     }
 
     /// Build multiple elements into the stream.
@@ -1257,5 +1493,167 @@ mod tests {
         assert_eq!(builder.map_font_name("Arial", true), "Helvetica-Bold");
         assert_eq!(builder.map_font_name("Times New Roman", false), "Times-Roman");
         assert_eq!(builder.map_font_name("Courier", false), "Courier");
+    }
+
+    #[test]
+    fn test_table_content_rendering() {
+        use crate::elements::{TableCellContent, TableContent, TableContentStyle, TableRowContent};
+
+        // Create a simple 2x2 table
+        let mut table = TableContent::new(Rect::new(72.0, 600.0, 200.0, 100.0));
+        table.column_widths = vec![100.0, 100.0];
+        table.style = TableContentStyle::bordered();
+
+        // Header row
+        let header = TableRowContent::header(vec![
+            TableCellContent::header("Name"),
+            TableCellContent::header("Value"),
+        ]);
+        table.add_row(header);
+
+        // Data row
+        let row =
+            TableRowContent::new(vec![TableCellContent::new("Item"), TableCellContent::new("100")]);
+        table.add_row(row);
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Table(table));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Should contain graphics state operations
+        assert!(content.contains("q")); // Save state
+        assert!(content.contains("Q")); // Restore state
+
+        // Should contain text for cells
+        assert!(content.contains("(Name) Tj"));
+        assert!(content.contains("(Value) Tj"));
+        assert!(content.contains("(Item) Tj"));
+        assert!(content.contains("(100) Tj"));
+
+        // Should contain stroke operations for borders
+        assert!(content.contains("re")); // Rectangle
+        assert!(content.contains("S")); // Stroke
+
+        // No pending images
+        assert!(builder.pending_images().is_empty());
+    }
+
+    #[test]
+    fn test_image_content_rendering() {
+        use crate::elements::{ColorSpace, ImageContent, ImageFormat};
+
+        // Create a test image
+        let image = ImageContent {
+            bbox: Rect::new(100.0, 500.0, 200.0, 150.0),
+            format: ImageFormat::Jpeg,
+            data: vec![0xFF, 0xD8, 0xFF, 0xE0], // JPEG magic bytes
+            width: 800,
+            height: 600,
+            bits_per_component: 8,
+            color_space: ColorSpace::RGB,
+            reading_order: Some(0),
+            alt_text: Some("Test image".to_string()),
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Image(image));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Should contain image drawing operations
+        assert!(content.contains("q")); // Save state
+        assert!(content.contains("Q")); // Restore state
+        assert!(content.contains("cm")); // Transform matrix
+        assert!(content.contains("Do")); // Paint XObject
+
+        // Should have one pending image
+        let pending = builder.pending_images();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].resource_id, "Im1");
+        assert_eq!(pending[0].image.width, 800);
+        assert_eq!(pending[0].image.height, 600);
+    }
+
+    #[test]
+    fn test_mixed_content_elements() {
+        use crate::elements::{
+            ColorSpace, ImageContent, ImageFormat, TableCellContent, TableContent,
+            TableContentStyle, TableRowContent,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+
+        // Add text
+        let text_content = TextContent {
+            text: "Header".to_string(),
+            bbox: Rect::new(72.0, 720.0, 100.0, 14.0),
+            font: FontSpec::new("Helvetica", 14.0),
+            style: TextStyle::default(),
+            reading_order: Some(0),
+        };
+        builder.add_element(&ContentElement::Text(text_content));
+
+        // Add table
+        let mut table = TableContent::new(Rect::new(72.0, 600.0, 200.0, 50.0));
+        table.column_widths = vec![200.0];
+        table.style = TableContentStyle::minimal();
+        table.add_row(TableRowContent::new(vec![TableCellContent::new("Row 1")]));
+        builder.add_element(&ContentElement::Table(table));
+
+        // Add image
+        let image = ImageContent {
+            bbox: Rect::new(72.0, 400.0, 100.0, 100.0),
+            format: ImageFormat::Png,
+            data: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+            width: 200,
+            height: 200,
+            bits_per_component: 8,
+            color_space: ColorSpace::RGB,
+            reading_order: Some(2),
+            alt_text: None,
+        };
+        builder.add_element(&ContentElement::Image(image));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Verify all content types are present
+        assert!(content.contains("(Header) Tj")); // Text
+        assert!(content.contains("(Row 1) Tj")); // Table cell text
+        assert!(content.contains("/Im1 Do")); // Image
+
+        // Should have one pending image
+        assert_eq!(builder.pending_images().len(), 1);
+    }
+
+    #[test]
+    fn test_take_pending_images() {
+        use crate::elements::{ColorSpace, ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: Rect::new(0.0, 0.0, 100.0, 100.0),
+            format: ImageFormat::Jpeg,
+            data: vec![0xFF, 0xD8],
+            width: 100,
+            height: 100,
+            bits_per_component: 8,
+            color_space: ColorSpace::RGB,
+            reading_order: None,
+            alt_text: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Image(image));
+
+        // Take pending images
+        let pending = builder.take_pending_images();
+        assert_eq!(pending.len(), 1);
+
+        // After taking, should be empty
+        assert!(builder.pending_images().is_empty());
+        assert!(builder.take_pending_images().is_empty());
     }
 }

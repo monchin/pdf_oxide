@@ -923,8 +923,32 @@ impl DocumentEditor {
                                         if let Some(structure) =
                                             self.modified_content.get(&page_index)
                                         {
-                                            let content_bytes =
+                                            let (content_bytes, pending_images) =
                                                 self.generate_content_stream(structure)?;
+
+                                            // Create XObject entries for pending images
+                                            let mut xobject_refs: Vec<(String, ObjectRef)> =
+                                                Vec::new();
+                                            for pending_image in pending_images {
+                                                let xobj_id = self.allocate_object_id();
+
+                                                // Build XObject stream for the image
+                                                let xobj_stream =
+                                                    Self::build_image_xobject(&pending_image.image);
+                                                let offset = writer.stream_position()?;
+                                                let bytes = serializer.serialize_indirect(
+                                                    xobj_id,
+                                                    0,
+                                                    &xobj_stream,
+                                                );
+                                                writer.write_all(&bytes)?;
+                                                xref_entries.push((xobj_id, offset, 0, true));
+
+                                                xobject_refs.push((
+                                                    pending_image.resource_id,
+                                                    ObjectRef::new(xobj_id, 0),
+                                                ));
+                                            }
 
                                             // Create stream object for the content
                                             let content_stream_obj = Object::Stream {
@@ -944,8 +968,14 @@ impl DocumentEditor {
                                             xref_entries.push((new_contents_id, offset, 0, true));
 
                                             // Note: The page object's /Contents reference should be updated
+                                            // and XObject references added to Resources dictionary.
                                             // This would require modifying the page_obj dictionary and re-serializing it.
                                             // Full implementation would update page_dict and re-write the page object.
+
+                                            // TODO: For now, xobject_refs contains the image resource IDs
+                                            // that need to be added to the page's Resources/XObject dictionary.
+                                            // Full integration would require modifying the page object.
+                                            let _ = xobject_refs; // Suppress unused warning
                                         }
                                     } else {
                                         // Use original contents
@@ -1438,13 +1468,75 @@ impl DocumentEditor {
     /// This is used when writing modified structure elements back to a PDF.
     /// Wraps each element in BDC/EMC (Begin/End Marked Content) operators for tagged PDF support.
     ///
+    /// Returns the content stream bytes and any pending images that need XObject registration.
+    ///
     /// # PDF Spec Compliance
     ///
     /// - ISO 32000-1:2008, Section 14.7.4 - Marked Content Sequences
-    fn generate_content_stream(&self, elem: &StructureElement) -> Result<Vec<u8>> {
+    fn generate_content_stream(
+        &self,
+        elem: &StructureElement,
+    ) -> Result<(Vec<u8>, Vec<crate::writer::PendingImage>)> {
         let mut builder = ContentStreamBuilder::new();
         builder.add_structure_element(elem);
-        builder.build()
+        let bytes = builder.build()?;
+        let pending_images = builder.take_pending_images();
+        Ok((bytes, pending_images))
+    }
+
+    /// Build an XObject stream from ImageContent.
+    ///
+    /// Creates a PDF Image XObject suitable for embedding in a PDF.
+    /// Per PDF spec Section 8.9, images are represented as XObject streams.
+    fn build_image_xobject(image: &crate::elements::ImageContent) -> Object {
+        use crate::elements::{ColorSpace as ElemColorSpace, ImageFormat as ElemImageFormat};
+
+        let mut dict = HashMap::new();
+
+        dict.insert("Type".to_string(), Object::Name("XObject".to_string()));
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(image.width as i64));
+        dict.insert("Height".to_string(), Object::Integer(image.height as i64));
+        dict.insert(
+            "BitsPerComponent".to_string(),
+            Object::Integer(image.bits_per_component as i64),
+        );
+
+        // Map color space
+        let color_space_name = match image.color_space {
+            ElemColorSpace::Gray => "DeviceGray",
+            ElemColorSpace::RGB => "DeviceRGB",
+            ElemColorSpace::CMYK => "DeviceCMYK",
+            ElemColorSpace::Indexed => "Indexed",
+            ElemColorSpace::Lab => "Lab",
+        };
+        dict.insert("ColorSpace".to_string(), Object::Name(color_space_name.to_string()));
+
+        // Set filter based on image format
+        match image.format {
+            ElemImageFormat::Jpeg => {
+                dict.insert("Filter".to_string(), Object::Name("DCTDecode".to_string()));
+            },
+            ElemImageFormat::Png | ElemImageFormat::Raw => {
+                dict.insert("Filter".to_string(), Object::Name("FlateDecode".to_string()));
+            },
+            ElemImageFormat::Jpeg2000 => {
+                dict.insert("Filter".to_string(), Object::Name("JPXDecode".to_string()));
+            },
+            ElemImageFormat::Jbig2 => {
+                dict.insert("Filter".to_string(), Object::Name("JBIG2Decode".to_string()));
+            },
+            ElemImageFormat::Unknown => {
+                // No filter for unknown format (raw data)
+            },
+        }
+
+        dict.insert("Length".to_string(), Object::Integer(image.data.len() as i64));
+
+        Object::Stream {
+            dict,
+            data: image.data.clone().into(),
+        }
     }
 }
 
