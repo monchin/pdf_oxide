@@ -44,11 +44,13 @@
 //! let bytes = writer.finish()?;
 //! ```
 
+mod acroform;
 mod annotation_builder;
 mod appearance_stream;
 mod content_stream;
 mod document_builder;
 mod font_manager;
+pub mod form_fields;
 mod freetext;
 mod graphics_state;
 mod image_handler;
@@ -65,7 +67,9 @@ mod stamp;
 mod table_renderer;
 mod text_annotations;
 mod text_markup;
+mod watermark;
 
+pub use acroform::AcroFormBuilder;
 pub use annotation_builder::{
     Annotation, AnnotationBuilder, BorderStyle, HighlightMode, LinkAction, LinkAnnotation,
 };
@@ -79,6 +83,12 @@ pub use document_builder::{
 };
 pub use font_manager::{
     EmbeddedFont, EmbeddedFontManager, FontFamily, FontInfo, FontManager, FontWeight, TextLayout,
+};
+pub use form_fields::{
+    ButtonFieldFlags, CheckboxWidget, ChoiceFieldFlags, ChoiceOption, ComboBoxWidget, FieldFlags,
+    FormAction, FormAppearanceGenerator, FormFieldEntry, FormFieldWidget, ListBoxWidget,
+    PushButtonWidget, RadioButtonGroup, RadioButtonWidget, SubmitFormFlags, TextAlignment,
+    TextFieldFlags, TextFieldWidget,
 };
 pub use freetext::FreeTextAnnotation;
 pub use graphics_state::{ExtGStateBuilder, SoftMask, SoftMaskSubtype};
@@ -115,6 +125,7 @@ pub use table_renderer::{
 };
 pub use text_annotations::TextAnnotation;
 pub use text_markup::TextMarkupAnnotation;
+pub use watermark::{FixedPrintSettings, WatermarkAnnotation};
 
 use crate::elements::ContentElement;
 use crate::error::Result;

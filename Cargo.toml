@@ -32,6 +32,7 @@ lazy_static = "1.4"
 bytes = "1.5"
 indexmap = "2.2"
 byteorder = "1.5"  # For binary parsing (TrueType cmap tables)
+bitflags = "2"     # For form field flags
 
 # Compression/Decompression
 flate2 = "1.0"

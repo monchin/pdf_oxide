@@ -94,8 +94,8 @@ pub use document_editor::{
     PageInfo, Permissions, SaveOptions,
 };
 pub use dom::{
-    ElementId, ImageElementCollectionEditor, PageEditor, PathElementCollectionEditor, PdfElement,
-    PdfImage, PdfPage, PdfPath, PdfStructure, PdfTable, PdfText, TableElementCollectionEditor,
-    TextElementCollectionEditor,
+    AnnotationId, AnnotationWrapper, ElementId, ImageElementCollectionEditor, PageEditor,
+    PathElementCollectionEditor, PdfElement, PdfImage, PdfPage, PdfPath, PdfStructure, PdfTable,
+    PdfText, TableElementCollectionEditor, TextElementCollectionEditor,
 };
 pub use resource_manager::ResourceManager;

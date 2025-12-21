@@ -99,6 +99,14 @@ pub struct Annotation {
 
     /// Appearance state for checkboxes/radios (AS entry)
     pub appearance_state: Option<String>,
+
+    // ===== Round-trip preservation =====
+    /// Raw annotation dictionary for preserving unknown properties during round-trip.
+    ///
+    /// This contains the complete original PDF dictionary, enabling faithful
+    /// preservation of properties that aren't explicitly parsed (appearance streams,
+    /// popup references, vendor-specific extensions, etc.).
+    pub raw_dict: Option<std::collections::HashMap<String, crate::object::Object>>,
 }
 
 /// Link destination within a PDF document.
@@ -378,6 +386,7 @@ impl PdfDocument {
             field_flags,
             options,
             appearance_state,
+            raw_dict: Some(dict.clone()),
         })
     }
 
@@ -735,6 +744,7 @@ mod tests {
             field_flags: None,
             options: None,
             appearance_state: None,
+            raw_dict: None,
         };
 
         assert_eq!(annot.annotation_type, "Annot");
@@ -771,6 +781,7 @@ mod tests {
             field_flags: None,
             options: None,
             appearance_state: None,
+            raw_dict: None,
         };
 
         assert!(annot.subtype_enum.is_text_markup());
@@ -850,6 +861,7 @@ mod tests {
             field_flags: None,
             options: None,
             appearance_state: None,
+            raw_dict: None,
         };
 
         assert_eq!(annot.subtype_enum, AnnotationSubtype::Widget);
@@ -885,6 +897,7 @@ mod tests {
             field_flags: None,
             options: None,
             appearance_state: Some("Yes".to_string()),
+            raw_dict: None,
         };
 
         assert_eq!(annot.subtype_enum, AnnotationSubtype::Widget);
@@ -933,6 +946,7 @@ mod tests {
                 "Option C".to_string(),
             ]),
             appearance_state: None,
+            raw_dict: None,
         };
 
         assert_eq!(annot.subtype_enum, AnnotationSubtype::Widget);

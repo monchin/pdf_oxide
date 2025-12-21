@@ -2,9 +2,35 @@
 //!
 //! Provides a convenient interface for building PDF documents
 //! using method chaining, wrapping the lower-level PdfWriter.
+//!
+//! # Annotations
+//!
+//! The fluent API supports adding annotations directly to text elements:
+//!
+//! ```ignore
+//! use pdf_oxide::writer::{DocumentBuilder, PageSize};
+//!
+//! let mut builder = DocumentBuilder::new();
+//! builder
+//!     .page(PageSize::Letter)
+//!     .at(72.0, 720.0)
+//!     .text("Click here for more info")
+//!     .link_url("https://example.com")  // Link the previous text
+//!     .text("Important note")
+//!     .highlight((1.0, 1.0, 0.0))       // Highlight in yellow
+//!     .sticky_note("Review this section")
+//!     .done();
+//! ```
 
+use super::annotation_builder::{Annotation, LinkAnnotation};
 use super::font_manager::TextLayout;
+use super::freetext::FreeTextAnnotation;
 use super::pdf_writer::{PdfWriter, PdfWriterConfig};
+use super::stamp::{StampAnnotation, StampType};
+use super::text_annotations::TextAnnotation;
+use super::text_markup::TextMarkupAnnotation;
+use super::watermark::WatermarkAnnotation;
+use crate::annotation_types::{TextAnnotationIcon, TextMarkupType};
 use crate::elements::{ContentElement, TextContent};
 use crate::error::Result;
 use crate::geometry::Rect;
@@ -136,6 +162,10 @@ pub struct FluentPageBuilder<'a> {
     cursor_y: f32,
     text_config: TextConfig,
     text_layout: TextLayout,
+    /// Track the last text element's bounding box for text markup annotations
+    last_text_rect: Option<Rect>,
+    /// Pending annotations for this page
+    pending_annotations: Vec<Annotation>,
 }
 
 impl<'a> FluentPageBuilder<'a> {
@@ -167,10 +197,14 @@ impl<'a> FluentPageBuilder<'a> {
             self.text_config.size,
         );
 
+        // Create the bounding box and track it for potential markup annotations
+        let text_rect = Rect::new(self.cursor_x, self.cursor_y, text_width, self.text_config.size);
+        self.last_text_rect = Some(text_rect);
+
         let page = &mut self.builder.pages[self.page_index];
         page.elements.push(ContentElement::Text(TextContent {
             text: text.to_string(),
-            bbox: Rect::new(self.cursor_x, self.cursor_y, text_width, self.text_config.size),
+            bbox: text_rect,
             font: crate::elements::FontSpec {
                 name: self.text_config.font.clone(),
                 size: self.text_config.size,
@@ -276,8 +310,326 @@ impl<'a> FluentPageBuilder<'a> {
         self
     }
 
+    // ==========================================================================
+    // Annotation Methods
+    // ==========================================================================
+
+    /// Add a URL link annotation to the last text element.
+    ///
+    /// The link will cover the bounding box of the most recently added text.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.page(PageSize::Letter)
+    ///     .at(72.0, 720.0)
+    ///     .text("Visit our website")
+    ///     .link_url("https://example.com")
+    ///     .done();
+    /// ```
+    pub fn link_url(mut self, url: &str) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let link = LinkAnnotation::uri(rect, url);
+            self.pending_annotations.push(link.into());
+        }
+        self
+    }
+
+    /// Add an internal page link annotation to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The target page index (0-based)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.page(PageSize::Letter)
+    ///     .at(72.0, 720.0)
+    ///     .text("Go to page 5")
+    ///     .link_page(4)  // 0-indexed
+    ///     .done();
+    /// ```
+    pub fn link_page(mut self, page: usize) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let link = LinkAnnotation::goto_page(rect, page);
+            self.pending_annotations.push(link.into());
+        }
+        self
+    }
+
+    /// Add a named destination link to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `destination` - The named destination string
+    pub fn link_named(mut self, destination: &str) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let link = LinkAnnotation::goto_named(rect, destination);
+            self.pending_annotations.push(link.into());
+        }
+        self
+    }
+
+    /// Add a highlight annotation to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - RGB color tuple (0.0-1.0 for each component)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.page(PageSize::Letter)
+    ///     .at(72.0, 720.0)
+    ///     .text("Important text")
+    ///     .highlight((1.0, 1.0, 0.0))  // Yellow highlight
+    ///     .done();
+    /// ```
+    pub fn highlight(mut self, color: (f32, f32, f32)) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let markup = TextMarkupAnnotation::from_rect(TextMarkupType::Highlight, rect)
+                .with_color(color.0, color.1, color.2);
+            self.pending_annotations.push(markup.into());
+        }
+        self
+    }
+
+    /// Add an underline annotation to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - RGB color tuple (0.0-1.0 for each component)
+    pub fn underline(mut self, color: (f32, f32, f32)) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let markup = TextMarkupAnnotation::from_rect(TextMarkupType::Underline, rect)
+                .with_color(color.0, color.1, color.2);
+            self.pending_annotations.push(markup.into());
+        }
+        self
+    }
+
+    /// Add a strikeout annotation to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - RGB color tuple (0.0-1.0 for each component)
+    pub fn strikeout(mut self, color: (f32, f32, f32)) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let markup = TextMarkupAnnotation::from_rect(TextMarkupType::StrikeOut, rect)
+                .with_color(color.0, color.1, color.2);
+            self.pending_annotations.push(markup.into());
+        }
+        self
+    }
+
+    /// Add a squiggly underline annotation to the last text element.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - RGB color tuple (0.0-1.0 for each component)
+    pub fn squiggly(mut self, color: (f32, f32, f32)) -> Self {
+        if let Some(rect) = self.last_text_rect {
+            let markup = TextMarkupAnnotation::from_rect(TextMarkupType::Squiggly, rect)
+                .with_color(color.0, color.1, color.2);
+            self.pending_annotations.push(markup.into());
+        }
+        self
+    }
+
+    /// Add a sticky note annotation at the current cursor position.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The note content
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.page(PageSize::Letter)
+    ///     .at(72.0, 720.0)
+    ///     .sticky_note("Please review this section")
+    ///     .done();
+    /// ```
+    pub fn sticky_note(mut self, text: &str) -> Self {
+        // Place sticky note at current cursor position (small 24x24 icon)
+        let rect = Rect::new(self.cursor_x, self.cursor_y, 24.0, 24.0);
+        let note = TextAnnotation::new(rect, text);
+        self.pending_annotations.push(note.into());
+        self
+    }
+
+    /// Add a sticky note annotation with a specific icon at the current cursor position.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The note content
+    /// * `icon` - The icon to display
+    pub fn sticky_note_with_icon(mut self, text: &str, icon: TextAnnotationIcon) -> Self {
+        let rect = Rect::new(self.cursor_x, self.cursor_y, 24.0, 24.0);
+        let note = TextAnnotation::new(rect, text).with_icon(icon);
+        self.pending_annotations.push(note.into());
+        self
+    }
+
+    /// Add a sticky note annotation at a specific position.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - X coordinate
+    /// * `y` - Y coordinate
+    /// * `text` - The note content
+    pub fn sticky_note_at(mut self, x: f32, y: f32, text: &str) -> Self {
+        let rect = Rect::new(x, y, 24.0, 24.0);
+        let note = TextAnnotation::new(rect, text);
+        self.pending_annotations.push(note.into());
+        self
+    }
+
+    /// Add a stamp annotation at the current cursor position.
+    ///
+    /// # Arguments
+    ///
+    /// * `stamp_type` - The type of stamp (Approved, Draft, Confidential, etc.)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::writer::StampType;
+    ///
+    /// builder.page(PageSize::Letter)
+    ///     .at(72.0, 720.0)
+    ///     .stamp(StampType::Approved)
+    ///     .done();
+    /// ```
+    pub fn stamp(mut self, stamp_type: StampType) -> Self {
+        // Default stamp size: 150x50 points
+        let rect = Rect::new(self.cursor_x, self.cursor_y, 150.0, 50.0);
+        let stamp = StampAnnotation::new(rect, stamp_type);
+        self.pending_annotations.push(stamp.into());
+        self
+    }
+
+    /// Add a stamp annotation at a specific position with custom size.
+    ///
+    /// # Arguments
+    ///
+    /// * `rect` - The bounding rectangle for the stamp
+    /// * `stamp_type` - The type of stamp
+    pub fn stamp_at(mut self, rect: Rect, stamp_type: StampType) -> Self {
+        let stamp = StampAnnotation::new(rect, stamp_type);
+        self.pending_annotations.push(stamp.into());
+        self
+    }
+
+    /// Add a FreeText annotation (text displayed directly on page).
+    ///
+    /// # Arguments
+    ///
+    /// * `rect` - The bounding rectangle for the text box
+    /// * `text` - The text content
+    pub fn freetext(mut self, rect: Rect, text: &str) -> Self {
+        let freetext = FreeTextAnnotation::new(rect, text);
+        self.pending_annotations.push(freetext.into());
+        self
+    }
+
+    /// Add a FreeText annotation with custom font settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `rect` - The bounding rectangle for the text box
+    /// * `text` - The text content
+    /// * `font` - Font name
+    /// * `size` - Font size in points
+    pub fn freetext_styled(mut self, rect: Rect, text: &str, font: &str, size: f32) -> Self {
+        let freetext = FreeTextAnnotation::new(rect, text).with_font(font, size);
+        self.pending_annotations.push(freetext.into());
+        self
+    }
+
+    /// Add a watermark annotation (appears behind content, optionally print-only).
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The watermark text
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// builder.page(PageSize::Letter)
+    ///     .watermark("DRAFT")
+    ///     .done();
+    /// ```
+    pub fn watermark(mut self, text: &str) -> Self {
+        let page = &self.builder.pages[self.page_index];
+        // Center the watermark on the page with diagonal orientation
+        let rect =
+            Rect::new(page.width * 0.1, page.height * 0.3, page.width * 0.8, page.height * 0.4);
+        let watermark = WatermarkAnnotation::new(text)
+            .with_rect(rect)
+            .with_rotation(45.0)
+            .with_opacity(0.3)
+            .with_font("Helvetica", 72.0);
+        self.pending_annotations.push(watermark.into());
+        self
+    }
+
+    /// Add a "CONFIDENTIAL" watermark with preset styling.
+    pub fn watermark_confidential(mut self) -> Self {
+        let page = &self.builder.pages[self.page_index];
+        let rect =
+            Rect::new(page.width * 0.1, page.height * 0.3, page.width * 0.8, page.height * 0.4);
+        let watermark = WatermarkAnnotation::confidential().with_rect(rect);
+        self.pending_annotations.push(watermark.into());
+        self
+    }
+
+    /// Add a "DRAFT" watermark with preset styling.
+    pub fn watermark_draft(mut self) -> Self {
+        let page = &self.builder.pages[self.page_index];
+        let rect =
+            Rect::new(page.width * 0.1, page.height * 0.3, page.width * 0.8, page.height * 0.4);
+        let watermark = WatermarkAnnotation::draft().with_rect(rect);
+        self.pending_annotations.push(watermark.into());
+        self
+    }
+
+    /// Add a custom watermark with full control over positioning and styling.
+    pub fn watermark_custom(mut self, watermark: WatermarkAnnotation) -> Self {
+        self.pending_annotations.push(watermark.into());
+        self
+    }
+
+    /// Add a generic annotation.
+    ///
+    /// This is a low-level method that allows adding any annotation type.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::writer::{LinkAnnotation, Annotation};
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let link = LinkAnnotation::uri(
+    ///     Rect::new(72.0, 720.0, 100.0, 12.0),
+    ///     "https://example.com",
+    /// );
+    ///
+    /// builder.page(PageSize::Letter)
+    ///     .add_annotation(link)
+    ///     .done();
+    /// ```
+    pub fn add_annotation<A: Into<Annotation>>(mut self, annotation: A) -> Self {
+        self.pending_annotations.push(annotation.into());
+        self
+    }
+
     /// Finish building this page and return to the document builder.
-    pub fn done(self) -> &'a mut DocumentBuilder {
+    pub fn done(mut self) -> &'a mut DocumentBuilder {
+        // Move pending annotations to page data
+        let page = &mut self.builder.pages[self.page_index];
+        page.annotations.append(&mut self.pending_annotations);
         self.builder
     }
 }
@@ -287,6 +639,7 @@ struct PageData {
     width: f32,
     height: f32,
     elements: Vec<ContentElement>,
+    annotations: Vec<Annotation>,
 }
 
 /// High-level document builder with fluent API.
@@ -335,6 +688,7 @@ impl DocumentBuilder {
             width,
             height,
             elements: Vec::new(),
+            annotations: Vec::new(),
         });
         FluentPageBuilder {
             builder: self,
@@ -343,6 +697,8 @@ impl DocumentBuilder {
             cursor_y: height - 72.0, // Start from top with 1 inch margin
             text_config: TextConfig::default(),
             text_layout: TextLayout::new(),
+            last_text_rect: None,
+            pending_annotations: Vec::new(),
         }
     }
 
@@ -375,6 +731,12 @@ impl DocumentBuilder {
         for page_data in &self.pages {
             let mut page = writer.add_page(page_data.width, page_data.height);
             page.add_elements(&page_data.elements);
+
+            // Add annotations to the page
+            for annotation in &page_data.annotations {
+                page.add_annotation(annotation.clone());
+            }
+
             page.finish();
         }
 
@@ -539,5 +901,215 @@ mod tests {
 
         assert_eq!(config.font, "Times-Roman");
         assert_eq!(config.size, 14.0);
+    }
+
+    // ==========================================================================
+    // Annotation Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_link_url_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Click here")
+            .link_url("https://example.com")
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Link"));
+        assert!(content.contains("/S /URI"));
+        assert!(content.contains("example.com"));
+    }
+
+    #[test]
+    fn test_link_page_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder.letter_page().text("Page 1").done();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Go to page 1")
+            .link_page(0)
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Link"));
+        assert!(content.contains("/Dest"));
+    }
+
+    #[test]
+    fn test_highlight_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Important text")
+            .highlight((1.0, 1.0, 0.0))
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Highlight"));
+        assert!(content.contains("/QuadPoints"));
+    }
+
+    #[test]
+    fn test_underline_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Underlined text")
+            .underline((1.0, 0.0, 0.0))
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Underline"));
+    }
+
+    #[test]
+    fn test_strikeout_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Deleted text")
+            .strikeout((1.0, 0.0, 0.0))
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /StrikeOut"));
+    }
+
+    #[test]
+    fn test_sticky_note_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .sticky_note("This is a comment")
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Text"));
+        assert!(content.contains("This is a comment"));
+    }
+
+    #[test]
+    fn test_stamp_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .stamp(StampType::Approved)
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Stamp"));
+        assert!(content.contains("/Name /Approved"));
+    }
+
+    #[test]
+    fn test_freetext_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .freetext(Rect::new(100.0, 500.0, 200.0, 50.0), "Free text content")
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /FreeText"));
+        assert!(content.contains("Free text content"));
+    }
+
+    #[test]
+    fn test_watermark_annotation() {
+        let mut builder = DocumentBuilder::new();
+        builder.letter_page().watermark("DRAFT").done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Watermark"));
+    }
+
+    #[test]
+    fn test_watermark_presets() {
+        let mut builder = DocumentBuilder::new();
+        builder.letter_page().watermark_confidential().done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Watermark"));
+    }
+
+    #[test]
+    fn test_multiple_annotations() {
+        let mut builder = DocumentBuilder::new();
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .text("Linked and highlighted text")
+            .link_url("https://example.com")
+            .highlight((1.0, 1.0, 0.0))
+            .sticky_note("Review this")
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Should have all three annotation types
+        assert!(content.contains("/Subtype /Link"));
+        assert!(content.contains("/Subtype /Highlight"));
+        assert!(content.contains("/Subtype /Text"));
+    }
+
+    #[test]
+    fn test_add_generic_annotation() {
+        let mut builder = DocumentBuilder::new();
+        let link =
+            LinkAnnotation::uri(Rect::new(100.0, 700.0, 100.0, 20.0), "https://rust-lang.org");
+        builder.letter_page().add_annotation(link).done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        assert!(content.contains("/Subtype /Link"));
+        assert!(content.contains("rust-lang.org"));
+    }
+
+    #[test]
+    fn test_no_annotation_when_no_text() {
+        let mut builder = DocumentBuilder::new();
+        // Try to add link without any text - should be a no-op
+        builder
+            .letter_page()
+            .at(72.0, 720.0)
+            .link_url("https://example.com") // No preceding text
+            .done();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Should NOT contain a link annotation since there was no text to link
+        assert!(!content.contains("/Subtype /Link"));
     }
 }

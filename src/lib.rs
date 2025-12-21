@@ -35,6 +35,7 @@
 //! - **Format Conversion**: Markdown → PDF, HTML → PDF, Plain Text → PDF
 //! - **Advanced Graphics**: Path operations, image embedding, table generation
 //! - **Font Embedding**: Automatic font subsetting for compact output
+//! - **Interactive Forms**: Fillable forms with text fields, checkboxes, radio buttons, dropdowns
 //!
 //! ### Editing (v0.3.0)
 //! - **DOM-like API**: Query and modify PDF content with strongly-typed wrappers
@@ -50,7 +51,7 @@
 //!
 //! ## Planned for v0.4.0+
 //!
-//! - **Forms**: Interactive fillable form support (v0.4.0)
+//! - **Digital Signatures**: Signature field support with cryptographic implementation
 //! - **Advanced**: Figures, citations, annotations, accessibility (v0.5.0+)
 //!
 //! ## Quick Start - Rust

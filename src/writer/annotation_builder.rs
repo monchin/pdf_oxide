@@ -33,6 +33,7 @@ use super::special_annotations::{
 use super::stamp::StampAnnotation;
 use super::text_annotations::TextAnnotation;
 use super::text_markup::TextMarkupAnnotation;
+use super::watermark::WatermarkAnnotation;
 use crate::geometry::Rect;
 use crate::object::{Object, ObjectRef};
 use std::collections::HashMap;
@@ -429,6 +430,8 @@ pub enum Annotation {
     FileAttachment(FileAttachmentAnnotation),
     /// Redact annotation (marks content for removal)
     Redact(RedactAnnotation),
+    /// Watermark annotation (transparent text overlay)
+    Watermark(WatermarkAnnotation),
 }
 
 impl Annotation {
@@ -448,6 +451,11 @@ impl Annotation {
             Annotation::Caret(caret) => caret.build(page_refs),
             Annotation::FileAttachment(file) => file.build(page_refs),
             Annotation::Redact(redact) => redact.build(page_refs),
+            Annotation::Watermark(watermark) => {
+                // Watermark build needs a page ref, use first page if available
+                let page_ref = page_refs.first().copied().unwrap_or(ObjectRef::new(0, 0));
+                watermark.build(page_ref)
+            },
         }
     }
 
@@ -467,6 +475,7 @@ impl Annotation {
             Annotation::Caret(caret) => caret.rect(),
             Annotation::FileAttachment(file) => file.rect(),
             Annotation::Redact(redact) => redact.rect(),
+            Annotation::Watermark(watermark) => watermark.rect(),
         }
     }
 }
@@ -546,6 +555,12 @@ impl From<FileAttachmentAnnotation> for Annotation {
 impl From<RedactAnnotation> for Annotation {
     fn from(redact: RedactAnnotation) -> Self {
         Annotation::Redact(redact)
+    }
+}
+
+impl From<WatermarkAnnotation> for Annotation {
+    fn from(watermark: WatermarkAnnotation) -> Self {
+        Annotation::Watermark(watermark)
     }
 }
 

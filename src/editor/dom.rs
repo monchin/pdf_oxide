@@ -3,13 +3,42 @@
 //! This module provides a hierarchical, DOM-like interface for editing PDF content.
 //! Instead of working with generic content types, this API returns strongly-typed
 //! wrappers (PdfText, PdfImage, etc.) that provide domain-specific methods.
+//!
+//! # Annotation Support
+//!
+//! Pages can have annotations attached. Use `PdfPage::annotations()` to read them
+//! and `PdfPage::add_annotation()` to add new ones:
+//!
+//! ```ignore
+//! use pdf_oxide::editor::DocumentEditor;
+//! use pdf_oxide::writer::LinkAnnotation;
+//! use pdf_oxide::geometry::Rect;
+//!
+//! let mut editor = DocumentEditor::open("document.pdf")?;
+//! let mut page = editor.get_page(0)?;
+//!
+//! // Read existing annotations
+//! for annot in page.annotations() {
+//!     println!("Annotation: {:?}", annot.subtype());
+//! }
+//!
+//! // Add a new link annotation
+//! let link = LinkAnnotation::uri(
+//!     Rect::new(100.0, 700.0, 50.0, 12.0),
+//!     "https://example.com",
+//! );
+//! page.add_annotation(link);
+//! ```
 
+use crate::annotation_types::AnnotationSubtype;
+use crate::annotations::Annotation as ReadAnnotation;
 use crate::elements::{
     ContentElement, ImageContent, PathContent, PathOperation, StructureElement, TableCellContent,
     TableContent, TextContent,
 };
 use crate::geometry::Rect;
 use crate::layout::Color;
+use crate::writer::Annotation as WriteAnnotation;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -400,6 +429,215 @@ impl PdfElement {
     }
 }
 
+// =============================================================================
+// Annotation Support
+// =============================================================================
+
+/// Unique annotation identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnnotationId(Uuid);
+
+impl AnnotationId {
+    /// Generate a new unique annotation ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for AnnotationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wrapper for annotations that provides a unified interface for both
+/// existing (read from PDF) and new (to be written) annotations.
+///
+/// This wrapper tracks whether the annotation has been modified since loading.
+#[derive(Debug, Clone)]
+pub struct AnnotationWrapper {
+    /// Unique ID for this annotation in the editing session
+    id: AnnotationId,
+    /// Original annotation data (if read from PDF)
+    original: Option<ReadAnnotation>,
+    /// New/modified annotation (for writing)
+    writer_annotation: Option<WriteAnnotation>,
+    /// Whether this annotation has been modified
+    modified: bool,
+}
+
+impl AnnotationWrapper {
+    /// Create a wrapper from an existing annotation (read from PDF).
+    pub fn from_read(annotation: ReadAnnotation) -> Self {
+        Self {
+            id: AnnotationId::new(),
+            original: Some(annotation),
+            writer_annotation: None,
+            modified: false,
+        }
+    }
+
+    /// Create a wrapper from a new annotation (to be written).
+    pub fn from_write<A: Into<WriteAnnotation>>(annotation: A) -> Self {
+        Self {
+            id: AnnotationId::new(),
+            original: None,
+            writer_annotation: Some(annotation.into()),
+            modified: true,
+        }
+    }
+
+    /// Get the annotation ID.
+    pub fn id(&self) -> AnnotationId {
+        self.id
+    }
+
+    /// Get the annotation subtype.
+    pub fn subtype(&self) -> AnnotationSubtype {
+        if let Some(ref original) = self.original {
+            original.subtype_enum
+        } else if let Some(ref writer) = self.writer_annotation {
+            Self::writer_annotation_subtype(writer)
+        } else {
+            AnnotationSubtype::Unknown
+        }
+    }
+
+    /// Get the bounding rectangle.
+    pub fn rect(&self) -> Rect {
+        if let Some(ref writer) = self.writer_annotation {
+            writer.rect()
+        } else if let Some(ref original) = self.original {
+            if let Some([x1, y1, x2, y2]) = original.rect {
+                Rect::new(x1 as f32, y1 as f32, (x2 - x1) as f32, (y2 - y1) as f32)
+            } else {
+                Rect::new(0.0, 0.0, 0.0, 0.0)
+            }
+        } else {
+            Rect::new(0.0, 0.0, 0.0, 0.0)
+        }
+    }
+
+    /// Get the annotation contents/text.
+    pub fn contents(&self) -> Option<&str> {
+        if let Some(ref original) = self.original {
+            original.contents.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Get the annotation color as RGB (0.0-1.0 for each component).
+    pub fn color(&self) -> Option<(f32, f32, f32)> {
+        if let Some(ref original) = self.original {
+            if let Some(ref color) = original.color {
+                if color.len() >= 3 {
+                    return Some((color[0] as f32, color[1] as f32, color[2] as f32));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if this annotation has been modified.
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+
+    /// Check if this is a new annotation (not loaded from PDF).
+    pub fn is_new(&self) -> bool {
+        self.original.is_none()
+    }
+
+    /// Get the writer annotation (for building PDF output).
+    pub fn writer_annotation(&self) -> Option<&WriteAnnotation> {
+        self.writer_annotation.as_ref()
+    }
+
+    /// Get the original read annotation.
+    pub fn original(&self) -> Option<&ReadAnnotation> {
+        self.original.as_ref()
+    }
+
+    /// Set the contents/text of the annotation.
+    pub fn set_contents(&mut self, text: impl Into<String>) {
+        if let Some(ref mut original) = self.original {
+            original.contents = Some(text.into());
+            self.modified = true;
+        }
+    }
+
+    /// Set the rectangle bounds of the annotation.
+    pub fn set_rect(&mut self, rect: Rect) {
+        if let Some(ref mut original) = self.original {
+            original.rect = Some([
+                rect.x as f64,
+                rect.y as f64,
+                (rect.x + rect.width) as f64,
+                (rect.y + rect.height) as f64,
+            ]);
+            self.modified = true;
+        }
+    }
+
+    /// Set the color of the annotation (RGB, 0.0-1.0).
+    pub fn set_color(&mut self, r: f32, g: f32, b: f32) {
+        if let Some(ref mut original) = self.original {
+            original.color = Some(vec![r as f64, g as f64, b as f64]);
+            self.modified = true;
+        }
+    }
+
+    /// Get the raw PDF dictionary from the original annotation (for round-trip preservation).
+    ///
+    /// This returns the complete original dictionary, enabling faithful preservation
+    /// of properties that aren't explicitly parsed (appearance streams, popup references,
+    /// vendor-specific extensions, etc.).
+    pub fn raw_dict(&self) -> Option<&std::collections::HashMap<String, crate::object::Object>> {
+        self.original.as_ref().and_then(|o| o.raw_dict.as_ref())
+    }
+
+    /// Helper to determine subtype from writer annotation.
+    fn writer_annotation_subtype(annotation: &WriteAnnotation) -> AnnotationSubtype {
+        match annotation {
+            WriteAnnotation::Link(_) => AnnotationSubtype::Link,
+            WriteAnnotation::TextMarkup(m) => {
+                use crate::annotation_types::TextMarkupType;
+                match m.markup_type {
+                    TextMarkupType::Highlight => AnnotationSubtype::Highlight,
+                    TextMarkupType::Underline => AnnotationSubtype::Underline,
+                    TextMarkupType::StrikeOut => AnnotationSubtype::StrikeOut,
+                    TextMarkupType::Squiggly => AnnotationSubtype::Squiggly,
+                }
+            },
+            WriteAnnotation::Text(_) => AnnotationSubtype::Text,
+            WriteAnnotation::FreeText(_) => AnnotationSubtype::FreeText,
+            WriteAnnotation::Line(_) => AnnotationSubtype::Line,
+            WriteAnnotation::Shape(s) => {
+                use crate::writer::ShapeType;
+                match s.shape_type {
+                    ShapeType::Square => AnnotationSubtype::Square,
+                    ShapeType::Circle => AnnotationSubtype::Circle,
+                }
+            },
+            WriteAnnotation::Polygon(p) => {
+                use crate::writer::PolygonType;
+                match p.polygon_type {
+                    PolygonType::Polygon => AnnotationSubtype::Polygon,
+                    PolygonType::PolyLine => AnnotationSubtype::PolyLine,
+                }
+            },
+            WriteAnnotation::Ink(_) => AnnotationSubtype::Ink,
+            WriteAnnotation::Stamp(_) => AnnotationSubtype::Stamp,
+            WriteAnnotation::Popup(_) => AnnotationSubtype::Popup,
+            WriteAnnotation::Caret(_) => AnnotationSubtype::Caret,
+            WriteAnnotation::FileAttachment(_) => AnnotationSubtype::FileAttachment,
+            WriteAnnotation::Redact(_) => AnnotationSubtype::Redact,
+            WriteAnnotation::Watermark(_) => AnnotationSubtype::Watermark,
+        }
+    }
+}
+
 /// Page with DOM-like editing capabilities.
 pub struct PdfPage {
     pub page_index: usize,
@@ -408,6 +646,10 @@ pub struct PdfPage {
     dirty_elements: HashSet<ElementId>,
     pub width: f32,
     pub height: f32,
+    /// Annotations on this page
+    annotations: Vec<AnnotationWrapper>,
+    /// Track if annotations have been modified
+    annotations_modified: bool,
 }
 
 impl PdfPage {
@@ -425,6 +667,30 @@ impl PdfPage {
             dirty_elements: HashSet::new(),
             width,
             height,
+            annotations: Vec::new(),
+            annotations_modified: false,
+        };
+        page.rebuild_element_map();
+        page
+    }
+
+    /// Create a PdfPage with pre-loaded annotations.
+    pub fn from_structure_with_annotations(
+        page_index: usize,
+        root: StructureElement,
+        width: f32,
+        height: f32,
+        annotations: Vec<AnnotationWrapper>,
+    ) -> Self {
+        let mut page = Self {
+            page_index,
+            root,
+            element_map: HashMap::new(),
+            dirty_elements: HashSet::new(),
+            width,
+            height,
+            annotations,
+            annotations_modified: false,
         };
         page.rebuild_element_map();
         page
@@ -1005,6 +1271,109 @@ impl PdfPage {
                 _ => {},
             }
         }
+    }
+
+    // === Annotation Methods ===
+
+    /// Get all annotations on this page.
+    pub fn annotations(&self) -> &[AnnotationWrapper] {
+        &self.annotations
+    }
+
+    /// Get annotation by index.
+    pub fn annotation(&self, index: usize) -> Option<&AnnotationWrapper> {
+        self.annotations.get(index)
+    }
+
+    /// Get mutable reference to all annotations.
+    pub fn annotations_mut(&mut self) -> &mut [AnnotationWrapper] {
+        self.annotations_modified = true;
+        &mut self.annotations
+    }
+
+    /// Get mutable reference to annotation by index.
+    pub fn annotation_mut(&mut self, index: usize) -> Option<&mut AnnotationWrapper> {
+        self.annotations_modified = true;
+        self.annotations.get_mut(index)
+    }
+
+    /// Add a new annotation to the page.
+    ///
+    /// Returns the AnnotationId of the newly added annotation.
+    pub fn add_annotation<A: Into<WriteAnnotation>>(&mut self, annotation: A) -> AnnotationId {
+        let wrapper = AnnotationWrapper::from_write(annotation);
+        let id = wrapper.id();
+        self.annotations.push(wrapper);
+        self.annotations_modified = true;
+        id
+    }
+
+    /// Remove an annotation by index.
+    ///
+    /// Returns the removed annotation wrapper if the index was valid.
+    pub fn remove_annotation(&mut self, index: usize) -> Option<AnnotationWrapper> {
+        if index < self.annotations.len() {
+            self.annotations_modified = true;
+            Some(self.annotations.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Remove an annotation by its ID.
+    ///
+    /// Returns the removed annotation wrapper if found.
+    pub fn remove_annotation_by_id(&mut self, id: AnnotationId) -> Option<AnnotationWrapper> {
+        if let Some(pos) = self.annotations.iter().position(|a| a.id() == id) {
+            self.annotations_modified = true;
+            Some(self.annotations.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Find annotation by its ID.
+    pub fn find_annotation(&self, id: AnnotationId) -> Option<&AnnotationWrapper> {
+        self.annotations.iter().find(|a| a.id() == id)
+    }
+
+    /// Find mutable annotation by its ID.
+    pub fn find_annotation_mut(&mut self, id: AnnotationId) -> Option<&mut AnnotationWrapper> {
+        self.annotations_modified = true;
+        self.annotations.iter_mut().find(|a| a.id() == id)
+    }
+
+    /// Check if annotations have been modified.
+    pub fn has_annotations_modified(&self) -> bool {
+        self.annotations_modified
+    }
+
+    /// Get the number of annotations on this page.
+    pub fn annotation_count(&self) -> usize {
+        self.annotations.len()
+    }
+
+    /// Find annotations in a specific region.
+    pub fn find_annotations_in_region(&self, region: Rect) -> Vec<&AnnotationWrapper> {
+        self.annotations
+            .iter()
+            .filter(|annot| {
+                let rect = annot.rect();
+                // Check if annotation intersects with region
+                rect.x < region.x + region.width
+                    && rect.x + rect.width > region.x
+                    && rect.y < region.y + region.height
+                    && rect.y + rect.height > region.y
+            })
+            .collect()
+    }
+
+    /// Find annotations by subtype.
+    pub fn find_annotations_by_type(&self, subtype: AnnotationSubtype) -> Vec<&AnnotationWrapper> {
+        self.annotations
+            .iter()
+            .filter(|annot| annot.subtype() == subtype)
+            .collect()
     }
 }
 

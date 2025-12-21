@@ -392,6 +392,8 @@ pub struct DocumentEditor {
     resource_manager: ResourceManager,
     /// Track if structure tree needs rebuilding
     structure_modified: bool,
+    /// Modified page annotations (page_index → annotations)
+    modified_annotations: HashMap<usize, Vec<crate::editor::dom::AnnotationWrapper>>,
 }
 
 impl DocumentEditor {
@@ -430,6 +432,7 @@ impl DocumentEditor {
             modified_content: HashMap::new(),
             resource_manager: ResourceManager::new(),
             structure_modified: false,
+            modified_annotations: HashMap::new(),
         })
     }
 
@@ -1213,17 +1216,59 @@ impl DocumentEditor {
             }
         };
 
-        Ok(crate::editor::dom::PdfPage::from_structure(
+        // Load annotations from source document
+        let read_annotations = self.source.get_annotations(page_index).unwrap_or_default();
+        let annotations: Vec<crate::editor::dom::AnnotationWrapper> = read_annotations
+            .into_iter()
+            .map(crate::editor::dom::AnnotationWrapper::from_read)
+            .collect();
+
+        Ok(crate::editor::dom::PdfPage::from_structure_with_annotations(
             page_index,
             content,
             page_info.width,
             page_info.height,
+            annotations,
         ))
     }
 
     /// Save a modified page back to the document.
+    ///
+    /// This saves both the page content and any modified annotations.
     pub fn save_page(&mut self, page: crate::editor::dom::PdfPage) -> Result<()> {
-        self.set_page_content(page.page_index, page.root)
+        let page_index = page.page_index;
+        let annotations_modified = page.has_annotations_modified();
+
+        // Extract annotations before moving root
+        let annotations: Vec<crate::editor::dom::AnnotationWrapper> = if annotations_modified {
+            page.annotations().to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Save content structure
+        self.set_page_content(page_index, page.root)?;
+
+        // Save annotations if they were modified
+        if annotations_modified {
+            self.modified_annotations.insert(page_index, annotations);
+            self.is_modified = true;
+        }
+
+        Ok(())
+    }
+
+    /// Get the modified annotations for a page (if any).
+    pub fn get_page_annotations(
+        &self,
+        page_index: usize,
+    ) -> Option<&Vec<crate::editor::dom::AnnotationWrapper>> {
+        self.modified_annotations.get(&page_index)
+    }
+
+    /// Check if a page has modified annotations.
+    pub fn has_modified_annotations(&self, page_index: usize) -> bool {
+        self.modified_annotations.contains_key(&page_index)
     }
 
     /// Edit a page with a closure, automatically saving changes.

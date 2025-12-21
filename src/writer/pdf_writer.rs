@@ -3,8 +3,13 @@
 //! Assembles complete PDF documents with proper structure:
 //! header, body, xref table, and trailer.
 
+use super::acroform::AcroFormBuilder;
 use super::annotation_builder::{AnnotationBuilder, LinkAnnotation};
 use super::content_stream::ContentStreamBuilder;
+use super::form_fields::{
+    CheckboxWidget, ComboBoxWidget, FormFieldEntry, ListBoxWidget, PushButtonWidget,
+    RadioButtonGroup, TextFieldWidget,
+};
 use super::freetext::FreeTextAnnotation;
 use super::ink::InkAnnotation;
 use super::object_serializer::ObjectSerializer;
@@ -635,6 +640,144 @@ impl<'a> PageBuilder<'a> {
         self.add_redact(RedactAnnotation::new(rect).with_overlay_text(overlay_text))
     }
 
+    // ===== Form Field Methods =====
+
+    /// Add a text field to the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `field` - The text field widget to add
+    pub fn add_text_field(&mut self, field: TextFieldWidget) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0); // Will be resolved during finish()
+        let entry = field.build_entry(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+        page.form_fields.push(entry);
+        self
+    }
+
+    /// Add a text field with builder pattern.
+    pub fn text_field(&mut self, name: impl Into<String>, rect: Rect) -> &mut Self {
+        self.add_text_field(TextFieldWidget::new(name, rect))
+    }
+
+    /// Add a checkbox to the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `checkbox` - The checkbox widget to add
+    pub fn add_checkbox(&mut self, checkbox: CheckboxWidget) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0);
+        let entry = checkbox.build_entry(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+        page.form_fields.push(entry);
+        self
+    }
+
+    /// Add a checkbox with builder pattern.
+    pub fn checkbox(&mut self, name: impl Into<String>, rect: Rect) -> &mut Self {
+        self.add_checkbox(CheckboxWidget::new(name, rect))
+    }
+
+    /// Add a radio button group to the page.
+    ///
+    /// Note: All buttons in the group are added to this page.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The radio button group to add
+    pub fn add_radio_group(&mut self, group: RadioButtonGroup) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0);
+        let (parent_dict, entries) = group.build_entries(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+
+        // Add the parent field entry (contains group name, value, flags)
+        // The parent is a non-widget field that groups all radio buttons
+        let parent_entry = FormFieldEntry {
+            widget_dict: HashMap::new(), // Parent has no widget (not visible)
+            field_dict: parent_dict,
+            name: group.name().to_string(),
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0), // No visual representation
+            field_type: "Btn".to_string(),
+        };
+        page.form_fields.push(parent_entry);
+
+        // Add child widget entries (the actual radio buttons)
+        for entry in entries {
+            page.form_fields.push(entry);
+        }
+        self
+    }
+
+    /// Add a combo box (dropdown) to the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `combo` - The combo box widget to add
+    pub fn add_combo_box(&mut self, combo: ComboBoxWidget) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0);
+        let entry = combo.build_entry(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+        page.form_fields.push(entry);
+        self
+    }
+
+    /// Add a list box to the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `list` - The list box widget to add
+    pub fn add_list_box(&mut self, list: ListBoxWidget) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0);
+        let entry = list.build_entry(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+        page.form_fields.push(entry);
+        self
+    }
+
+    /// Add a push button to the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `button` - The push button widget to add
+    pub fn add_push_button(&mut self, button: PushButtonWidget) -> &mut Self {
+        let page_ref = ObjectRef::new(0, 0);
+        let entry = button.build_entry(page_ref);
+        let page = &mut self.writer.pages[self.page_index];
+        page.form_fields.push(entry);
+        self
+    }
+
+    // ===== Generic Annotation Method =====
+
+    /// Add any annotation type to the page.
+    ///
+    /// This is a generic method that accepts any type that can be converted
+    /// to an Annotation enum, including all the specific annotation types.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::writer::{LinkAnnotation, Annotation};
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let link = LinkAnnotation::uri(
+    ///     Rect::new(72.0, 720.0, 100.0, 12.0),
+    ///     "https://example.com",
+    /// );
+    ///
+    /// let mut writer = PdfWriter::new();
+    /// let mut page = writer.add_page(612.0, 792.0);
+    /// page.add_annotation(link);
+    /// ```
+    pub fn add_annotation<A: Into<super::annotation_builder::Annotation>>(
+        &mut self,
+        annotation: A,
+    ) -> &mut Self {
+        let page = &mut self.writer.pages[self.page_index];
+        page.annotations.add_annotation(annotation);
+        self
+    }
+
     /// Finish building this page and return to the writer.
     pub fn finish(self) -> &'a mut PdfWriter {
         let page = &mut self.writer.pages[self.page_index];
@@ -649,6 +792,7 @@ struct PageData {
     height: f32,
     content_builder: ContentStreamBuilder,
     annotations: AnnotationBuilder,
+    form_fields: Vec<FormFieldEntry>,
 }
 
 /// PDF document writer.
@@ -663,6 +807,8 @@ pub struct PdfWriter {
     objects: HashMap<u32, Object>,
     /// Font resources used (name -> object ref)
     fonts: HashMap<String, ObjectRef>,
+    /// AcroForm builder for interactive forms
+    acroform: Option<AcroFormBuilder>,
 }
 
 impl PdfWriter {
@@ -679,6 +825,7 @@ impl PdfWriter {
             next_obj_id: 1,
             objects: HashMap::new(),
             fonts: HashMap::new(),
+            acroform: None,
         }
     }
 
@@ -697,6 +844,7 @@ impl PdfWriter {
             height,
             content_builder: ContentStreamBuilder::new(),
             annotations: AnnotationBuilder::new(),
+            form_fields: Vec::new(),
         });
         PageBuilder {
             writer: self,
@@ -796,6 +944,18 @@ impl PdfWriter {
             annot_ids.push(page_annot_ids);
         }
 
+        // Pre-allocate form field IDs for all pages
+        let form_field_counts: Vec<usize> =
+            self.pages.iter().map(|p| p.form_fields.len()).collect();
+        let mut form_field_ids: Vec<Vec<u32>> = Vec::with_capacity(page_count);
+        for count in form_field_counts {
+            let mut page_field_ids = Vec::with_capacity(count);
+            for _ in 0..count {
+                page_field_ids.push(self.alloc_obj_id());
+            }
+            form_field_ids.push(page_field_ids);
+        }
+
         // Build page ObjectRefs for annotation destinations (internal links)
         let page_obj_refs: Vec<ObjectRef> = page_ids
             .iter()
@@ -806,9 +966,12 @@ impl PdfWriter {
         let mut page_refs: Vec<Object> = Vec::new();
         let mut page_objects: Vec<(u32, Object, Vec<u8>)> = Vec::new();
         let mut annotation_objects: Vec<(u32, Object)> = Vec::new();
+        let mut form_field_objects: Vec<(u32, Object)> = Vec::new();
+        let mut all_field_refs: Vec<ObjectRef> = Vec::new();
 
         for (i, page_data) in self.pages.iter().enumerate() {
             let (page_id, content_id) = page_ids[i];
+            let page_ref = ObjectRef::new(page_id, 0);
 
             // Build content stream
             let raw_content = page_data.content_builder.build()?;
@@ -839,6 +1002,28 @@ impl PdfWriter {
                     annotation_objects.push((annot_id, Object::Dictionary(annot_dict)));
                     annot_refs.push(Object::Reference(ObjectRef::new(annot_id, 0)));
                 }
+            }
+
+            // Build form field objects for this page
+            for (j, field_entry) in page_data.form_fields.iter().enumerate() {
+                let field_id = form_field_ids[i][j];
+                let field_ref = ObjectRef::new(field_id, 0);
+                all_field_refs.push(field_ref);
+
+                // Build merged field/widget dictionary
+                let mut field_dict = field_entry.field_dict.clone();
+
+                // Update widget dict with correct page reference
+                let mut widget_dict = field_entry.widget_dict.clone();
+                widget_dict.insert("P".to_string(), Object::Reference(page_ref));
+
+                // Merge widget entries into field dict (merged field/widget)
+                for (key, value) in widget_dict {
+                    field_dict.insert(key, value);
+                }
+
+                form_field_objects.push((field_id, Object::Dictionary(field_dict)));
+                annot_refs.push(Object::Reference(field_ref));
             }
 
             // Page object
@@ -890,11 +1075,27 @@ impl PdfWriter {
             ("Count", ObjectSerializer::integer(self.pages.len() as i64)),
         ]);
 
+        // Build AcroForm if there are form fields
+        let acroform_id = if !all_field_refs.is_empty() {
+            let id = self.alloc_obj_id();
+            let mut acroform = self.acroform.take().unwrap_or_default();
+            acroform.add_fields(all_field_refs);
+            let acroform_dict = acroform.build_with_resources();
+            self.objects.insert(id, Object::Dictionary(acroform_dict));
+            Some(id)
+        } else {
+            None
+        };
+
         // Catalog object
-        let catalog_obj = ObjectSerializer::dict(vec![
+        let mut catalog_entries = vec![
             ("Type", ObjectSerializer::name("Catalog")),
             ("Pages", ObjectSerializer::reference(pages_id, 0)),
-        ]);
+        ];
+        if let Some(acroform_id) = acroform_id {
+            catalog_entries.push(("AcroForm", ObjectSerializer::reference(acroform_id, 0)));
+        }
+        let catalog_obj = ObjectSerializer::dict(catalog_entries);
 
         // Info object (optional metadata)
         let info_id = self.alloc_obj_id();
@@ -940,6 +1141,24 @@ impl PdfWriter {
         for (annot_id, annot_obj) in &annotation_objects {
             xref_offsets.push((*annot_id, output.len()));
             output.extend_from_slice(&serializer.serialize_indirect(*annot_id, 0, annot_obj));
+        }
+
+        // Form field objects
+        for (field_id, field_obj) in &form_field_objects {
+            xref_offsets.push((*field_id, output.len()));
+            output.extend_from_slice(&serializer.serialize_indirect(*field_id, 0, field_obj));
+        }
+
+        // AcroForm object (if present)
+        if let Some(acroform_id) = acroform_id {
+            if let Some(acroform_obj) = self.objects.get(&acroform_id) {
+                xref_offsets.push((acroform_id, output.len()));
+                output.extend_from_slice(&serializer.serialize_indirect(
+                    acroform_id,
+                    0,
+                    acroform_obj,
+                ));
+            }
         }
 
         // Info object
