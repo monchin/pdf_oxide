@@ -1,8 +1,8 @@
 # PDFOxide
 
-**47.9× faster PDF text extraction and markdown conversion library built in Rust.**
+**High-performance PDF text extraction and markdown conversion library built in Rust.**
 
-A production-ready, high-performance PDF parsing and conversion library with Python bindings. Processes 103 PDFs in 5.43 seconds vs 259.94 seconds for PyMuPDF4LLM.
+A production-ready, high-performance PDF parsing and conversion library with Python bindings. Processes 103 PDFs in 5.43 seconds with 100% success rate.
 
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![Documentation](https://docs.rs/pdf_oxide/badge.svg)](https://docs.rs/pdf_oxide)
@@ -14,19 +14,19 @@ A production-ready, high-performance PDF parsing and conversion library with Pyt
 
 ## Why This Library?
 
-✨ **47.9× faster** than PyMuPDF4LLM - Process 100 PDFs in 5.3 seconds instead of 4.2 minutes
-📋 **Form field extraction** - Only library that extracts complete form field structure
-🎯 **100% text accuracy** - Perfect word spacing and bold detection (37% more than PyMuPDF)
-💾 **Smaller output** - 4% smaller than PyMuPDF
-🚀 **Production ready** - 100% success rate on 103-file test suite
-⚡ **Low latency** - Average 53ms per PDF, perfect for web services
+- ✨ **Ultra-fast** - Process 100 PDFs in 5.3 seconds (average 53ms per PDF)
+- 📋 **Form field extraction** - Complete form field structure and hierarchy
+- 🎯 **100% text accuracy** - Perfect word spacing and bold detection
+- 🚀 **Production ready** - 100% success rate on 103-file test suite
+- ⚡ **Low latency** - Average 53ms per PDF, perfect for web services
+- 🦀 **Pure Rust** - Memory-safe, no C dependencies, single binary
 
 ## Features
 
 ### Currently Available (v0.2.0+)
 - 📄 **Complete PDF Parsing** - PDF 1.0-1.7 with robust error handling and cycle detection
 - 📝 **Text Extraction** - 100% accurate with perfect word spacing and Unicode support
-- ✍️ **Bold Detection** - 37% more accurate than PyMuPDF (16,074 vs 11,759 sections)
+- ✍️ **Bold Detection** - Accurate font weight detection (16,074 bold sections in test suite)
 - 📋 **Form Field Extraction** - Unique feature: extracts complete form field structure and hierarchy
 - 🔖 **Bookmarks/Outline** - Extract PDF document outline with hierarchical structure
 - 📌 **Annotations** - Extract PDF annotations including comments, highlights, and links
@@ -35,8 +35,8 @@ A production-ready, high-performance PDF parsing and conversion library with Pyt
 - 🔄 **Markdown Export** - Clean, properly formatted output with reading order preservation
 - 🖼️ **Image Extraction** - Extract embedded images with CCITT bilevel support
 - 📊 **Comprehensive Extraction** - Captures all text including OCR and technical diagrams
-- ⚡ **Ultra-Fast Processing** - 47.9× faster than PyMuPDF4LLM (5.43s vs 259.94s for 103 PDFs)
-- 💾 **Efficient Output** - 4% smaller files than PyMuPDF
+- ⚡ **Ultra-Fast Processing** - 5.43 seconds for 103 PDFs (average 53ms per PDF)
+- 💾 **Efficient Output** - Compact markdown and HTML generation
 - 🎯 **PDF Spec Aligned** - Section 9, 14.7-14.8 compliance with proper reading order (NEW - v0.2.0)
 
 ### Python Integration
@@ -537,7 +537,7 @@ pdf_oxide/
 - **Markdown Export** - Clean formatting with bold detection and form fields
 - **Image Extraction** - Extract embedded images with metadata
 - **Python Bindings** - Full PyO3 integration
-- **Performance Optimization** - 47.9× faster than PyMuPDF
+- **Performance Optimization** - Ultra-fast processing (53ms average per PDF)
 - **Production Quality** - 100% success rate on comprehensive test suite
 
 ### ✅ Completed (v0.2.0) - PDF Spec Alignment & Intelligent Processing
@@ -643,22 +643,21 @@ pip install target/wheels/*.whl
 
 Real-world benchmark results (103 diverse PDFs including forms, financial documents, and technical papers):
 
-### Head-to-Head Comparison
+### Benchmark Results
 
-| Metric | This Library (Rust) | PyMuPDF4LLM (Python) | Advantage |
-|--------|---------------------|----------------------|-----------|
-| **Total Time** | **5.43s** | 259.94s | **47.9× faster** |
-| **Per PDF** | **53ms** | 2,524ms | **47.6× faster** |
-| **Success Rate** | 100% (103/103) | 100% (103/103) | Tie |
-| **Output Size** | 2.06 MB | 2.15 MB | **4% smaller** |
-| **Bold Detection** | 16,074 sections | 11,759 sections | **37% more accurate** |
+| Metric | Result |
+|--------|--------|
+| **Total Time (103 PDFs)** | **5.43s** |
+| **Average Per PDF** | **53ms** |
+| **Success Rate** | 100% (103/103) |
+| **Bold Sections Detected** | 16,074 |
 
 ### Scaling Projections
 
-- **100 PDFs:** 5.3s (vs 4.2 minutes) - Save 4 minutes
-- **1,000 PDFs:** 53s (vs 42 minutes) - Save 41 minutes
-- **10,000 PDFs:** 8.8 minutes (vs 7 hours) - Save 6.9 hours
-- **100,000 PDFs:** 1.5 hours (vs 70 hours) - Save 2.9 days
+- **100 PDFs:** ~5.3 seconds
+- **1,000 PDFs:** ~53 seconds
+- **10,000 PDFs:** ~8.8 minutes
+- **100,000 PDFs:** ~1.5 hours
 
 **Perfect for:**
 - High-throughput batch processing
@@ -679,11 +678,10 @@ Based on comprehensive analysis of diverse PDFs and recent validation testing (4
 | **Quality Score** | **8.5+/10** | Up from 3.4/10 (150% improvement) |
 | **Text Extraction** | **100%** | Perfect character extraction with proper encoding |
 | **Word Spacing** | **100%** | Unified adaptive threshold algorithm |
-| **Bold Detection** | **137%** | 16,074 sections vs 11,759 in PyMuPDF (+37%) |
-| **Form Field Extraction** | 13 files | Complete form structure (PyMuPDF: 0) |
+| **Bold Detection** | **16,074** | Bold sections detected in test suite |
+| **Form Field Extraction** | 13 files | Complete form structure extraction |
 | **Quality Rating** | **67% GOOD+** | 67% of files rated GOOD or EXCELLENT |
 | **Success Rate** | 100% | All 103 PDFs processed successfully |
-| **Output Size Efficiency** | 96% | 4% smaller than PyMuPDF |
 
 ### Specific Quality Improvements (v0.1.2+)
 
@@ -878,4 +876,4 @@ If you use this library in academic research, please cite:
 
 **Built with** 🦀 Rust + 🐍 Python
 
-**Status**: ✅ Production Ready | **v0.2.0** | 47.9× faster than PyMuPDF4LLM | 🧠 Intelligent OCR Detection | 📖 PDF Spec Aligned (1.7) | ✓ Quality Validated (49ms median, 100% success) | 🔄 Bidirectional Read/Write | ♾️ Forever 0.x (Continuous Evolution)
+**Status**: ✅ Production Ready | **v0.2.0** | 🚀 53ms per PDF | 🧠 Intelligent OCR Detection | 📖 PDF Spec Aligned (1.7) | ✓ Quality Validated (100% success) | 🔄 Bidirectional Read/Write | ♾️ Forever 0.x (Continuous Evolution)
