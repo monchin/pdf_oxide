@@ -10,6 +10,7 @@ use crate::converters::text_post_processor::TextPostProcessor;
 use crate::converters::whitespace::cleanup_markdown;
 use crate::converters::{BoldMarkerBehavior, ConversionOptions, ReadingOrderMode};
 use crate::error::Result;
+use crate::extractors::SpacingConfig;
 use crate::geometry::Rect;
 use crate::layout::clustering::{cluster_chars_into_words, cluster_words_into_lines};
 use crate::layout::document_analyzer::{AdaptiveLayoutParams, DocumentProperties};
@@ -417,10 +418,40 @@ impl MarkdownConverter {
                 };
 
                 // Collect text from this group first to check boundaries
+                // Use geometric spacing to detect gaps between blocks (Issue #5 fix)
+                let spacing_config = SpacingConfig::default();
                 let mut group_text = String::new();
                 for k in i..j {
                     let block_idx = line_indices[k];
-                    group_text.push_str(&blocks[block_idx].text);
+                    let current_block = &blocks[block_idx];
+
+                    // Check if we need to insert space before this block
+                    if !group_text.is_empty() && k > i {
+                        let prev_block = &blocks[line_indices[k - 1]];
+
+                        // Geometric gap detection (per pdfplumber approach)
+                        let gap = current_block.bbox.left() - prev_block.bbox.right();
+                        let char_size = prev_block.bbox.width.max(prev_block.bbox.height);
+                        let threshold = spacing_config.word_margin * char_size;
+
+                        // Check boundary whitespace
+                        let prev_ends_space = prev_block
+                            .text
+                            .chars()
+                            .last()
+                            .is_some_and(|c| c.is_whitespace());
+                        let curr_starts_space = current_block
+                            .text
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_whitespace());
+
+                        if gap > threshold && !prev_ends_space && !curr_starts_space {
+                            group_text.push(' ');
+                        }
+                    }
+
+                    group_text.push_str(&current_block.text);
                 }
 
                 // FIX #3: Format URLs and emails as markdown links
