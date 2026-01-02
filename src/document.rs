@@ -2161,6 +2161,81 @@ impl PdfDocument {
         extractor.extract_text_spans(&content_data)
     }
 
+    /// Apply intelligent text post-processing to extracted text spans.
+    ///
+    /// This method applies several text quality improvements:
+    /// - Ligature expansion (fi, fl, ffi, ffl → component characters)
+    /// - Hyphenation reconstruction (rejoins words split across lines)
+    /// - Whitespace normalization (removes excess spaces within words)
+    /// - Special character spacing (Greek letters, math symbols)
+    /// - OCR text cleanup (when font_name == "OCR" or from known OCR engines)
+    ///
+    /// # Arguments
+    ///
+    /// * `spans` - Vector of TextSpan extracted from pages
+    ///
+    /// # Returns
+    ///
+    /// Processed spans with improved text quality
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::PdfDocument;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("example.pdf")?;
+    ///
+    /// // Extract spans from page
+    /// let spans = doc.extract_spans(0)?;
+    ///
+    /// // Apply intelligent processing
+    /// let processed = doc.apply_intelligent_text_processing(spans);
+    ///
+    /// for span in &processed {
+    ///     println!("{}", span.text); // Ligatures expanded, hyphenation fixed
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn apply_intelligent_text_processing(&self, mut spans: Vec<TextSpan>) -> Vec<TextSpan> {
+        use crate::converters::text_post_processor::TextPostProcessor;
+        use crate::text::ligature_processor::get_ligature_components;
+
+        for span in &mut spans {
+            // Step 1: Detect if this is OCR text (from our OCR or known OCR engines)
+            let is_ocr = span.font_name == "OCR"
+                || span.font_name.to_lowercase().contains("tesseract")
+                || span.font_name.to_lowercase().contains("abbyy");
+
+            // Step 2: Expand ligatures in text
+            let mut expanded = String::with_capacity(span.text.len() * 2);
+            for ch in span.text.chars() {
+                if let Some(components) = get_ligature_components(ch) {
+                    expanded.push_str(components);
+                } else {
+                    expanded.push(ch);
+                }
+            }
+
+            // Step 3: Apply text post-processing pipeline
+            // (hyphenation, whitespace, special char spacing)
+            span.text = TextPostProcessor::process(&expanded);
+
+            // Step 4: Additional OCR-specific cleanup if needed
+            if is_ocr {
+                // OCR text often has extra artifacts - do additional cleanup
+                span.text = span
+                    .text
+                    .replace("ﬁ", "fi") // Sometimes OCR keeps ligatures
+                    .replace("ﬂ", "fl")
+                    .replace("ﬀ", "ff")
+                    .replace("  ", " "); // Double space cleanup
+            }
+        }
+
+        spans
+    }
+
     /// Get the raw content stream data for a page.
     ///
     /// This returns the decoded content stream bytes for the specified page.
