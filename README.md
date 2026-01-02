@@ -1,4 +1,4 @@
-# PDFoxide
+# PDFOxide
 
 **47.9× faster PDF text extraction and markdown conversion library built in Rust.**
 
