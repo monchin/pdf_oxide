@@ -1,10 +1,10 @@
 [package]
 name = "pdf_oxide"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Production-grade PDF parsing: spec-compliant text extraction, intelligent reading order, OCR support. 47.9× faster than PyMuPDF4LLM."
+description = "Production-grade PDF parsing: spec-compliant text extraction, intelligent reading order, OCR support. Ultra-fast Rust performance."
 repository = "https://github.com/yfedoseev/pdf_oxide"
 homepage = "https://github.com/yfedoseev/pdf_oxide"
 documentation = "https://docs.rs/pdf_oxide"

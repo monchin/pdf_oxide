@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "pdf_oxide"
-version = "0.2.2"
-description = "High-performance PDF parsing and conversion library with Rust performance"
+version = "0.2.3"
+description = "Production-grade PDF parsing: spec-compliant text extraction, intelligent reading order, OCR support. Ultra-fast Rust performance."
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT OR Apache-2.0"}
