@@ -3663,9 +3663,18 @@ impl TextExtractor {
                 );
             },
 
-            // Text object operators (BT/ET) - just markers, no state change needed
-            Operator::BeginText | Operator::EndText => {
-                // No action needed
+            // Text object operators (BT/ET)
+            // PDF Spec ISO 32000-1:2008, Section 9.4.1:
+            // "At the beginning of a text object, Tm and Tlm shall be
+            // initialized to the identity matrix."
+            Operator::BeginText => {
+                let state = self.state_stack.current_mut();
+                state.text_matrix = Matrix::identity();
+                state.text_line_matrix = Matrix::identity();
+            },
+            Operator::EndText => {
+                // Flush any pending text buffer at end of text object
+                self.flush_tj_span_buffer()?;
             },
 
             // Marked content operators - for tagged PDF structure
