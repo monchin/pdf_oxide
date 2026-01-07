@@ -65,7 +65,7 @@ pub fn decompress_ccitt(data: &[u8], params: &CcittParams) -> Result<Vec<u8>> {
                 invert_bilevel_pixels(&mut output);
             }
 
-            log::info!("CCITT decompression successful!");
+            log::trace!("CCITT decompression successful!");
             Ok(output)
         },
         Err(e) => {
@@ -76,7 +76,7 @@ pub fn decompress_ccitt(data: &[u8], params: &CcittParams) -> Result<Vec<u8>> {
                 data.len(),
                 e
             );
-            log::info!(
+            log::trace!(
                 "Check /DecodeParms: /EndOfLine={}, /EncodedByteAlign={}, /EndOfBlock={}",
                 params.end_of_line,
                 params.encoded_byte_align,
@@ -84,7 +84,7 @@ pub fn decompress_ccitt(data: &[u8], params: &CcittParams) -> Result<Vec<u8>> {
             );
             // Fallback: return white pixels
             let expected_bytes = height_opt.unwrap_or(1) as usize * (width as usize).div_ceil(8);
-            log::info!("Returning {} bytes of white pixels as fallback", expected_bytes);
+            log::trace!("Returning {} bytes of white pixels as fallback", expected_bytes);
             Ok(vec![0; expected_bytes])
         },
     }
@@ -151,7 +151,7 @@ fn decompress_with_fax(
 
         match try_decode_with_fax(&trimmed_data, width_usize, height, params) {
             Ok(output) if !output.is_empty() => {
-                log::info!("Successfully decompressed after stripping leading zeros!");
+                log::trace!("Successfully decompressed after stripping leading zeros!");
                 return Ok(output);
             },
             Ok(_) => {

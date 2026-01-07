@@ -1,10 +1,10 @@
 [package]
 name = "pdf_oxide"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Production-grade PDF parsing: spec-compliant text extraction, intelligent reading order, OCR support. 47.9× faster than PyMuPDF4LLM."
+description = "Production-grade PDF parsing: spec-compliant text extraction, intelligent reading order, OCR support. Ultra-fast Rust performance."
 repository = "https://github.com/yfedoseev/pdf_oxide"
 homepage = "https://github.com/yfedoseev/pdf_oxide"
 documentation = "https://docs.rs/pdf_oxide"
@@ -81,9 +81,6 @@ web-sys = { version = "0.3", optional = true, features = ["console"] }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
-
-# OCR (optional)
-tesseract-rs = { version = "0.1", optional = true }
 
 # Table detection - page rendering (optional)
 pdfium-render = { version = "0.8", optional = true }
@@ -172,8 +169,8 @@ harness = false
 # Cargo auto-discovers binaries in src/bin/
 
 [package.metadata.docs.rs]
-# Document with all major features enabled for comprehensive API reference
-all-features = true
+# Document with safe features only (tesseract-rs fails on docs.rs sandbox)
+features = ["python", "logging", "debug-span-merging"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 # Python packaging (Maturin)

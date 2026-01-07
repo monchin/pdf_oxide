@@ -2234,13 +2234,13 @@ impl TextExtractor {
         // Detect columns first
         let columns = self.detect_span_columns();
 
-        log::info!(
+        log::trace!(
             "Column detection: found {} columns from {} spans",
             columns.len(),
             self.spans.len()
         );
         for (i, (left, right)) in columns.iter().enumerate() {
-            log::info!(
+            log::trace!(
                 "  Column {}: X range [{:.1}, {:.1}] (width: {:.1})",
                 i,
                 left,
@@ -2251,11 +2251,11 @@ impl TextExtractor {
 
         if columns.len() <= 1 {
             // Single column or no columns detected: use simple sort
-            log::info!("Using simple Y-then-X sorting (single column)");
+            log::trace!("Using simple Y-then-X sorting (single column)");
             self.simple_sort_spans();
         } else {
             // Multi-column layout: sort within each column, then across columns
-            log::info!("Using column-aware sorting ({} columns)", columns.len());
+            log::trace!("Using column-aware sorting ({} columns)", columns.len());
             self.sort_spans_by_columns(&columns);
         }
     }
@@ -4648,7 +4648,7 @@ impl TextExtractor {
         // Calculate space width
         let space_width = (250.0 * font_size / 1000.0 + word_space) * horizontal_scaling / 100.0;
 
-        log::info!(
+        log::trace!(
             "Inserting space span from TJ offset (offset_semantic=true) at position ({:.2}, {:.2})",
             text_matrix.e,
             text_matrix.f
@@ -4692,7 +4692,7 @@ impl TextExtractor {
         };
         self.span_sequence_counter += 1;
 
-        log::info!("PUSH space span with offset_semantic={}", span.offset_semantic);
+        log::trace!("PUSH space span with offset_semantic={}", span.offset_semantic);
 
         self.spans.push(span);
 
@@ -4791,7 +4791,7 @@ impl TextExtractor {
                 };
                 self.span_sequence_counter += 1;
 
-                log::info!(
+                log::trace!(
                     "FLUSH_TJ_SPAN_BUFFER creating span: text='{}', offset_semantic={} (space-only spans marked as offset_semantic)",
                     if span.text.chars().all(|c| c.is_whitespace()) {
                         "<space-only>"
@@ -4838,7 +4838,7 @@ impl TextExtractor {
                     || result.contains('ρ')
                     || result.contains('r') && char_code == 0x72
                 {
-                    log::info!(
+                    log::trace!(
                         "Text extraction: font '{}', code 0x{:02X} → '{}' (bytes: {:?})",
                         font_name.as_ref().unwrap_or(&String::from("?")),
                         char_code,
