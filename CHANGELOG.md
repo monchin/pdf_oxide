@@ -14,7 +14,6 @@ All notable changes to PDFOxide are documented here.
 - `apply_intelligent_text_processing()` method for ligature expansion, hyphenation reconstruction, and OCR cleanup (#6)
 
 ### Changed
-- Renamed PDFoxide to PDFOxide
 - Removed unused tesseract-rs dependency
 
 ## [0.2.2] - 2025-12-15
