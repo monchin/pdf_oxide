@@ -2348,7 +2348,6 @@ impl PdfDocument {
         extractor.extract_text_spans(&content_data)
     }
 
-<<<<<<< HEAD
     /// Apply intelligent text post-processing to extracted text spans.
     ///
     /// This method applies several text quality improvements:
