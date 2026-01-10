@@ -40,12 +40,10 @@ fn test_outline_present() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("Expected destination to be first page".into()),
     }
 
-    // FIXME: Destination should actually be first page, but we currently don't
-    // handle indirect references for actions.
     match indirect {
         OutlineItem {
             title,
-            dest: None,
+            dest: Some(PageIndex(0)),
             children,
         } => {
             assert_eq!(title, "Outline with Indirectly Referenced Action");
