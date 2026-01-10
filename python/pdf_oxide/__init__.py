@@ -59,4 +59,4 @@ Dual-licensed under MIT OR Apache-2.0.
 from .pdf_oxide import PdfDocument, VERSION
 
 __all__ = ["PdfDocument", "VERSION"]
-__version__ = "0.2.0"
+__version__ = "0.2.6"
