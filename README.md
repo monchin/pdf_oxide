@@ -1,8 +1,20 @@
 # PDFOxide
 
-**High-performance PDF text extraction and markdown conversion library built in Rust.**
+**The Complete PDF Toolkit for Rust and Beyond**
 
-A production-ready, high-performance PDF parsing and conversion library with Python bindings. Processes 103 PDFs in 5.43 seconds with 100% success rate.
+Extract, create, and edit PDFs with one library. Rust core with bindings for every language.
+
+```
+                         ┌──────────────┐
+                         │  Rust Core   │
+                         └──────┬───────┘
+          ┌──────────┬─────────┼─────────┬──────────┐
+          ▼          ▼         ▼         ▼          ▼
+      ┌───────┐  ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐
+      │Python │  │ Node  │ │ WASM  │ │  Go   │ │  ...  │
+      │  ✅   │  │ Soon  │ │ Soon  │ │ Soon  │ │       │
+      └───────┘  └───────┘ └───────┘ └───────┘ └───────┘
+```
 
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![Documentation](https://docs.rs/pdf_oxide/badge.svg)](https://docs.rs/pdf_oxide)
@@ -12,84 +24,82 @@ A production-ready, high-performance PDF parsing and conversion library with Pyt
 
 [📖 Documentation](https://docs.rs/pdf_oxide) | [📊 Comparison](COMPARISON.md) | [🤝 Contributing](CONTRIBUTING.md) | [🔒 Security](SECURITY.md)
 
-## Why This Library?
+## Extract. Create. Edit.
 
-- ✨ **Ultra-fast** - Process 100 PDFs in 5.3 seconds (average 53ms per PDF)
-- 📋 **Form field extraction** - Complete form field structure and hierarchy
-- 🎯 **100% text accuracy** - Perfect word spacing and bold detection
-- 🚀 **Production ready** - 100% success rate on 103-file test suite
-- ⚡ **Low latency** - Average 53ms per PDF, perfect for web services
-- 🦀 **Pure Rust** - Memory-safe, no C dependencies, single binary
-
-## Features
-
-### Currently Available (v0.2.0+)
-- 📄 **Complete PDF Parsing** - PDF 1.0-1.7 with robust error handling and cycle detection
-- 📝 **Text Extraction** - 100% accurate with perfect word spacing and Unicode support
-- ✍️ **Bold Detection** - Accurate font weight detection (16,074 bold sections in test suite)
-- 📋 **Form Field Extraction** - Unique feature: extracts complete form field structure and hierarchy
-- 🔖 **Bookmarks/Outline** - Extract PDF document outline with hierarchical structure
-- 📌 **Annotations** - Extract PDF annotations including comments, highlights, and links
-- 🎯 **Layout Analysis** - DBSCAN clustering, XY-Cut, and structure tree-based reading order
-- 🧠 **Intelligent Text Processing** - Auto-detection of OCR vs native PDFs with per-block processing (NEW - v0.2.0)
-- 🔄 **Markdown Export** - Clean, properly formatted output with reading order preservation
-- 🖼️ **Image Extraction** - Extract embedded images with CCITT bilevel support
-- 📊 **Comprehensive Extraction** - Captures all text including OCR and technical diagrams
-- ⚡ **Ultra-Fast Processing** - 5.43 seconds for 103 PDFs (average 53ms per PDF)
-- 💾 **Efficient Output** - Compact markdown and HTML generation
-- 🎯 **PDF Spec Aligned** - Section 9, 14.7-14.8 compliance with proper reading order (NEW - v0.2.0)
-
-### Python Integration
-- 🐍 **Python Bindings** - Easy-to-use API via PyO3
-- 🦀 **Pure Rust Core** - Memory-safe, fast, no C dependencies
-- 📦 **Single Binary** - No complex dependencies or installations
-- 🧪 **Production Ready** - 100% success rate on comprehensive test suite
-- 📚 **Well Documented** - Complete API documentation and examples
-
-### v0.2.0 Enhancements (Current) ✨
-- 🧠 **Intelligent Text Processing** - Auto-detects OCR vs native PDFs per text block
-- 📖 **Reading Order Strategies** - XY-Cut spatial analysis, structure tree, column-aware
-- 🏗️ **Modern Pipeline Architecture** - Extensible OutputConverter trait, OrderedTextSpan metadata
-- 🎯 **PDF Spec Aligned** - PDF 1.7 spec compliance (Sections 9, 14.7-14.8)
-- 🧹 **Code Quality** - 72% warning reduction, no dead code, 946 tests passing
-- 🔄 **Backward Compatible** - Old API still works, deprecated with migration path
-- 🏞️ **CCITT Bilevel Images** - Group 3/4 decompression for scanned PDFs
-
-### Future Enhancements (v0.3.0+) - Bidirectional Features
-
-**v0.3.0 - PDF Creation Foundations**
-- 📝 **PDF Creation API** - Fluent PdfBuilder for programmatic PDF generation
-- 🔀 **Markdown → PDF** - Convert Markdown files to PDF documents
-- 🌐 **HTML → PDF** - Convert HTML content to PDF (basic CSS support)
-- 📄 **Text → PDF** - Generate PDFs from plain text with styling
-- 🎨 **PDF Templates** - Reusable document templates and code-based layouts
-- 🖼️ **Image Embedding** - JPEG/PNG/TIFF image support in generated PDFs
-
-**v0.4.0 - Structured Data**
-- 📊 **Tables** (Read ↔ Write) - Extract table structure ↔ Generate tables with borders/headers
-- 📋 **Forms** (Read ↔ Write) - Extract filled forms ↔ Create fillable interactive forms
-- 🗂️ **Document Hierarchy** (Read ↔ Write) - Parse outlines ↔ Generate bookmarks/TOC
-
-**v0.5.0 - Advanced Structure**
-- 🖼️ **Figures & Captions** (Read ↔ Write) - Extract with context ↔ Place with auto-numbering
-- 📚 **Citations** (Read ↔ Write) - Parse bibliography ↔ Generate citations
-- 📝 **Footnotes** (Read ↔ Write) - Extract footnotes ↔ Create footnotes automatically
-
-**v0.6.0 - Interactivity & Accessibility**
-- 💬 **Annotations** (Read ↔ Write) - Extract comments/highlights ↔ Add programmatically
-- ♿ **Tagged PDF** (Read ↔ Write) - Parse structure trees ↔ Create accessible PDFs (WCAG/Section 508)
-- 🔗 **Hyperlinks** (Read ↔ Write) - Extract URLs/links ↔ Create clickable links
-
-**v0.7.0+ - Specialized Features**
-- 🧮 **Math Formulas** (Read ↔ Write) - Extract equations ↔ LaTeX to PDF
-- 🌍 **Multi-Script** (Read ↔ Write) - Bidirectional text, vertical CJK, complex ligatures
-- 🔐 **Encryption** (Read ↔ Write) - Decrypt/permissions ↔ Encrypt/sign PDFs
-- 📦 **Embedded Files** (Read ↔ Write) - Extract attachments ↔ PDF portfolios
-- ✏️ **Vector Graphics** (Read ↔ Write) - Extract paths ↔ SVG to PDF
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        pdf_oxide                            │
+├───────────────────┬───────────────────┬─────────────────────┤
+│      EXTRACT      │      CREATE       │        EDIT         │
+├───────────────────┼───────────────────┼─────────────────────┤
+│ • Text & Layout   │ • Documents       │ • Annotations       │
+│ • Images          │ • Tables          │ • Form Fields       │
+│ • Forms           │ • Graphics        │ • Bookmarks         │
+│ • Annotations     │ • Templates       │ • Links             │
+│ • Bookmarks       │ • Images          │ • Content           │
+└───────────────────┴───────────────────┴─────────────────────┘
+```
 
 ## Quick Start
 
-### Rust - Basic Usage
+### Extract text from PDF
+```rust
+let mut doc = PdfDocument::open("input.pdf")?;
+let text = doc.extract_text(0)?;
+let markdown = doc.to_markdown(0, Default::default())?;
+```
+
+### Create a new PDF
+```rust
+let mut builder = DocumentBuilder::new();
+builder.add_page(612.0, 792.0)
+    .text("Hello, World!", 72.0, 720.0, 24.0);
+builder.save("output.pdf")?;
+```
+
+### Edit an existing PDF
+```rust
+let mut editor = DocumentEditor::open("input.pdf")?;
+editor.add_highlight(0, rect, Color::yellow())?;
+editor.add_text_field("name", rect)?;
+editor.save("output.pdf")?;
+```
+
+## Why pdf_oxide?
+
+- 📄 **One library** - Extract, create, and edit with unified API
+- ⚡ **Fast** - Rust performance, 53ms average per PDF
+- 🦀 **Pure Rust** - Memory-safe, no C dependencies
+- 🌍 **Multi-language** - Rust core, bindings for Python, Node, WASM, Go
+
+## Features
+
+### Extract
+- **Text** - 100% accurate with Unicode, reading order, layout analysis
+- **Images** - JPEG, PNG, TIFF with CCITT bilevel support
+- **Forms** - Complete form field structure and values
+- **Annotations** - Comments, highlights, stamps, all types
+- **Structure** - Bookmarks, outlines, document hierarchy
+- **Conversion** - Markdown, HTML, PlainText output
+
+### Create
+- **Documents** - Fluent API for programmatic generation
+- **Text** - Unicode with Base14 fonts, styling
+- **Tables** - Headers, borders, cell spans, styling
+- **Images** - JPEG/PNG embedding with positioning
+- **Graphics** - Colors, gradients, patterns, blend modes
+- **Templates** - Headers, footers, page numbers, watermarks
+
+### Edit
+- **Annotations** - Highlights, notes, stamps, ink, shapes
+- **Forms** - Text fields, checkboxes, radios, dropdowns
+- **Links** - Internal navigation, external URLs
+- **Bookmarks** - Create and modify TOC
+- **Round-trip** - Preserve existing content while adding new
+
+## Detailed Examples
+
+### Rust - Extraction
 
 ```rust
 use pdf_oxide::PdfDocument;
@@ -388,50 +398,57 @@ form_data = {field.name: field.value for field in fields}
 print(f"Form Data: {form_data}")
 ```
 
-## What's Coming in v0.3.0 - PDF Creation
+## PDF Creation Examples (v0.3.0)
 
-v0.3.0 will introduce **PDF generation from code** with support for multiple input formats:
+v0.3.0 introduces **PDF generation from code**:
+
+### Rust - Create PDF
 
 ```rust
-// Build PDFs programmatically
-use pdf_oxide::builder::{PdfBuilder, PdfPage, PdfText};
+use pdf_oxide::writer::DocumentBuilder;
 
-let pdf = PdfBuilder::new()
-    .add_page(PdfPage::new(8.5, 11.0))
-    .add_text("Document Title", 24.0, 72.0, 750.0)
-    .add_markdown("# Introduction\n\nThis is a **markdown** document.")
-    .add_text("Page 1 content here", 12.0, 72.0, 650.0)
-    .build()?
-    .save("output.pdf")?;
+// Create a new PDF
+let mut builder = DocumentBuilder::new();
+builder.add_page(612.0, 792.0)  // Letter size
+    .text("Hello, World!", 72.0, 720.0, 24.0)
+    .text("Created with pdf_oxide", 72.0, 680.0, 12.0);
 
-// Convert Markdown to PDF
-let markdown_content = std::fs::read_to_string("document.md")?;
-let pdf = PdfBuilder::from_markdown(&markdown_content)?
-    .save("document.pdf")?;
-
-// Convert HTML to PDF
-let html_content = "<h1>Title</h1><p>HTML content</p>";
-let pdf = PdfBuilder::from_html(html_content)?
-    .save("output.pdf")?;
-
-// Use templates for consistent styling
-let pdf = PdfBuilder::with_template("business_letter")
-    .add_content("This is the letter content")
-    .save("letter.pdf")?;
+// Save to file
+builder.save("output.pdf")?;
 ```
 
-**v0.3.0 Features:**
-- ✍️ `PdfBuilder` - Fluent API for PDF creation
-- 📝 `PdfPage` - Page management with custom sizing
-- 🔤 `PdfText` - Text with font and styling
-- 🏞️ `PdfImage` - Image embedding and positioning
-- 📖 Markdown → PDF conversion
-- 🌐 HTML → PDF conversion (with CSS support)
-- 📄 Text → PDF generation
-- 🎨 Template system for consistent designs
-- 🔤 Font embedding and selection
+### Rust - Add Annotations
 
-This positions **pdf_oxide** as a **bidirectional PDF toolkit** - extract from PDFs AND create them!
+```rust
+use pdf_oxide::writer::{DocumentBuilder, AnnotationBuilder};
+
+let mut builder = DocumentBuilder::new();
+let page = builder.add_page(612.0, 792.0);
+
+// Add text content
+page.text("Important document", 72.0, 720.0, 18.0);
+
+// Add highlight annotation
+page.highlight(72.0, 710.0, 200.0, 730.0, [1.0, 1.0, 0.0]);  // Yellow
+
+// Add sticky note
+page.sticky_note(300.0, 720.0, "Review this section");
+
+builder.save("annotated.pdf")?;
+```
+
+### Python - Create PDF
+
+```python
+from pdf_oxide import Pdf
+
+# Create new PDF
+pdf = Pdf.create()
+pdf.add_page().text("Hello from Python!", x=72, y=720, size=24)
+pdf.save("output.pdf")
+```
+
+**pdf_oxide** is now a **bidirectional PDF toolkit** - extract from PDFs AND create them!
 
 ## Installation
 
@@ -530,53 +547,48 @@ pdf_oxide/
 
 ## Development Roadmap
 
-### ✅ Completed (v0.1.0)
+### ✅ Completed (v0.1.0) - Core Extraction
 - **Core PDF Parsing** - Complete PDF 1.0-1.7 support with robust error handling
 - **Text Extraction** - 100% accurate extraction with perfect word spacing
 - **Layout Analysis** - DBSCAN clustering and XY-Cut algorithms
-- **Markdown Export** - Clean formatting with bold detection and form fields
 - **Image Extraction** - Extract embedded images with metadata
 - **Python Bindings** - Full PyO3 integration
-- **Performance Optimization** - Ultra-fast processing (53ms average per PDF)
-- **Production Quality** - 100% success rate on comprehensive test suite
 
-### ✅ Completed (v0.2.0) - PDF Spec Alignment & Intelligent Processing
-- **Intelligent Text Processing** - Auto-detection of OCR vs native PDFs per text block
-- **Reading Order Strategies** - XY-Cut spatial analysis, structure tree navigation
-- **Modern Pipeline Architecture** - Extensible OutputConverter trait, OrderedTextSpan metadata
-- **PDF Spec Compliance** - ISO 32000-1:2008 (PDF 1.7) Sections 9, 14.7-14.8
-- **Code Quality** - 72% warning reduction, no dead code, 946 tests passing
-- **API Migration** - Old APIs deprecated, modern TextPipeline recommended
-- **CCITT Bilevel Support** - Group 3/4 image decompression for scanned PDFs
+### ✅ Completed (v0.2.0) - Spec Alignment
+- **Intelligent Text Processing** - Auto-detection of OCR vs native PDFs
+- **Reading Order Strategies** - XY-Cut, structure tree, column-aware
+- **PDF Spec Compliance** - ISO 32000-1:2008 Sections 9, 14.7-14.8
+- **Image Embedding** - Base64 data URIs in HTML/Markdown output
+- **CJK Support** - Predefined CMaps for Chinese, Japanese, Korean
 
-### 🚧 In Development (v0.3.0) - PDF Creation Foundations
-- **PDF Builder API** - Fluent interface for programmatic PDF creation
-- **Markdown → PDF** - Convert Markdown files to PDF documents
-- **HTML → PDF** - Convert HTML with CSS to PDF
-- **Text → PDF** - Generate PDFs from plain text with styling
-- **PDF Templates** - Reusable document templates for consistent designs
-- **Image Embedding** - Support for embedded images in generated PDFs
-- **Bidirectional Toolkit** - Extract FROM PDFs AND create PDFs
+### ✅ Completed (v0.3.0) - PDF Creation & Editing ✨ NEW
+- **PDF Creation API** - Fluent `DocumentBuilder` for programmatic generation
+- **Editor API** - DOM-like editing with round-trip preservation
+- **Annotations** - Full read/write (highlights, notes, stamps, ink, shapes)
+- **Form Fields** - Create text fields, checkboxes, radio buttons, dropdowns
+- **Table Rendering** - Styled tables with headers, borders, cell spans
+- **Advanced Graphics** - Gradients, patterns, blend modes, transparency
+- **Page Templates** - Headers, footers, watermarks, page numbering
 
-### 🔮 Planned (v0.4.0-v0.6.0) - Bidirectional Features
-- **Tables** (Read ↔ Write) - v0.4.0
-- **Forms** (Read ↔ Write) - v0.4.0
-- **Figures & Citations** (Read ↔ Write) - v0.5.0
-- **Annotations & Tagged PDF** (Read ↔ Write) - v0.6.0
-- **Hyperlinks & Advanced Graphics** (Read ↔ Write) - v0.6.0
+### 🔮 Planned (v0.4.0+) - Language Bindings & Advanced Features
 
-### 🔮 Future (v0.7.0+) - Specialized Features
-- **Math Formulas** (Read ↔ Write) - Extract/generate equations
-- **Multi-Script Support** - Bidirectional text, vertical CJK
-- **Encryption & Signatures** - Password protection, digital signatures
-- **Embedded Files** - PDF portfolios and attachments
-- **Vector Graphics** - SVG to PDF, path extraction
-- **Advanced OCR** - Multi-language detection and processing
-- **Performance Optimizations** - Streaming, parallel processing, WASM
+**Language Bindings**
+- 🟢 **Python** - Available now (PyO3)
+- 🔜 **Node.js** - JavaScript/TypeScript via napi-rs
+- 🔜 **WASM** - Browser and edge runtime support
+- 🔜 **Go** - CGO bindings
+- 🔜 **C/C++** - FFI layer for native integration
+- 🔜 **Ruby, Java, .NET** - Community contributions welcome
 
-**Versioning Philosophy:** pdf_oxide follows **forever 0.x versioning** (0.1, 0.2, ... 0.100, 0.101, ...). We believe software evolves continuously rather than reaching a "1.0 finish line." Each version represents progress toward comprehensive PDF mastery, inspired by TeX's asymptotic approach (π = 3.1, 3.14, 3.141...).
+**Advanced Features**
+- **Font Embedding** - TrueType/OpenType subsetting
+- **Tagged PDF Creation** - Accessible PDFs (WCAG/Section 508)
+- **Table Extraction** - Structure-aware parsing
+- **Encryption** - Password protection, digital signatures
 
-**Current Status:** ✅ v0.2.0 Production Ready - Spec-aligned with intelligent processing | 🚧 v0.3.0 - PDF Creation in development
+**Versioning:** pdf_oxide follows **forever 0.x versioning**. Each version represents progress toward comprehensive PDF mastery.
+
+**Current Status:** ✅ v0.3.0 - Full PDF toolkit (extraction + creation + editing) | 🐍 Python bindings available
 
 ## Versioning Philosophy: Forever 0.x
 
@@ -847,13 +859,6 @@ cargo fmt
 cargo clippy -- -D warnings
 ```
 
-## Acknowledgments
-
-**Research Sources**:
-- PDF Reference 1.7 (ISO 32000-1:2008)
-- Academic papers on document layout analysis
-- Open-source implementations (lopdf, pdf-rs, pdfium-render)
-
 ## Support
 
 - **Documentation**: `docs/planning/`
@@ -876,4 +881,4 @@ If you use this library in academic research, please cite:
 
 **Built with** 🦀 Rust + 🐍 Python
 
-**Status**: ✅ Production Ready | **v0.2.0** | 🚀 53ms per PDF | 🧠 Intelligent OCR Detection | 📖 PDF Spec Aligned (1.7) | ✓ Quality Validated (100% success) | 🔄 Bidirectional Read/Write | ♾️ Forever 0.x (Continuous Evolution)
+**Status**: ✅ Production Ready | **v0.3.0** | 🚀 53ms per PDF | 📄 Extract + Create + Edit | 💬 Full Annotations | 📋 Interactive Forms | ♾️ Forever 0.x

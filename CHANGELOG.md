@@ -2,6 +2,65 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.0] - 2026-01-10
+
+### Added - PDF Creation
+- **PDF Creation API** - Fluent `DocumentBuilder` for programmatic PDF generation
+  - `Pdf::create()` / `DocumentBuilder::new()` entry points
+  - Page sizing (Letter, A4, custom dimensions)
+  - Text rendering with Base14 fonts and styling
+  - Image embedding (JPEG/PNG) with positioning
+- **Table Rendering** - `TableRenderer` for styled tables
+  - Headers, borders, cell spans, alternating row colors
+  - Column width control (fixed, percentage, auto)
+  - Cell alignment and padding
+- **Graphics API** - Advanced visual effects
+  - Colors (RGB, CMYK, grayscale)
+  - Linear and radial gradients
+  - Tiling patterns with presets
+  - Blend modes and transparency (ExtGState)
+- **Page Templates** - Reusable page elements
+  - Headers and footers with placeholders
+  - Page numbering formats
+  - Watermarks (text-based)
+
+### Added - PDF Editing
+- **Editor API** - DOM-like editing with round-trip preservation
+  - `DocumentEditor` for modifying existing PDFs
+  - Content addition without breaking existing structure
+  - Resource management for fonts and images
+- **Annotation Support** - Full read/write for all types
+  - Text markup: highlights, underlines, strikeouts, squiggly
+  - Notes: sticky notes, comments, popups
+  - Shapes: rectangles, circles, lines, polygons, polylines
+  - Drawing: ink/freehand annotations
+  - Stamps: standard and custom stamps
+  - Special: file attachments, redactions, carets
+- **Form Fields** - Interactive form creation
+  - Text fields (single/multiline, password, comb)
+  - Checkboxes with custom appearance
+  - Radio button groups
+  - Dropdown and list boxes
+  - Push buttons with actions
+- **Link Annotations** - Navigation support
+  - External URLs
+  - Internal page navigation
+  - Styled link appearance
+- **Outline Builder** - Bookmark/TOC creation
+  - Hierarchical structure
+  - Page destinations
+  - Styling (bold, italic, colors)
+
+### Added - Python Bindings
+- `Pdf` class for PDF creation
+- `Color`, `BlendMode`, `ExtGState` for graphics
+- `LinearGradient`, `RadialGradient` for gradients
+- `LineCap`, `LineJoin`, `PatternPresets` for styling
+
+### Changed
+- Description updated to "Production-grade PDF toolkit: spec-compliant extraction, creation, and editing"
+- Python module docstring updated for v0.3.0 features
+
 ## [0.2.6] - 2026-01-09
 
 ### Added
