@@ -66,9 +66,13 @@ impl HyphenationHandler {
     /// Check if a line ends with a continuation hyphen.
     ///
     /// A continuation hyphen is:
-    /// - A hard hyphen (U+002D) at the end of a line
-    /// - NOT a soft hyphen (U+00AD) which is an optional break marker
+    /// - A soft hyphen (U+00AD) - ALWAYS indicates word continuation
+    /// - A hard hyphen (U+002D) at the end of a line with alphabetic text before
     /// - NOT a hyphen followed by whitespace (e.g., "- " is not continuation)
+    ///
+    /// Per PDF Specification Section 5.3.4 and Unicode Standard:
+    /// - Soft hyphen (U+00AD) marks an optional line break point
+    /// - When a word is broken at a soft hyphen, it should be rejoined without the hyphen
     ///
     /// # Arguments
     ///
@@ -83,8 +87,19 @@ impl HyphenationHandler {
             return false;
         }
 
-        // Must end with hard hyphen (U+002D), not soft hyphen (U+00AD)
-        if !trimmed.ends_with('-') || trimmed.ends_with('\u{00AD}') {
+        // Check for soft hyphen (U+00AD) - ALWAYS a continuation marker
+        // Per PDF spec, soft hyphens indicate optional line breaks
+        if trimmed.ends_with('\u{00AD}') {
+            // Verify there's alphabetic content before the soft hyphen
+            let before_hyphen = &trimmed[..trimmed.len() - '\u{00AD}'.len_utf8()];
+            return before_hyphen
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphabetic());
+        }
+
+        // Check for hard hyphen (U+002D)
+        if !trimmed.ends_with('-') {
             return false;
         }
 
@@ -194,19 +209,34 @@ impl HyphenationHandler {
         }
 
         // Get the last word (before hyphen) of current line
-        let without_hyphen = &trimmed_current[..trimmed_current.len() - 1];
+        // Handle both soft hyphen (U+00AD, 2 bytes UTF-8) and hard hyphen (U+002D, 1 byte)
+        let without_hyphen = if trimmed_current.ends_with('\u{00AD}') {
+            &trimmed_current[..trimmed_current.len() - '\u{00AD}'.len_utf8()]
+        } else {
+            &trimmed_current[..trimmed_current.len() - 1]
+        };
         let last_word = without_hyphen
             .split_whitespace()
             .next_back()
             .unwrap_or(without_hyphen);
 
         // Check if this is a compound word that should keep hyphen
-        if self.preserve_compounds && Self::is_compound_word(last_word, next_word) {
+        // Note: Soft hyphens are NEVER compound word markers, only hard hyphens
+        let is_soft_hyphen = trimmed_current.ends_with('\u{00AD}');
+        if !is_soft_hyphen
+            && self.preserve_compounds
+            && Self::is_compound_word(last_word, next_word)
+        {
             return (current_line.to_string(), false);
         }
 
         // Join the words (remove hyphen, concatenate)
-        let prefix = &trimmed_current[..trimmed_current.len() - last_word.len() - 1];
+        let hyphen_len = if is_soft_hyphen {
+            '\u{00AD}'.len_utf8()
+        } else {
+            1
+        };
+        let prefix = &trimmed_current[..trimmed_current.len() - last_word.len() - hyphen_len];
         let joined_word = format!("{}{}", last_word, next_word);
 
         // Reconstruct the line with joined word
@@ -340,6 +370,21 @@ mod tests {
     }
 
     #[test]
+    fn test_is_continuation_hyphen_soft_hyphen() {
+        // Soft hyphen (U+00AD) should be treated as continuation
+        assert!(HyphenationHandler::is_continuation_hyphen("Govern\u{00AD}"));
+        assert!(HyphenationHandler::is_continuation_hyphen("busi\u{00AD}"));
+        assert!(HyphenationHandler::is_continuation_hyphen("word\u{00AD}  ")); // with trailing space
+    }
+
+    #[test]
+    fn test_is_continuation_hyphen_soft_hyphen_negative() {
+        // Soft hyphen without alphabetic char before should not be continuation
+        assert!(!HyphenationHandler::is_continuation_hyphen("123\u{00AD}"));
+        assert!(!HyphenationHandler::is_continuation_hyphen("\u{00AD}")); // just soft hyphen
+    }
+
+    #[test]
     fn test_is_compound_word() {
         assert!(HyphenationHandler::is_compound_word("self", "regulation"));
         assert!(HyphenationHandler::is_compound_word("non", "linear"));
@@ -360,6 +405,25 @@ mod tests {
         let (result, consumed) = handler.process_line_pair("self-", "regulation");
         assert!(!consumed); // Should NOT join compound words
         assert_eq!(result, "self-");
+    }
+
+    #[test]
+    fn test_process_line_pair_soft_hyphen() {
+        let handler = HyphenationHandler::new();
+        // Soft hyphen should ALWAYS join (never a compound word marker)
+        let (result, consumed) = handler.process_line_pair("busi\u{00AD}", "ness today");
+        assert!(consumed);
+        assert_eq!(result, "business today");
+    }
+
+    #[test]
+    fn test_process_line_pair_soft_hyphen_always_joins() {
+        let handler = HyphenationHandler::new();
+        // Even compound-looking words with soft hyphen should join
+        // because soft hyphen is ONLY used for optional line breaks
+        let (result, consumed) = handler.process_line_pair("self\u{00AD}", "regulation");
+        assert!(consumed);
+        assert_eq!(result, "selfregulation");
     }
 
     #[test]

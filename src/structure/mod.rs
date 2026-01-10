@@ -51,4 +51,4 @@ pub use spatial_table_detector::{
 };
 pub use table_extractor::{extract_table, ExtractedTable, TableCell, TableRow};
 pub use traversal::{extract_reading_order, traverse_structure_tree, OrderedContent};
-pub use types::{ParentTree, StructChild, StructElem, StructTreeRoot, StructType};
+pub use types::{MarkInfo, ParentTree, StructChild, StructElem, StructTreeRoot, StructType};

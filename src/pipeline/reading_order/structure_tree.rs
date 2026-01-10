@@ -44,7 +44,15 @@ impl ReadingOrderStrategy for StructureTreeStrategy {
         spans: Vec<TextSpan>,
         context: &ReadingOrderContext,
     ) -> Result<Vec<OrderedTextSpan>> {
-        // If no structure tree or MCID order, fall back to simple strategy
+        // If structure tree has suspect content, fall back to geometric ordering
+        // Per ISO 32000-1:2008 Section 14.7.1, suspects=true means the structure
+        // tree may contain errors or unreliable content.
+        if context.suspects {
+            log::debug!("Structure tree marked as suspect, falling back to geometric ordering");
+            return self.fallback.apply(spans, context);
+        }
+
+        // If no structure tree or MCID order, fall back to geometric strategy
         let mcid_order = match &context.mcid_order {
             Some(order) if !order.is_empty() => order,
             _ => return self.fallback.apply(spans, context),
@@ -224,5 +232,33 @@ mod tests {
                 .all(|&l| right_indices.iter().all(|&r| l < r)),
             "Left column should be processed before right column"
         );
+    }
+
+    #[test]
+    fn test_suspects_fallback_to_geometric() {
+        // When suspects=true, structure tree order should be ignored
+        // and geometric ordering should be used instead
+        let spans = vec![
+            make_span("StructOrder2", 0.0, 100.0, Some(1)), // MCID 1 = second
+            make_span("StructOrder1", 0.0, 50.0, Some(0)),  // MCID 0 = first
+        ];
+
+        let strategy = StructureTreeStrategy::new();
+
+        // With suspects=false, structure tree order is used
+        let context = ReadingOrderContext::new()
+            .with_mcid_order(vec![0, 1])
+            .with_suspects(false);
+        let ordered = strategy.apply(spans.clone(), &context).unwrap();
+        assert_eq!(ordered[0].span.text, "StructOrder1"); // MCID order
+        assert_eq!(ordered[1].span.text, "StructOrder2");
+
+        // With suspects=true, geometric order is used (top-to-bottom)
+        let context = ReadingOrderContext::new()
+            .with_mcid_order(vec![0, 1])
+            .with_suspects(true);
+        let ordered = strategy.apply(spans, &context).unwrap();
+        assert_eq!(ordered[0].span.text, "StructOrder2"); // Geometric: y=100 first (top)
+        assert_eq!(ordered[1].span.text, "StructOrder1"); // y=50 second (bottom)
     }
 }

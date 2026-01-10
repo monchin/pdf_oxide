@@ -1579,6 +1579,37 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
     }
 }
 
+/// Artifact type classification per PDF Spec Section 14.8.2.2
+///
+/// Artifacts are content that is not part of the document's logical structure,
+/// such as headers, footers, page numbers, and decorative elements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactType {
+    /// Pagination artifacts (headers, footers, page numbers)
+    Pagination(PaginationSubtype),
+    /// Layout artifacts (ruled lines, backgrounds, borders)
+    Layout,
+    /// Page artifacts (full-page backgrounds, watermarks)
+    Page,
+    /// Background graphics or decorations
+    Background,
+}
+
+/// Pagination artifact subtypes per PDF Spec Section 14.8.2.2.1
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaginationSubtype {
+    /// Page header content
+    Header,
+    /// Page footer content
+    Footer,
+    /// Watermark overlay
+    Watermark,
+    /// Page number
+    PageNumber,
+    /// Other pagination element
+    Other,
+}
+
 /// Context for marked content sequences (per PDF Spec Section 14.6)
 ///
 /// Tracks nested marked content tags to implement artifact filtering.
@@ -1588,10 +1619,16 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
 struct MarkedContentContext {
     tag: String,
     is_artifact: bool,
+    /// Artifact type classification for filtered content (PDF Spec Section 14.8.2.2)
+    artifact_type: Option<ArtifactType>,
     /// ActualText for marked content (PDF Spec Section 14.9.4)
     /// Used to replace extracted text with correct representation
     /// e.g., ligatures (fi, fl, ffi, ffl), decorated glyphs
     actual_text: Option<String>,
+    /// Expansion text for abbreviations (PDF Spec Section 14.9.5)
+    /// The /E entry provides the expansion of an abbreviation or acronym.
+    /// e.g., "PDF" might expand to "Portable Document Format"
+    expansion: Option<String>,
 }
 
 /// Text extractor that processes content streams.
@@ -1934,6 +1971,62 @@ impl TextExtractor {
     fn update_artifact_state(&mut self) {
         // True if ANY ancestor in the stack is an artifact
         self.inside_artifact = self.marked_content_stack.iter().any(|ctx| ctx.is_artifact);
+    }
+
+    /// Parse artifact type and subtype from artifact properties dictionary.
+    ///
+    /// Per PDF Spec Section 14.8.2.2, artifacts have optional /Type and /Subtype entries:
+    /// - /Type: Pagination, Layout, Page, or Background
+    /// - /Subtype: For Pagination artifacts: Header, Footer, Watermark, etc.
+    ///
+    /// # Arguments
+    ///
+    /// * `props_dict` - The properties dictionary from BDC operator
+    ///
+    /// # Returns
+    ///
+    /// The classified artifact type, or None if no type is specified
+    fn parse_artifact_type(props_dict: &HashMap<String, Object>) -> Option<ArtifactType> {
+        // Extract /Type entry (PDF Spec Section 14.8.2.2)
+        let artifact_type_name = props_dict
+            .get("Type")
+            .and_then(|obj| obj.as_name())
+            .map(|s| s.to_lowercase());
+
+        // Extract /Subtype entry for Pagination artifacts
+        let subtype_name = props_dict
+            .get("Subtype")
+            .and_then(|obj| obj.as_name())
+            .map(|s| s.to_lowercase());
+
+        match artifact_type_name.as_deref() {
+            Some("pagination") => {
+                let subtype = match subtype_name.as_deref() {
+                    Some("header") => PaginationSubtype::Header,
+                    Some("footer") => PaginationSubtype::Footer,
+                    Some("watermark") => PaginationSubtype::Watermark,
+                    Some("pagenumber") | Some("page") => PaginationSubtype::PageNumber,
+                    _ => PaginationSubtype::Other,
+                };
+                Some(ArtifactType::Pagination(subtype))
+            },
+            Some("layout") => Some(ArtifactType::Layout),
+            Some("page") => Some(ArtifactType::Page),
+            Some("background") => Some(ArtifactType::Background),
+            None => {
+                // No /Type specified - check if /Subtype alone indicates pagination
+                // Some PDFs use /Subtype without /Type
+                match subtype_name.as_deref() {
+                    Some("header") => Some(ArtifactType::Pagination(PaginationSubtype::Header)),
+                    Some("footer") => Some(ArtifactType::Pagination(PaginationSubtype::Footer)),
+                    Some("watermark") => {
+                        Some(ArtifactType::Pagination(PaginationSubtype::Watermark))
+                    },
+                    _ => None,
+                }
+            },
+            _ => None, // Unknown type
+        }
     }
 
     /// Get current ActualText from marked content stack (PDF Spec Section 14.9.4).
@@ -3697,19 +3790,25 @@ impl TextExtractor {
                 self.marked_content_stack.push(MarkedContentContext {
                     tag: tag.clone(),
                     is_artifact,
-                    actual_text: None, // BMC doesn't have ActualText
+                    artifact_type: None, // BMC doesn't have artifact type properties
+                    actual_text: None,   // BMC doesn't have ActualText
+                    expansion: None,     // BMC doesn't have expansion
                 });
                 self.update_artifact_state();
 
                 if is_artifact {
-                    log::debug!("Entered /Artifact marked content");
+                    log::debug!("Entered /Artifact marked content (BMC, no subtype)");
                 }
             },
 
             Operator::BeginMarkedContentDict { tag, properties } => {
-                // BDC can have properties including MCID, artifact indicators, and ActualText
+                // BDC can have properties including MCID, artifact indicators, ActualText, and expansion
                 // PDF Spec Section 14.9.4: ActualText provides replacement text for content
+                // PDF Spec Section 14.9.5: /E provides expansion for abbreviations
                 let mut actual_text = None;
+                let mut artifact_type = None;
+                let mut expansion = None;
+
                 if let Some(props_dict) = properties.as_dict() {
                     // Extract MCID if present
                     if let Some(mcid_obj) = props_dict.get("MCID") {
@@ -3728,6 +3827,20 @@ impl TextExtractor {
                             log::debug!("Marked content has ActualText: {:?}", actual_text);
                         }
                     }
+
+                    // Extract /E expansion for abbreviations (PDF Spec Section 14.9.5)
+                    // Used to provide full form of abbreviations/acronyms for accessibility
+                    if let Some(expansion_obj) = props_dict.get("E") {
+                        if let Some(text_bytes) = expansion_obj.as_string() {
+                            expansion = Some(String::from_utf8_lossy(text_bytes).to_string());
+                            log::debug!("Marked content has expansion /E: {:?}", expansion);
+                        }
+                    }
+
+                    // Parse artifact type and subtype (PDF Spec Section 14.8.2.2)
+                    if tag == "Artifact" {
+                        artifact_type = Self::parse_artifact_type(props_dict);
+                    }
                 }
 
                 // Check if this is an artifact (per PDF Spec Section 14.6)
@@ -3735,12 +3848,18 @@ impl TextExtractor {
                 self.marked_content_stack.push(MarkedContentContext {
                     tag: tag.clone(),
                     is_artifact,
+                    artifact_type: artifact_type.clone(),
                     actual_text,
+                    expansion,
                 });
                 self.update_artifact_state();
 
                 if is_artifact {
-                    log::debug!("Entered /Artifact marked content");
+                    if let Some(ref atype) = artifact_type {
+                        log::debug!("Entered /Artifact marked content: {:?}", atype);
+                    } else {
+                        log::debug!("Entered /Artifact marked content (no type specified)");
+                    }
                 }
             },
 
@@ -5074,6 +5193,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         }
     }
 
@@ -5604,6 +5725,192 @@ fn test_adaptive_constructor_enables_adaptive() {
         adaptive.adaptive_config.is_some(),
         "Adaptive constructor should set adaptive_config"
     );
+}
+
+// ============================================================================
+// Artifact Type Parsing Tests (PDF Spec Section 14.8.2.2)
+// ============================================================================
+
+#[test]
+fn test_parse_artifact_type_pagination_header() {
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Pagination".to_string()));
+    props.insert("Subtype".to_string(), Object::Name("Header".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Pagination(PaginationSubtype::Header)));
+}
+
+#[test]
+fn test_parse_artifact_type_pagination_footer() {
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Pagination".to_string()));
+    props.insert("Subtype".to_string(), Object::Name("Footer".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Pagination(PaginationSubtype::Footer)));
+}
+
+#[test]
+fn test_parse_artifact_type_pagination_watermark() {
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Pagination".to_string()));
+    props.insert("Subtype".to_string(), Object::Name("Watermark".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Pagination(PaginationSubtype::Watermark)));
+}
+
+#[test]
+fn test_parse_artifact_type_layout() {
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Layout".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Layout));
+}
+
+#[test]
+fn test_parse_artifact_type_background() {
+    let mut props = HashMap::new();
+    props.insert("Type".to_string(), Object::Name("Background".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Background));
+}
+
+#[test]
+fn test_parse_artifact_type_subtype_only() {
+    // Some PDFs use /Subtype without /Type
+    let mut props = HashMap::new();
+    props.insert("Subtype".to_string(), Object::Name("Header".to_string()));
+
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, Some(ArtifactType::Pagination(PaginationSubtype::Header)));
+}
+
+#[test]
+fn test_parse_artifact_type_empty() {
+    let props = HashMap::new();
+    let result = TextExtractor::parse_artifact_type(&props);
+    assert_eq!(result, None);
+}
+
+// ============================================================================
+// ActualText Verification Tests (PDF Spec Section 14.9.4)
+// ============================================================================
+//
+// ActualText provides replacement text for content that cannot be accurately
+// represented by the content stream (ligatures, decorated glyphs, formulas).
+// Per ISO 32000-1:2008 Section 14.9.4, ActualText takes precedence over
+// character extraction.
+
+#[test]
+fn test_marked_content_context_with_actual_text() {
+    // Verify MarkedContentContext correctly stores ActualText
+    let ctx = MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: Some("fi".to_string()), // Ligature expansion
+        expansion: None,
+    };
+
+    assert_eq!(ctx.actual_text, Some("fi".to_string()));
+    assert!(!ctx.is_artifact);
+}
+
+#[test]
+fn test_marked_content_context_with_expansion() {
+    // Verify MarkedContentContext correctly stores /E expansion
+    let ctx = MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: None,
+        expansion: Some("Portable Document Format".to_string()),
+    };
+
+    assert_eq!(ctx.expansion, Some("Portable Document Format".to_string()));
+}
+
+#[test]
+fn test_marked_content_context_artifact_with_actual_text() {
+    // Verify artifacts can have ActualText (though typically they don't)
+    let ctx = MarkedContentContext {
+        tag: "Artifact".to_string(),
+        is_artifact: true,
+        artifact_type: Some(ArtifactType::Pagination(PaginationSubtype::Header)),
+        actual_text: Some("Header text".to_string()),
+        expansion: None,
+    };
+
+    assert!(ctx.is_artifact);
+    assert_eq!(ctx.actual_text, Some("Header text".to_string()));
+}
+
+#[test]
+fn test_get_current_actual_text_finds_first() {
+    // Verify get_current_actual_text returns first ActualText in stack
+    let mut extractor = TextExtractor::new();
+
+    // Push contexts with ActualText
+    extractor.marked_content_stack.push(MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: Some("outer text".to_string()),
+        expansion: None,
+    });
+
+    extractor.marked_content_stack.push(MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: Some("inner text".to_string()),
+        expansion: None,
+    });
+
+    // Should return innermost (most recent) ActualText
+    let result = extractor.get_current_actual_text();
+    assert_eq!(result, Some("inner text".to_string()));
+}
+
+#[test]
+fn test_get_current_actual_text_skips_none() {
+    // Verify get_current_actual_text skips contexts without ActualText
+    let mut extractor = TextExtractor::new();
+
+    // Push context with ActualText
+    extractor.marked_content_stack.push(MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: Some("replacement text".to_string()),
+        expansion: None,
+    });
+
+    // Push context without ActualText
+    extractor.marked_content_stack.push(MarkedContentContext {
+        tag: "Span".to_string(),
+        is_artifact: false,
+        artifact_type: None,
+        actual_text: None,
+        expansion: None,
+    });
+
+    // Should find the ActualText from outer context
+    let result = extractor.get_current_actual_text();
+    assert_eq!(result, Some("replacement text".to_string()));
+}
+
+#[test]
+fn test_get_current_actual_text_returns_none_when_empty() {
+    // Verify get_current_actual_text returns None when no ActualText
+    let extractor = TextExtractor::new();
+
+    let result = extractor.get_current_actual_text();
+    assert_eq!(result, None);
 }
 
 // ============================================================================

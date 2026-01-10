@@ -277,6 +277,7 @@ mod tests {
             page: Some(0),
             attributes: HashMap::new(),
             alt_text: None,
+            expansion: None,
         };
 
         let mut mcids = Vec::new();

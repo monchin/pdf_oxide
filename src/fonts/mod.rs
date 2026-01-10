@@ -8,6 +8,8 @@
 
 mod adobe_glyph_list;
 pub mod character_mapper;
+/// CID to Unicode mappings for predefined Adobe CJK character collections.
+pub mod cid_mappings;
 pub mod cmap;
 pub mod encoding_normalizer;
 pub mod font_dict; // Private module - only used internally by font_dict

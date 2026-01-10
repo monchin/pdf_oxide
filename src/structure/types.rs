@@ -56,6 +56,7 @@ impl Default for StructTreeRoot {
 /// - `/Pg` - Page containing this element (optional)
 /// - `/A` - Attributes (optional)
 /// - `/Alt` - Alternate description (optional, per Section 14.9.3)
+/// - `/E` - Expansion for abbreviations (optional, per Section 14.9.5)
 #[derive(Debug, Clone)]
 pub struct StructElem {
     /// Structure type (e.g., "Document", "P", "H1", "Sect")
@@ -74,6 +75,11 @@ pub struct StructElem {
     /// Per PDF spec Section 14.9.3, this provides a human-readable
     /// description of the element's content (e.g., formula LaTeX or description)
     pub alt_text: Option<String>,
+
+    /// Expansion for abbreviations (optional)
+    /// Per PDF spec Section 14.9.5, the /E entry provides the expanded form
+    /// of an abbreviation or acronym (e.g., "PDF" -> "Portable Document Format")
+    pub expansion: Option<String>,
 }
 
 impl StructElem {
@@ -85,6 +91,7 @@ impl StructElem {
             page: None,
             attributes: HashMap::new(),
             alt_text: None,
+            expansion: None,
         }
     }
 
@@ -191,6 +198,11 @@ pub enum StructType {
     Link,
     /// Annotation
     Annot,
+    /// Word break - explicit word boundary in structure tree (PDF 1.5+)
+    ///
+    /// Per PDF spec Section 14.8.4.4, WB elements mark word boundaries
+    /// in languages that do not use spaces between words (e.g., CJK).
+    WB,
 
     // Illustration structure types
     /// Figure
@@ -241,6 +253,7 @@ impl StructType {
             "Code" => Self::Code,
             "Link" => Self::Link,
             "Annot" => Self::Annot,
+            "WB" => Self::WB,
             "Figure" => Self::Figure,
             "Formula" => Self::Formula,
             "Form" => Self::Form,
@@ -292,6 +305,15 @@ impl StructType {
     /// Check if this is a list type (L, LI, Lbl, LBody)
     pub fn is_list(&self) -> bool {
         matches!(self, Self::L | Self::LI | Self::Lbl | Self::LBody)
+    }
+
+    /// Check if this is a word break element (WB)
+    ///
+    /// Word break elements mark explicit word boundaries in languages
+    /// that don't use spaces (e.g., CJK). When encountered during text
+    /// extraction, a space should be inserted.
+    pub fn is_word_break(&self) -> bool {
+        matches!(self, Self::WB)
     }
 
     /// Get markdown prefix for this structure type
@@ -348,6 +370,48 @@ pub enum ParentTreeEntry {
     StructElem(Box<StructElem>),
     /// Object reference (indirect)
     ObjectRef(u32, u16), // (object_num, generation)
+}
+
+/// MarkInfo dictionary from the document catalog.
+///
+/// Per ISO 32000-1:2008 Section 14.7.1, the MarkInfo dictionary contains:
+/// - `/Marked` - Whether the document conforms to Tagged PDF conventions
+/// - `/Suspects` - Whether the document contains suspect content that
+///   may not render properly or has questionable structure
+/// - `/UserProperties` - Whether the document contains user properties
+///
+/// When `suspects` is true, reading order strategies should consider
+/// falling back to geometric ordering instead of relying on the
+/// potentially unreliable structure tree.
+#[derive(Debug, Clone, Default)]
+pub struct MarkInfo {
+    /// Whether the document is marked (conforms to Tagged PDF conventions)
+    pub marked: bool,
+
+    /// Whether the document contains suspect content
+    ///
+    /// Per PDF spec Section 14.9.2, when this is true, the structure tree
+    /// may contain errors or unreliable content. Reading order strategies
+    /// should consider falling back to geometric ordering.
+    pub suspects: bool,
+
+    /// Whether the document uses user-defined properties
+    pub user_properties: bool,
+}
+
+impl MarkInfo {
+    /// Create a new MarkInfo with default values (all false)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if the structure tree should be considered reliable
+    ///
+    /// Returns true if the document is marked as Tagged PDF AND
+    /// does not have suspected unreliable content.
+    pub fn is_structure_reliable(&self) -> bool {
+        self.marked && !self.suspects
+    }
 }
 
 #[cfg(test)]

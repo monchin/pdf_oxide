@@ -189,6 +189,8 @@ fn create_font_with_encoding(encoding: Encoding) -> FontInfo {
         cid_to_gid_map: None,
         cid_system_info: None,
         cid_font_type: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
         widths: None,
         first_char: None,
         last_char: None,

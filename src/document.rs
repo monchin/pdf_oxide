@@ -632,6 +632,77 @@ impl PdfDocument {
         result
     }
 
+    /// Resolve references within an object recursively.
+    ///
+    /// This utility method resolves indirect references within an object,
+    /// handling nested dictionaries and arrays up to a specified depth.
+    /// Useful for processing complex PDF structures where properties
+    /// may be stored as indirect references.
+    ///
+    /// # Arguments
+    ///
+    /// * `obj` - The object to resolve references within
+    /// * `max_depth` - Maximum recursion depth to prevent infinite loops
+    ///
+    /// # Returns
+    ///
+    /// The object with all references resolved up to max_depth levels.
+    /// If a reference cannot be resolved, it is left as-is.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # let mut doc = PdfDocument::open("sample.pdf")?;
+    /// # let obj = doc.catalog()?;
+    /// // Resolve all references in a dictionary up to 3 levels deep
+    /// let resolved = doc.resolve_references(&obj, 3)?;
+    /// # Ok::<(), pdf_oxide::error::Error>(())
+    /// ```
+    pub fn resolve_references(&mut self, obj: &Object, max_depth: usize) -> Result<Object> {
+        if max_depth == 0 {
+            return Ok(obj.clone());
+        }
+
+        match obj {
+            Object::Reference(obj_ref) => {
+                // Resolve the reference
+                match self.load_object(*obj_ref) {
+                    Ok(resolved) => {
+                        // Recursively resolve within the resolved object
+                        self.resolve_references(&resolved, max_depth - 1)
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to resolve reference {:?}: {}", obj_ref, e);
+                        Ok(obj.clone()) // Return the unresolved reference
+                    },
+                }
+            },
+
+            Object::Dictionary(dict) => {
+                // Resolve references within each value
+                let mut resolved_dict = std::collections::HashMap::new();
+                for (key, value) in dict.iter() {
+                    let resolved_value = self.resolve_references(value, max_depth - 1)?;
+                    resolved_dict.insert(key.clone(), resolved_value);
+                }
+                Ok(Object::Dictionary(resolved_dict))
+            },
+
+            Object::Array(arr) => {
+                // Resolve references within each element
+                let resolved_arr: Result<Vec<Object>> = arr
+                    .iter()
+                    .map(|item| self.resolve_references(item, max_depth - 1))
+                    .collect();
+                Ok(Object::Array(resolved_arr?))
+            },
+
+            // For all other types, just return a clone
+            _ => Ok(obj.clone()),
+        }
+    }
+
     /// Load an uncompressed object (Type 1 xref entry).
     fn load_uncompressed_object(&mut self, obj_ref: ObjectRef, offset: u64) -> Result<Object> {
         self.load_uncompressed_object_impl(obj_ref, offset, false)
@@ -1091,6 +1162,83 @@ impl PdfDocument {
     /// ```
     pub fn structure_tree(&mut self) -> Result<Option<crate::structure::StructTreeRoot>> {
         crate::structure::parse_structure_tree(self)
+    }
+
+    /// Get the MarkInfo dictionary from the document catalog.
+    ///
+    /// The MarkInfo dictionary indicates whether the document conforms to
+    /// Tagged PDF conventions and whether the structure tree might contain
+    /// suspect (unreliable) content.
+    ///
+    /// Per ISO 32000-1:2008 Section 14.7.1, the MarkInfo dictionary contains:
+    /// - `/Marked` - Whether the document conforms to Tagged PDF conventions
+    /// - `/Suspects` - Whether the document contains suspect content
+    /// - `/UserProperties` - Whether the document uses user properties
+    ///
+    /// # Returns
+    ///
+    /// Returns `MarkInfo` with the parsed values, or default values if
+    /// the MarkInfo dictionary is not present.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # let mut doc = PdfDocument::open("sample.pdf")?;
+    /// let mark_info = doc.mark_info()?;
+    /// if mark_info.is_structure_reliable() {
+    ///     println!("Structure tree can be trusted for reading order");
+    /// } else if mark_info.suspects {
+    ///     println!("Structure tree may contain unreliable content");
+    /// }
+    /// # Ok::<(), pdf_oxide::error::Error>(())
+    /// ```
+    pub fn mark_info(&mut self) -> Result<crate::structure::MarkInfo> {
+        let catalog = self.catalog()?;
+        let catalog_dict = match catalog.as_dict() {
+            Some(d) => d,
+            None => return Ok(crate::structure::MarkInfo::default()),
+        };
+
+        // Get /MarkInfo dictionary
+        let mark_info_obj = match catalog_dict.get("MarkInfo") {
+            Some(obj) => obj,
+            None => return Ok(crate::structure::MarkInfo::default()),
+        };
+
+        // Resolve reference if needed
+        let mark_info_obj = if let Some(r) = mark_info_obj.as_reference() {
+            self.load_object(r)?
+        } else {
+            mark_info_obj.clone()
+        };
+
+        let mark_info_dict = match mark_info_obj.as_dict() {
+            Some(d) => d,
+            None => return Ok(crate::structure::MarkInfo::default()),
+        };
+
+        // Parse boolean fields with defaults of false
+        let marked = mark_info_dict
+            .get("Marked")
+            .and_then(|o: &crate::object::Object| o.as_bool())
+            .unwrap_or(false);
+
+        let suspects = mark_info_dict
+            .get("Suspects")
+            .and_then(|o: &crate::object::Object| o.as_bool())
+            .unwrap_or(false);
+
+        let user_properties = mark_info_dict
+            .get("UserProperties")
+            .and_then(|o: &crate::object::Object| o.as_bool())
+            .unwrap_or(false);
+
+        Ok(crate::structure::MarkInfo {
+            marked,
+            suspects,
+            user_properties,
+        })
     }
 
     /// Get the number of pages in the document.
@@ -1954,7 +2102,20 @@ impl PdfDocument {
         let mut prev_span: Option<&TextSpan> = None;
 
         for content in &ordered_content {
-            if let Some(spans) = mcid_map.get(&content.mcid) {
+            // Handle word break markers by inserting a space
+            if content.is_word_break {
+                if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+                    text.push(' ');
+                }
+                continue;
+            }
+
+            // For regular content with MCID
+            let Some(mcid) = content.mcid else {
+                continue; // Skip entries without MCID (shouldn't happen except for WB)
+            };
+
+            if let Some(spans) = mcid_map.get(&mcid) {
                 // Process all spans for this MCID
                 for span in spans {
                     // Check if we need space or line break
@@ -1980,7 +2141,7 @@ impl PdfDocument {
             } else {
                 log::warn!(
                     "Structure tree references MCID {} but no spans found with that MCID",
-                    content.mcid
+                    mcid
                 );
             }
         }

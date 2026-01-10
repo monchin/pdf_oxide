@@ -69,6 +69,13 @@ pub struct ReadingOrderContext {
 
     /// MCID to reading order mapping (if structure tree available).
     pub mcid_order: Option<Vec<u32>>,
+
+    /// Whether the structure tree contains suspect (unreliable) content.
+    ///
+    /// Per ISO 32000-1:2008 Section 14.7.1, when this is true, the structure
+    /// tree may be unreliable and reading order strategies should consider
+    /// falling back to geometric ordering.
+    pub suspects: bool,
 }
 
 impl ReadingOrderContext {
@@ -93,6 +100,15 @@ impl ReadingOrderContext {
     pub fn with_mcid_order(mut self, mcid_order: Vec<u32>) -> Self {
         self.has_structure_tree = true;
         self.mcid_order = Some(mcid_order);
+        self
+    }
+
+    /// Set whether the structure tree contains suspect content.
+    ///
+    /// When true, the StructureTreeStrategy will fall back to geometric
+    /// ordering instead of trusting the potentially unreliable structure tree.
+    pub fn with_suspects(mut self, suspects: bool) -> Self {
+        self.suspects = suspects;
         self
     }
 }

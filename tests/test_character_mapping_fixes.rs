@@ -35,6 +35,8 @@ fn test_type0_identity_encoding_without_tounicode_returns_none() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // Character code 0x37 (decimal 55) would incorrectly map to '7' under old code
@@ -73,6 +75,8 @@ fn test_simple_font_identity_encoding_works_for_valid_codes() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // For simple fonts, Identity encoding is valid for Unicode-compatible codes
@@ -122,6 +126,8 @@ fn test_type0_missing_tounicode_is_an_error() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // All lookups should return U+FFFD for Type0 without ToUnicode
@@ -159,6 +165,8 @@ fn test_tounicode_with_valid_mappings_works() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // ToUnicode mappings should be used (highest priority)
@@ -192,6 +200,8 @@ fn test_multi_byte_character_codes_are_processed() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // Multi-byte codes (> 0xFF) should be handled without panic
@@ -235,6 +245,8 @@ fn test_extraction_priority_chain() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // ToUnicode should override standard encoding
@@ -272,6 +284,8 @@ fn test_symbolic_font_encoding() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // Symbol fonts should use special encoding
@@ -308,6 +322,8 @@ fn test_pdf_without_tounicode_doesnt_scramble_text() {
         cid_system_info: None,
         cid_font_type: None,
         truetype_cmap: None,
+        cid_widths: None,
+        cid_default_width: 1000.0,
     };
 
     // The key assertion: we should get U+FFFD, NOT random scrambled characters

@@ -66,6 +66,13 @@ pub struct FontInfo {
     /// Default width for characters not in widths array (in 1000ths of em)
     /// Typical values: 500-600 for proportional fonts, 600 for monospace
     pub default_width: f32,
+    /// CID to width mapping for Type0 (CIDFont) fonts
+    /// Per PDF Spec ISO 32000-1:2008, Section 9.7.4.3
+    /// Widths in 1000ths of em. Uses HashMap for sparse CID distributions.
+    pub cid_widths: Option<HashMap<u16, f32>>,
+    /// Default width for CIDs not in cid_widths (Type0 fonts only)
+    /// Per PDF Spec: default is 1000 if /DW not specified
+    pub cid_default_width: f32,
 }
 
 /// Font encoding types.
@@ -500,7 +507,8 @@ impl FontInfo {
 
             (widths_opt, first, last)
         } else {
-            log::debug!("Font '{}': Type0 font, /W array parsing not yet implemented", base_font);
+            // Type0 fonts use /W and /DW arrays parsed via parse_descendant_fonts
+            log::debug!("Font '{}': Type0 font, widths parsed from CIDFont /W array", base_font);
             (None, None, None)
         };
 
@@ -519,34 +527,36 @@ impl FontInfo {
         };
 
         // Phase 3: Parse DescendantFonts for Type0 fonts
-        let (cid_to_gid_map, cid_system_info, cid_font_type) = if subtype == "Type0" {
-            match Self::parse_descendant_fonts(font_dict, &base_font, doc) {
-                Ok((map, info, ftype)) => {
-                    log::info!(
-                        "Font '{}': Parsed DescendantFonts - CIDFontType={}, CIDSystemInfo={}-{}",
-                        base_font,
-                        ftype.as_ref().unwrap_or(&"Unknown".to_string()),
-                        info.as_ref()
-                            .map(|s| s.registry.as_str())
-                            .unwrap_or("Unknown"),
-                        info.as_ref()
-                            .map(|s| s.ordering.as_str())
-                            .unwrap_or("Unknown")
-                    );
-                    (map, info, ftype)
-                },
-                Err(e) => {
-                    log::warn!(
-                        "Font '{}': Failed to parse DescendantFonts: {}. Using Identity fallback.",
-                        base_font,
-                        e
-                    );
-                    (Some(CIDToGIDMap::Identity), None, None)
-                },
-            }
-        } else {
-            (None, None, None)
-        };
+        let (cid_to_gid_map, cid_system_info, cid_font_type, cid_widths, cid_default_width) =
+            if subtype == "Type0" {
+                match Self::parse_descendant_fonts(font_dict, &base_font, doc) {
+                    Ok((map, info, ftype, widths, dw)) => {
+                        log::info!(
+                            "Font '{}': Parsed DescendantFonts - CIDFontType={}, CIDSystemInfo={}-{}, widths={}",
+                            base_font,
+                            ftype.as_ref().unwrap_or(&"Unknown".to_string()),
+                            info.as_ref()
+                                .map(|s| s.registry.as_str())
+                                .unwrap_or("Unknown"),
+                            info.as_ref()
+                                .map(|s| s.ordering.as_str())
+                                .unwrap_or("Unknown"),
+                            widths.as_ref().map(|m| m.len()).unwrap_or(0)
+                        );
+                        (map, info, ftype, widths, dw)
+                    },
+                    Err(e) => {
+                        log::warn!(
+                            "Font '{}': Failed to parse DescendantFonts: {}. Using Identity fallback.",
+                            base_font,
+                            e
+                        );
+                        (Some(CIDToGIDMap::Identity), None, None, None, 1000.0)
+                    },
+                }
+            } else {
+                (None, None, None, None, 1000.0)
+            };
 
         Ok(FontInfo {
             base_font,
@@ -565,6 +575,8 @@ impl FontInfo {
             first_char,
             last_char,
             default_width,
+            cid_widths,
+            cid_default_width,
         })
     }
 
@@ -630,11 +642,19 @@ impl FontInfo {
     /// Phase 3: Parse DescendantFonts array for Type0 fonts
     /// Extracts CIDFont dictionary and related information
     /// Per PDF Spec ISO 32000-1:2008, Section 9.7.1
+    ///
+    /// Returns: (CIDToGIDMap, CIDSystemInfo, CIDFontType, CIDWidths, DefaultWidth)
     fn parse_descendant_fonts(
         font_dict: &HashMap<String, Object>,
         base_font: &str,
         doc: &mut PdfDocument,
-    ) -> Result<(Option<CIDToGIDMap>, Option<CIDSystemInfo>, Option<String>)> {
+    ) -> Result<(
+        Option<CIDToGIDMap>,
+        Option<CIDSystemInfo>,
+        Option<String>,
+        Option<HashMap<u16, f32>>,
+        f32,
+    )> {
         let descendant_obj = font_dict
             .get("DescendantFonts")
             .ok_or_else(|| Error::ParseError {
@@ -820,7 +840,156 @@ impl FontInfo {
             None
         };
 
-        Ok((cid_to_gid_map, cid_system_info, Some(cid_font_type)))
+        // Parse /DW (default width for CIDs) - PDF Spec Section 9.7.4.3
+        // Default is 1000 if not specified
+        let cid_default_width = cidfont_dict
+            .get("DW")
+            .and_then(|obj| match obj {
+                Object::Integer(i) => Some(*i as f32),
+                Object::Real(r) => Some(*r as f32),
+                _ => None,
+            })
+            .unwrap_or(1000.0);
+
+        // Parse /W array (CID widths) - PDF Spec Section 9.7.4.3
+        let cid_widths = Self::parse_cid_widths(cidfont_dict, base_font);
+
+        if cid_widths.is_some() {
+            log::debug!(
+                "Font '{}': Parsed CID widths - {} entries, default width {}",
+                base_font,
+                cid_widths.as_ref().map(|m| m.len()).unwrap_or(0),
+                cid_default_width
+            );
+        }
+
+        Ok((
+            cid_to_gid_map,
+            cid_system_info,
+            Some(cid_font_type),
+            cid_widths,
+            cid_default_width,
+        ))
+    }
+
+    /// Parse CIDFont /W array for glyph widths.
+    ///
+    /// Per PDF Spec ISO 32000-1:2008, Section 9.7.4.3, the /W array has two formats:
+    /// - `c [w1 w2 ... wn]` - CID c has width w1, c+1 has width w2, etc.
+    /// - `cfirst clast w` - CIDs from cfirst to clast all have width w
+    ///
+    /// These formats can be mixed in a single array.
+    ///
+    /// # Example /W array
+    /// ```pdf
+    /// /W [
+    ///   1 [500 600 700]     % CID 1=500, CID 2=600, CID 3=700
+    ///   100 200 300         % CIDs 100-200 all have width 300
+    /// ]
+    /// ```
+    fn parse_cid_widths(
+        cidfont_dict: &HashMap<String, Object>,
+        base_font: &str,
+    ) -> Option<HashMap<u16, f32>> {
+        let w_obj = cidfont_dict.get("W")?;
+        let w_array = w_obj.as_array()?;
+
+        if w_array.is_empty() {
+            return None;
+        }
+
+        let mut widths: HashMap<u16, f32> = HashMap::new();
+        let mut i = 0;
+
+        while i < w_array.len() {
+            // First element must be a CID (integer)
+            let cid_start = match &w_array[i] {
+                Object::Integer(c) => *c as u16,
+                _ => {
+                    log::warn!(
+                        "Font '{}': /W array element {} is not an integer, skipping",
+                        base_font,
+                        i
+                    );
+                    i += 1;
+                    continue;
+                },
+            };
+            i += 1;
+
+            if i >= w_array.len() {
+                break;
+            }
+
+            // Second element is either:
+            // - An array of widths (format: c [w1 w2 ...])
+            // - An integer CID end (format: cfirst clast w)
+            match &w_array[i] {
+                Object::Array(width_array) => {
+                    // Format: c [w1 w2 ... wn]
+                    for (j, width_obj) in width_array.iter().enumerate() {
+                        let width = match width_obj {
+                            Object::Integer(w) => *w as f32,
+                            Object::Real(w) => *w as f32,
+                            _ => continue,
+                        };
+                        let cid = cid_start.saturating_add(j as u16);
+                        widths.insert(cid, width);
+                    }
+                    i += 1;
+                },
+                Object::Integer(cid_end) => {
+                    // Format: cfirst clast w
+                    let cid_end = *cid_end as u16;
+                    i += 1;
+
+                    if i >= w_array.len() {
+                        log::warn!(
+                            "Font '{}': /W array missing width for CID range {}-{}",
+                            base_font,
+                            cid_start,
+                            cid_end
+                        );
+                        break;
+                    }
+
+                    let width = match &w_array[i] {
+                        Object::Integer(w) => *w as f32,
+                        Object::Real(w) => *w as f32,
+                        _ => {
+                            log::warn!(
+                                "Font '{}': /W array has invalid width for CID range {}-{}",
+                                base_font,
+                                cid_start,
+                                cid_end
+                            );
+                            i += 1;
+                            continue;
+                        },
+                    };
+                    i += 1;
+
+                    // Apply width to all CIDs in range
+                    for cid in cid_start..=cid_end {
+                        widths.insert(cid, width);
+                    }
+                },
+                _ => {
+                    log::warn!(
+                        "Font '{}': /W array has unexpected element type after CID {}",
+                        base_font,
+                        cid_start
+                    );
+                    i += 1;
+                },
+            }
+        }
+
+        if widths.is_empty() {
+            None
+        } else {
+            Some(widths)
+        }
     }
 
     /// Handles both named encodings (e.g., /WinAnsiEncoding) and encoding dictionaries
@@ -1048,6 +1217,17 @@ impl FontInfo {
     /// # }
     /// ```
     pub fn get_glyph_width(&self, char_code: u16) -> f32 {
+        // For Type0 (CID) fonts, check cid_widths first
+        // The char_code is the CID for these fonts
+        if let Some(cid_widths) = &self.cid_widths {
+            if let Some(&width) = cid_widths.get(&char_code) {
+                return width;
+            }
+            // CID not in /W array, use /DW default
+            return self.cid_default_width;
+        }
+
+        // For simple fonts, use the widths array
         if let Some(widths) = &self.widths {
             if let Some(first_char) = self.first_char {
                 let index = char_code as i32 - first_char as i32;
@@ -2809,34 +2989,7 @@ fn lookup_predefined_cmap(
 /// Adobe-GB1 contains Simplified Chinese characters from GB 2312 and extensions.
 /// Reference: Adobe Technical Note #5079 (Adobe-GB1-4 Character Collection)
 fn lookup_adobe_gb1_to_unicode(cid: u16) -> Option<u32> {
-    // Common CID ranges in Adobe-GB1:
-    // CIDs 0x00-0x7F: ASCII range
-    // CIDs 0x2020-0x22E9: GB 2312 CJK Unified Ideographs (starting at U+4E00)
-    // CIDs 0x2F00-0x2FDF: Punctuation and symbols
-    // CIDs 0x2EFF-0x2F00: Common punctuation
-    //
-    // For this implementation, we handle key ranges:
-    // - ASCII (0x00-0x7F) → U+0000-U+007F
-    // - Key CJK ranges → Unicode CJK Unified Ideographs
-    // - Punctuation and symbols
-
-    match cid {
-        // ASCII range: direct mapping
-        0x0000..=0x007F => Some(cid as u32),
-
-        // Common Simplified Chinese characters
-        // The test uses CID 0x2EE5 which we map to a representative character
-        // In a complete implementation, these would come from the official Adobe CMap
-        0x2EE5 => Some(0x4E00), // CJK UNIFIED IDEOGRAPH "一" (one) - test case
-
-        // Additional common characters (minimal set for testing)
-        0x3000 => Some(0x3000), // CJK IDEOGRAPHIC SPACE
-
-        // ASCII special characters (extended)
-        0x00A1..=0x00FE => Some(cid as u32),
-
-        _ => None,
-    }
+    crate::fonts::cid_mappings::lookup_adobe_gb1(cid)
 }
 
 /// Map CID from Adobe-Japan1 character collection to Unicode.
@@ -2844,35 +2997,7 @@ fn lookup_adobe_gb1_to_unicode(cid: u16) -> Option<u32> {
 /// Adobe-Japan1 contains Japanese characters from JIS X 0208, JIS X 0212, etc.
 /// Reference: Adobe Technical Note #5078 (Adobe-Japan1-4 Character Collection)
 fn lookup_adobe_japan1_to_unicode(cid: u16) -> Option<u32> {
-    // Adobe-Japan1 CID ranges:
-    // CIDs 0x00-0x7F: ASCII range
-    // CIDs 0x8140-0x9FFC: JIS X 0208 characters
-    // CIDs 0xE040-0xEBBF: JIS X 0212 characters
-    // CIDs 0x2000-0x88FF: Hiragana, Katakana, Kanji ranges
-    //
-    // For this implementation, we focus on key ranges:
-    // - ASCII (0x00-0x7F) → U+0000-U+007F
-    // - Hiragana and Katakana ranges
-    // - Kanji ranges
-
-    match cid {
-        // ASCII range: direct mapping
-        0x0000..=0x007F => Some(cid as u32),
-
-        // Japanese Hiragana character "あ" (U+3042) - test case
-        0x3042 => Some(0x3042),
-
-        // Hiragana range (partial)
-        0x3041..=0x3096 => Some(cid as u32),
-
-        // Katakana range (partial)
-        0x30A1..=0x30F6 => Some(cid as u32),
-
-        // Additional ASCII characters
-        0x00A1..=0x00FE => Some(cid as u32),
-
-        _ => None,
-    }
+    crate::fonts::cid_mappings::lookup_adobe_japan1(cid)
 }
 
 /// Map CID from Adobe-CNS1 character collection to Unicode.
@@ -2880,27 +3005,7 @@ fn lookup_adobe_japan1_to_unicode(cid: u16) -> Option<u32> {
 /// Adobe-CNS1 contains Traditional Chinese characters from CNS 11643 and extensions.
 /// Reference: Adobe Technical Note #5080 (Adobe-CNS1-4 Character Collection)
 fn lookup_adobe_cns1_to_unicode(cid: u16) -> Option<u32> {
-    // Adobe-CNS1 CID ranges:
-    // CIDs 0x00-0x7F: ASCII range
-    // CIDs 0x2020-0x4C53: CNS 11643 Plane 1 characters (CJK Unified Ideographs)
-    // CIDs 0x4C54-0xFFFF: CNS 11643 Planes 2-7 extensions
-    //
-    // For this implementation, we focus on:
-    // - ASCII (0x00-0x7F) → U+0000-U+007F
-    // - Common Traditional Chinese characters
-
-    match cid {
-        // ASCII range: direct mapping
-        0x0000..=0x007F => Some(cid as u32),
-
-        // CJK Unified Ideographs range (partial, includes U+4E00 "一")
-        0x4E00..=0x9FFF => Some(cid as u32),
-
-        // Additional ASCII characters
-        0x00A1..=0x00FE => Some(cid as u32),
-
-        _ => None,
-    }
+    crate::fonts::cid_mappings::lookup_adobe_cns1(cid)
 }
 
 /// Map CID from Adobe-Korea1 character collection to Unicode.
@@ -2908,27 +3013,7 @@ fn lookup_adobe_cns1_to_unicode(cid: u16) -> Option<u32> {
 /// Adobe-Korea1 contains Korean characters from KS X 1001 and KS X 1002.
 /// Reference: Adobe Technical Note #5093 (Adobe-Korea1-2 Character Collection)
 fn lookup_adobe_korea1_to_unicode(cid: u16) -> Option<u32> {
-    // Adobe-Korea1 CID ranges:
-    // CIDs 0x00-0x7F: ASCII range
-    // CIDs 0x8140-0xFEFE: KS X 1001 (Hangul) characters
-    // CIDs 0xA1A1-0xFEFF: Hangul syllables (starting at U+AC00)
-    //
-    // For this implementation, we focus on:
-    // - ASCII (0x00-0x7F) → U+0000-U+007F
-    // - Hangul syllables
-
-    match cid {
-        // ASCII range: direct mapping
-        0x0000..=0x007F => Some(cid as u32),
-
-        // Hangul syllables range (partial, includes U+AC00 "가")
-        0xAC00..=0xD7AF => Some(cid as u32),
-
-        // Additional ASCII characters
-        0x00A1..=0x00FE => Some(cid as u32),
-
-        _ => None,
-    }
+    crate::fonts::cid_mappings::lookup_adobe_korea1(cid)
 }
 
 #[cfg(test)]
@@ -2966,6 +3051,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert!(font.is_bold());
 
@@ -2986,6 +3073,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert!(!font2.is_bold());
     }
@@ -3009,6 +3098,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert!(font.is_italic());
 
@@ -3029,6 +3120,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert!(font2.is_italic());
     }
@@ -3055,6 +3148,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         // Should use ToUnicode mapping (priority)
@@ -3082,6 +3177,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
@@ -3108,6 +3205,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         // Type0 without ToUnicode should return U+FFFD replacement character (PDF Spec 9.10.2)
@@ -3132,6 +3231,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         // Simple fonts (Type1) CAN use Identity encoding for valid Unicode codes
@@ -3148,17 +3249,17 @@ mod tests {
             supplement: 2,
         });
 
-        // Test ASCII range (should map directly)
-        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 0x41), Some(0x41));
+        // Test ASCII from CID (CID 34 -> 'A')
+        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 34), Some(0x41));
 
-        // Test known CJK mapping
-        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 0x2EE5), Some(0x4E00));
+        // Test known CJK mapping (CID 12005 -> U+4E00 "一")
+        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 12005), Some(0x4E00));
 
         // Test unknown CID
-        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 0x9999), None);
+        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info, 50000), None);
 
         // Test without CIDSystemInfo (should return None)
-        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &None, 0x41), None);
+        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &None, 34), None);
     }
 
     #[test]
@@ -3170,14 +3271,14 @@ mod tests {
             supplement: 4,
         });
 
-        // Test ASCII range (should map directly)
-        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 0x41), Some(0x41));
+        // Test ASCII from CID (CID 34 -> 'A')
+        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 34), Some(0x41));
 
-        // Test known Hiragana mapping
-        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 0x3042), Some(0x3042));
+        // Test Hiragana from CID (CID 843 -> あ U+3042)
+        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 843), Some(0x3042));
 
         // Test unknown CID
-        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 0x9999), None);
+        assert_eq!(lookup_predefined_cmap("UniJIS-UCS2-H", &cid_system_info, 50000), None);
     }
 
     #[test]
@@ -3189,11 +3290,11 @@ mod tests {
             supplement: 3,
         });
 
-        // Test ASCII range (should map directly)
-        assert_eq!(lookup_predefined_cmap("UniCNS-UCS2-H", &cid_system_info, 0x41), Some(0x41));
+        // Test ASCII from CID (CID 34 -> 'A')
+        assert_eq!(lookup_predefined_cmap("UniCNS-UCS2-H", &cid_system_info, 34), Some(0x41));
 
-        // Test known CJK mapping
-        assert_eq!(lookup_predefined_cmap("UniCNS-UCS2-H", &cid_system_info, 0x4E00), Some(0x4E00));
+        // Test CJK from CID (CID 1125 -> 一 U+4E00)
+        assert_eq!(lookup_predefined_cmap("UniCNS-UCS2-H", &cid_system_info, 1125), Some(0x4E00));
     }
 
     #[test]
@@ -3205,11 +3306,11 @@ mod tests {
             supplement: 1,
         });
 
-        // Test ASCII range (should map directly)
-        assert_eq!(lookup_predefined_cmap("UniKS-UCS2-H", &cid_system_info, 0x41), Some(0x41));
+        // Test ASCII from CID (CID 34 -> 'A')
+        assert_eq!(lookup_predefined_cmap("UniKS-UCS2-H", &cid_system_info, 34), Some(0x41));
 
-        // Test known Hangul mapping
-        assert_eq!(lookup_predefined_cmap("UniKS-UCS2-H", &cid_system_info, 0xAC00), Some(0xAC00));
+        // Test Hangul from CID (CID 1000 -> 가 U+AC00)
+        assert_eq!(lookup_predefined_cmap("UniKS-UCS2-H", &cid_system_info, 1000), Some(0xAC00));
     }
 
     #[test]
@@ -3222,7 +3323,7 @@ mod tests {
         });
 
         // Should return None because ordering doesn't match
-        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info_wrong, 0x41), None);
+        assert_eq!(lookup_predefined_cmap("UniGB-UCS2-H", &cid_system_info_wrong, 34), None);
     }
 
     #[test]
@@ -3254,6 +3355,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         let font2 = font.clone();
@@ -3366,6 +3469,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         // Should use custom encoding
@@ -3396,6 +3501,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_with_force_bold.get_font_weight(), FontWeight::Bold);
@@ -3419,6 +3526,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_without_force_bold.get_font_weight(), FontWeight::Normal);
@@ -3446,6 +3555,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_heavy_stem.get_font_weight(), FontWeight::Bold);
@@ -3469,6 +3580,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_medium_stem.get_font_weight(), FontWeight::Medium);
@@ -3492,6 +3605,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_light_stem.get_font_weight(), FontWeight::Normal);
@@ -3519,6 +3634,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_explicit.get_font_weight(), FontWeight::Light);
@@ -3542,6 +3659,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_force_bold.get_font_weight(), FontWeight::Bold);
@@ -3565,6 +3684,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
 
         assert_eq!(font_name.get_font_weight(), FontWeight::Bold);
@@ -3592,6 +3713,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_black.get_font_weight(), FontWeight::Black);
         assert!(font_black.is_bold());
@@ -3614,6 +3737,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_extrabold.get_font_weight(), FontWeight::ExtraBold);
         assert!(font_extrabold.is_bold());
@@ -3636,6 +3761,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_bold.get_font_weight(), FontWeight::Bold);
         assert!(font_bold.is_bold());
@@ -3658,6 +3785,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_semibold.get_font_weight(), FontWeight::SemiBold);
         assert!(font_semibold.is_bold());
@@ -3680,6 +3809,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_medium.get_font_weight(), FontWeight::Medium);
         assert!(!font_medium.is_bold());
@@ -3702,6 +3833,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_light.get_font_weight(), FontWeight::Light);
         assert!(!font_light.is_bold());
@@ -3724,6 +3857,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_extralight.get_font_weight(), FontWeight::ExtraLight);
         assert!(!font_extralight.is_bold());
@@ -3746,6 +3881,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_thin.get_font_weight(), FontWeight::Thin);
         assert!(!font_thin.is_bold());
@@ -3768,6 +3905,8 @@ mod tests {
             cid_to_gid_map: None,
             cid_system_info: None,
             cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
         };
         assert_eq!(font_normal.get_font_weight(), FontWeight::Normal);
         assert!(!font_normal.is_bold());
@@ -4007,5 +4146,161 @@ mod tests {
             assert_eq!(unicode_char as u32, 0x00C1);
             assert!(!result.is_empty());
         }
+    }
+
+    // =============================================================================
+    // Type 0 /W Array (CID Width) Tests - PDF Spec 9.7.4.3
+    // =============================================================================
+
+    #[test]
+    fn test_get_glyph_width_uses_cid_widths() {
+        // Test that get_glyph_width properly uses cid_widths for Type0 fonts
+        let mut cid_widths = HashMap::new();
+        cid_widths.insert(1u16, 500.0f32);
+        cid_widths.insert(2u16, 600.0f32);
+        cid_widths.insert(3u16, 700.0f32);
+
+        let font = FontInfo {
+            base_font: "CIDFont".to_string(),
+            subtype: "Type0".to_string(),
+            encoding: Encoding::Identity,
+            to_unicode: None,
+            font_weight: None,
+            flags: None,
+            stem_v: None,
+            embedded_font_data: None,
+            truetype_cmap: None,
+            widths: None,
+            first_char: None,
+            last_char: None,
+            default_width: 1000.0,
+            cid_to_gid_map: None,
+            cid_system_info: None,
+            cid_font_type: None,
+            cid_widths: Some(cid_widths),
+            cid_default_width: 1000.0,
+        };
+
+        // Widths from cid_widths
+        assert_eq!(font.get_glyph_width(1), 500.0);
+        assert_eq!(font.get_glyph_width(2), 600.0);
+        assert_eq!(font.get_glyph_width(3), 700.0);
+
+        // CID not in cid_widths should return cid_default_width
+        assert_eq!(font.get_glyph_width(100), 1000.0);
+    }
+
+    #[test]
+    fn test_get_glyph_width_cid_default_width() {
+        // Test that cid_default_width is used when CID is not in cid_widths
+        let mut cid_widths = HashMap::new();
+        cid_widths.insert(1u16, 500.0f32);
+
+        let font = FontInfo {
+            base_font: "CIDFont".to_string(),
+            subtype: "Type0".to_string(),
+            encoding: Encoding::Identity,
+            to_unicode: None,
+            font_weight: None,
+            flags: None,
+            stem_v: None,
+            embedded_font_data: None,
+            truetype_cmap: None,
+            widths: None,
+            first_char: None,
+            last_char: None,
+            default_width: 500.0, // Simple font default
+            cid_to_gid_map: None,
+            cid_system_info: None,
+            cid_font_type: None,
+            cid_widths: Some(cid_widths),
+            cid_default_width: 800.0, // CID default width
+        };
+
+        // CID 1 has explicit width
+        assert_eq!(font.get_glyph_width(1), 500.0);
+
+        // Other CIDs use cid_default_width (not default_width)
+        assert_eq!(font.get_glyph_width(2), 800.0);
+        assert_eq!(font.get_glyph_width(999), 800.0);
+    }
+
+    #[test]
+    fn test_get_glyph_width_no_cid_widths_uses_default() {
+        // Test that fonts without cid_widths fall back to default_width
+        let font = FontInfo {
+            base_font: "SimpleFont".to_string(),
+            subtype: "Type1".to_string(),
+            encoding: Encoding::Standard("WinAnsiEncoding".to_string()),
+            to_unicode: None,
+            font_weight: None,
+            flags: None,
+            stem_v: None,
+            embedded_font_data: None,
+            truetype_cmap: None,
+            widths: None,
+            first_char: None,
+            last_char: None,
+            default_width: 600.0,
+            cid_to_gid_map: None,
+            cid_system_info: None,
+            cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
+        };
+
+        // All CIDs use default_width when no cid_widths and no widths array
+        assert_eq!(font.get_glyph_width(1), 600.0);
+        assert_eq!(font.get_glyph_width(65), 600.0);
+    }
+
+    #[test]
+    fn test_cid_widths_large_range() {
+        // Test CID widths with a large range of values (simulating real CJK fonts)
+        let mut cid_widths = HashMap::new();
+        // Simulate /W array: [1 100 1000] - CIDs 1-100 all have width 1000
+        for cid in 1u16..=100 {
+            cid_widths.insert(cid, 1000.0f32);
+        }
+        // Add some individual widths
+        cid_widths.insert(200, 500.0);
+        cid_widths.insert(201, 600.0);
+
+        let font = FontInfo {
+            base_font: "CJKFont".to_string(),
+            subtype: "Type0".to_string(),
+            encoding: Encoding::Identity,
+            to_unicode: None,
+            font_weight: None,
+            flags: None,
+            stem_v: None,
+            embedded_font_data: None,
+            truetype_cmap: None,
+            widths: None,
+            first_char: None,
+            last_char: None,
+            default_width: 500.0,
+            cid_to_gid_map: None,
+            cid_system_info: Some(CIDSystemInfo {
+                registry: "Adobe".to_string(),
+                ordering: "Japan1".to_string(),
+                supplement: 4,
+            }),
+            cid_font_type: Some("CIDFontType2".to_string()),
+            cid_widths: Some(cid_widths),
+            cid_default_width: 1000.0,
+        };
+
+        // Range test
+        assert_eq!(font.get_glyph_width(1), 1000.0);
+        assert_eq!(font.get_glyph_width(50), 1000.0);
+        assert_eq!(font.get_glyph_width(100), 1000.0);
+
+        // Individual widths
+        assert_eq!(font.get_glyph_width(200), 500.0);
+        assert_eq!(font.get_glyph_width(201), 600.0);
+
+        // Default for unlisted CIDs
+        assert_eq!(font.get_glyph_width(300), 1000.0);
     }
 }
