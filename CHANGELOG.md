@@ -2,6 +2,11 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [WIP] - TBD
+
+### Fixed
+- **Outline action handling** - correctly dereference actions indirectly referenced by outline items
+
 ## [0.2.6] - 2026-01-09
 
 ### Added

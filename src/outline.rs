@@ -168,7 +168,17 @@ impl PdfDocument {
         }
 
         // Try /A (action) entry
-        if let Some(Object::Dictionary(action)) = dict.get("A") {
+        let mut action = dict.get("A");
+
+        // Resolve indirect reference to action
+        let obj;
+        if let Some(Object::Reference(obj_ref)) = action {
+            obj = self.load_object(*obj_ref)?;
+            action = Some(&obj);
+        }
+
+        // Look for destination under /D key
+        if let Some(Object::Dictionary(action)) = action {
             if let Some(dest_obj) = action.get("D") {
                 return self.resolve_destination(dest_obj);
             }
