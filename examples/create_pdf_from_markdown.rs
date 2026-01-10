@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Example 1: Simple one-liner
     println!("Creating simple PDF from Markdown...");
 
-    let simple_pdf = Pdf::from_markdown("# Hello, World!\n\nThis is a simple PDF.")?;
+    let mut simple_pdf = Pdf::from_markdown("# Hello, World!\n\nThis is a simple PDF.")?;
     simple_pdf.save("simple_markdown.pdf")?;
     println!("  Saved: simple_markdown.pdf");
 
@@ -60,7 +60,7 @@ Here's how easy it is - just a few lines of code!
 PDF creation has never been easier!
 "#;
 
-    let custom_pdf = PdfBuilder::new()
+    let mut custom_pdf = PdfBuilder::new()
         .title("PDF Creation Guide")
         .author("pdf_oxide Team")
         .subject("Documentation")
@@ -120,7 +120,7 @@ At vero eos et accusamus et iusto odio dignissimos ducimus qui blanditiis.
 Thank you for reading!
 "#;
 
-    let margins_pdf = PdfBuilder::new()
+    let mut margins_pdf = PdfBuilder::new()
         .title("Sample Document")
         .author("Author Name")
         .page_size(PageSize::Letter)

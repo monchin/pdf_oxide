@@ -91,7 +91,7 @@ pub mod resource_manager;
 
 pub use document_editor::{
     DocumentEditor, DocumentInfo, EditableDocument, EncryptionAlgorithm, EncryptionConfig,
-    PageInfo, Permissions, SaveOptions,
+    ImageInfo, PageInfo, Permissions, SaveOptions,
 };
 pub use dom::{
     AnnotationId, AnnotationWrapper, ElementId, ImageElementCollectionEditor, PageEditor,

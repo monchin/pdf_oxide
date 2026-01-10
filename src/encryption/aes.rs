@@ -3,15 +3,24 @@
 //! AES (Advanced Encryption Standard) is used in PDF 1.6+ for stronger encryption.
 //! PDFs use AES in CBC (Cipher Block Chaining) mode with PKCS#7 padding.
 //!
+//! Supported algorithms:
+//! - AES-128: 16-byte key (PDF 1.6+, V=4, R=4)
+//! - AES-256: 32-byte key (PDF 2.0, V=5, R=5/6)
+//!
 //! PDF Spec: Section 7.6.2 - General Encryption Algorithm
 
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use aes::Aes128;
+use aes::{Aes128, Aes256};
 use cbc::{Decryptor, Encryptor};
 
 #[allow(dead_code)]
 type Aes128CbcEnc = Encryptor<Aes128>;
 type Aes128CbcDec = Decryptor<Aes128>;
+
+#[allow(dead_code)]
+type Aes256CbcEnc = Encryptor<Aes256>;
+#[allow(dead_code)]
+type Aes256CbcDec = Decryptor<Aes256>;
 
 /// Encrypt data using AES-128 in CBC mode with PKCS#7 padding.
 ///
@@ -76,6 +85,99 @@ pub fn aes128_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'s
     // Decrypt in-place
     let mut buffer = data.to_vec();
     let cipher = Aes128CbcDec::new(key.into(), iv.into());
+    let decrypted = cipher
+        .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buffer)
+        .map_err(|_| "Decryption failed")?;
+
+    // Remove PKCS#7 padding manually
+    if decrypted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let padding_len = decrypted[decrypted.len() - 1] as usize;
+    if padding_len == 0 || padding_len > 16 {
+        return Err("Invalid PKCS#7 padding");
+    }
+
+    // Verify padding
+    let data_len = decrypted.len().saturating_sub(padding_len);
+    for &byte in &decrypted[data_len..] {
+        if byte != padding_len as u8 {
+            return Err("Invalid PKCS#7 padding");
+        }
+    }
+
+    Ok(decrypted[..data_len].to_vec())
+}
+
+/// Encrypt data using AES-256 in CBC mode with PKCS#7 padding.
+///
+/// Used for PDF 2.0 encryption (V=5, R=5/6).
+///
+/// # Arguments
+///
+/// * `key` - The 32-byte encryption key
+/// * `iv` - The 16-byte initialization vector
+/// * `data` - The data to encrypt
+///
+/// # Returns
+///
+/// The encrypted data with PKCS#7 padding, or an error if encryption fails
+#[allow(dead_code)]
+pub fn aes256_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if key.len() != 32 {
+        return Err("AES-256 key must be 32 bytes");
+    }
+    if iv.len() != 16 {
+        return Err("IV must be 16 bytes");
+    }
+
+    // Apply PKCS#7 padding manually
+    let mut padded = data.to_vec();
+    let padding_len = 16 - (data.len() % 16);
+    padded.extend(std::iter::repeat_n(padding_len as u8, padding_len));
+
+    // Encrypt in-place
+    let len = padded.len();
+    let cipher = Aes256CbcEnc::new(key.into(), iv.into());
+    cipher
+        .encrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut padded, len)
+        .map_err(|_| "Encryption failed")?;
+
+    Ok(padded)
+}
+
+/// Decrypt data using AES-256 in CBC mode and remove PKCS#7 padding.
+///
+/// Used for PDF 2.0 encryption (V=5, R=5/6).
+///
+/// # Arguments
+///
+/// * `key` - The 32-byte encryption key
+/// * `iv` - The 16-byte initialization vector
+/// * `data` - The encrypted data
+///
+/// # Returns
+///
+/// The decrypted data with padding removed, or an error if decryption fails
+#[allow(dead_code)]
+pub fn aes256_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if key.len() != 32 {
+        return Err("AES-256 key must be 32 bytes");
+    }
+    if iv.len() != 16 {
+        return Err("IV must be 16 bytes");
+    }
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !data.len().is_multiple_of(16) {
+        return Err("Encrypted data length must be multiple of 16");
+    }
+
+    // Decrypt in-place
+    let mut buffer = data.to_vec();
+    let cipher = Aes256CbcDec::new(key.into(), iv.into());
     let decrypted = cipher
         .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buffer)
         .map_err(|_| "Decryption failed")?;

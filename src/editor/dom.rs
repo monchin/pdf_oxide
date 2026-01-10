@@ -132,6 +132,88 @@ impl PdfText {
     pub fn set_style(&mut self, style: crate::elements::TextStyle) {
         self.content.style = style;
     }
+
+    // === Python-friendly aliases ===
+
+    /// Get text content (alias for `text()`, Python-friendly).
+    pub fn value(&self) -> &str {
+        self.text()
+    }
+
+    /// Set text content (alias for `set_text()`, Python-friendly).
+    pub fn set_value(&mut self, new_text: impl Into<String>) {
+        self.set_text(new_text);
+    }
+
+    // === Text mutation helpers ===
+
+    /// Append text to the current content.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut text = page.find_text_containing("Hello").first().unwrap();
+    /// text.append(" World!");
+    /// // text is now "Hello World!"
+    /// ```
+    pub fn append(&mut self, text: &str) {
+        self.content.text.push_str(text);
+    }
+
+    /// Replace all occurrences of `old` with `new` in the text.
+    ///
+    /// Returns the number of replacements made.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut text = page.find_text_containing("foo").first().unwrap();
+    /// let count = text.replace("foo", "bar");
+    /// println!("Replaced {} occurrences", count);
+    /// ```
+    pub fn replace(&mut self, old: &str, new: &str) -> usize {
+        let count = self.content.text.matches(old).count();
+        self.content.text = self.content.text.replace(old, new);
+        count
+    }
+
+    /// Clear the text content.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut text = page.find_text_containing("remove me").first().unwrap();
+    /// text.clear();
+    /// // text is now ""
+    /// ```
+    pub fn clear(&mut self) {
+        self.content.text.clear();
+    }
+
+    /// Check if the text is empty.
+    pub fn is_empty(&self) -> bool {
+        self.content.text.is_empty()
+    }
+
+    /// Get the length of the text in bytes.
+    pub fn len(&self) -> usize {
+        self.content.text.len()
+    }
+
+    /// Check if the text contains a substring.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.content.text.contains(needle)
+    }
+
+    /// Check if the text starts with a prefix.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.content.text.starts_with(prefix)
+    }
+
+    /// Check if the text ends with a suffix.
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        self.content.text.ends_with(suffix)
+    }
 }
 
 /// Strongly-typed image element with DOM capabilities.
@@ -639,6 +721,7 @@ impl AnnotationWrapper {
 }
 
 /// Page with DOM-like editing capabilities.
+#[derive(Clone)]
 pub struct PdfPage {
     pub page_index: usize,
     pub root: StructureElement,
@@ -1051,11 +1134,186 @@ impl PdfPage {
         None
     }
 
-    /// Get parent structure by element ID (returns None if element is root or not found).
-    pub fn get_parent(&self, _id: ElementId) -> Option<PdfStructure> {
-        // This would require storing parent IDs during traversal.
-        // For now, return None as a placeholder.
-        None
+    /// Get parent element by ID.
+    ///
+    /// Returns `None` if the element is at the root level (top-level children of the page)
+    /// or if the element is not found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let page = doc.page(0)?;
+    /// if let Some(text) = page.find_text_containing("Hello").first() {
+    ///     if let Some(parent) = page.get_parent(text.id()) {
+    ///         println!("Parent element: {:?}", parent);
+    ///     }
+    /// }
+    /// ```
+    pub fn get_parent(&self, id: ElementId) -> Option<PdfElement> {
+        let path = self.element_map.get(&id)?;
+
+        // If path has no elements, the element is the root itself
+        // If path has only one element, the parent is the root (which we represent as None
+        // for simplicity, as root is a synthetic container)
+        if path.path.len() <= 1 {
+            return None;
+        }
+
+        // Parent path is the element's path minus the last index
+        let mut parent_path = path.clone();
+        parent_path.path.pop();
+
+        // Traverse to the parent element
+        self.get_element_by_path(&parent_path).map(|elem| {
+            let parent_id = self.get_id_for_path(&parent_path);
+            self.wrap_element(parent_id, parent_path, elem)
+        })
+    }
+
+    /// Get the index of an element within its parent's children.
+    ///
+    /// Returns `None` if the element is not found.
+    pub fn get_element_index(&self, id: ElementId) -> Option<usize> {
+        let path = self.element_map.get(&id)?;
+        path.path.last().copied()
+    }
+
+    /// Get siblings of an element (excluding the element itself).
+    ///
+    /// Returns all elements that share the same parent, excluding the element with the given ID.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let page = doc.page(0)?;
+    /// if let Some(text) = page.find_text_containing("Hello").first() {
+    ///     for sibling in page.get_siblings(text.id()) {
+    ///         println!("Sibling: {:?}", sibling);
+    ///     }
+    /// }
+    /// ```
+    pub fn get_siblings(&self, id: ElementId) -> Vec<PdfElement> {
+        let Some(path) = self.element_map.get(&id) else {
+            return Vec::new();
+        };
+
+        // Get the parent's children
+        let parent_children = if path.path.len() <= 1 {
+            // Parent is root, get root children
+            &self.root.children
+        } else {
+            // Get parent element and its children
+            let mut parent_path = path.clone();
+            parent_path.path.pop();
+
+            match self.get_element_by_path(&parent_path) {
+                Some(ContentElement::Structure(s)) => &s.children,
+                _ => return Vec::new(),
+            }
+        };
+
+        // Build the base path (parent's path)
+        let base_path = if path.path.len() <= 1 {
+            ElementPath::new()
+        } else {
+            let mut p = path.clone();
+            p.path.pop();
+            p
+        };
+
+        // Get the current element's index
+        let current_idx = path.path.last().copied().unwrap_or(0);
+
+        // Return all siblings except the current element
+        parent_children
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != current_idx)
+            .map(|(idx, child)| {
+                let child_path = base_path.with_child(idx);
+                let child_id = self.get_id_for_path(&child_path);
+                self.wrap_element(child_id, child_path, child)
+            })
+            .collect()
+    }
+
+    /// Get the next sibling of an element.
+    ///
+    /// Returns `None` if the element is the last child or not found.
+    pub fn get_next_sibling(&self, id: ElementId) -> Option<PdfElement> {
+        let path = self.element_map.get(&id)?;
+
+        // Get the parent's children
+        let parent_children = if path.path.len() <= 1 {
+            &self.root.children
+        } else {
+            let mut parent_path = path.clone();
+            parent_path.path.pop();
+            match self.get_element_by_path(&parent_path) {
+                Some(ContentElement::Structure(s)) => &s.children,
+                _ => return None,
+            }
+        };
+
+        let current_idx = path.path.last().copied()?;
+        let next_idx = current_idx + 1;
+
+        if next_idx >= parent_children.len() {
+            return None;
+        }
+
+        // Build the sibling path
+        let base_path = if path.path.len() <= 1 {
+            ElementPath::new()
+        } else {
+            let mut p = path.clone();
+            p.path.pop();
+            p
+        };
+
+        let sibling_path = base_path.with_child(next_idx);
+        let sibling_id = self.get_id_for_path(&sibling_path);
+        Some(self.wrap_element(sibling_id, sibling_path, &parent_children[next_idx]))
+    }
+
+    /// Get the previous sibling of an element.
+    ///
+    /// Returns `None` if the element is the first child or not found.
+    pub fn get_prev_sibling(&self, id: ElementId) -> Option<PdfElement> {
+        let path = self.element_map.get(&id)?;
+
+        // Get the parent's children
+        let parent_children = if path.path.len() <= 1 {
+            &self.root.children
+        } else {
+            let mut parent_path = path.clone();
+            parent_path.path.pop();
+            match self.get_element_by_path(&parent_path) {
+                Some(ContentElement::Structure(s)) => &s.children,
+                _ => return None,
+            }
+        };
+
+        let current_idx = path.path.last().copied()?;
+
+        if current_idx == 0 {
+            return None;
+        }
+
+        let prev_idx = current_idx - 1;
+
+        // Build the sibling path
+        let base_path = if path.path.len() <= 1 {
+            ElementPath::new()
+        } else {
+            let mut p = path.clone();
+            p.path.pop();
+            p
+        };
+
+        let sibling_path = base_path.with_child(prev_idx);
+        let sibling_id = self.get_id_for_path(&sibling_path);
+        Some(self.wrap_element(sibling_id, sibling_path, &parent_children[prev_idx]))
     }
 
     /// Get children of a structure element by ID.
@@ -1588,6 +1846,41 @@ impl TableElementCollectionEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elements::{FontSpec, TextStyle};
+
+    fn create_test_text(text: &str, x: f32, y: f32) -> TextContent {
+        TextContent {
+            text: text.to_string(),
+            bbox: Rect::new(x, y, 100.0, 12.0),
+            font: FontSpec {
+                name: "Helvetica".to_string(),
+                size: 12.0,
+            },
+            style: TextStyle::default(),
+            reading_order: None,
+        }
+    }
+
+    fn create_test_page_with_texts() -> PdfPage {
+        let text1 = create_test_text("Hello", 10.0, 700.0);
+        let text2 = create_test_text("World", 10.0, 680.0);
+        let text3 = create_test_text("Foo", 10.0, 660.0);
+
+        let root = StructureElement {
+            structure_type: "Document".to_string(),
+            bbox: Rect::new(0.0, 0.0, 612.0, 792.0),
+            children: vec![
+                ContentElement::Text(text1),
+                ContentElement::Text(text2),
+                ContentElement::Text(text3),
+            ],
+            reading_order: Some(0),
+            alt_text: None,
+            language: None,
+        };
+
+        PdfPage::from_structure(0, root, 612.0, 792.0)
+    }
 
     #[test]
     fn test_element_id_generation() {
@@ -1611,5 +1904,168 @@ mod tests {
         assert_eq!(page.page_index, 0);
         assert_eq!(page.width, 612.0);
         assert_eq!(page.height, 792.0);
+    }
+
+    #[test]
+    fn test_children_returns_all_top_level_elements() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+        assert_eq!(children.len(), 3);
+    }
+
+    #[test]
+    fn test_find_text_containing() {
+        let page = create_test_page_with_texts();
+        let results = page.find_text_containing("Hello");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text(), "Hello");
+    }
+
+    #[test]
+    fn test_get_element_index() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+
+        // First element should be at index 0
+        let first_id = children[0].id();
+        assert_eq!(page.get_element_index(first_id), Some(0));
+
+        // Second element should be at index 1
+        let second_id = children[1].id();
+        assert_eq!(page.get_element_index(second_id), Some(1));
+    }
+
+    #[test]
+    fn test_get_siblings() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+
+        // Get siblings of the second element (should be first and third)
+        let second_id = children[1].id();
+        let siblings = page.get_siblings(second_id);
+        assert_eq!(siblings.len(), 2);
+    }
+
+    #[test]
+    fn test_get_next_sibling() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+
+        // First element should have a next sibling
+        let first_id = children[0].id();
+        let next = page.get_next_sibling(first_id);
+        assert!(next.is_some());
+
+        // Last element should not have a next sibling
+        let last_id = children[2].id();
+        let next = page.get_next_sibling(last_id);
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_get_prev_sibling() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+
+        // First element should not have a previous sibling
+        let first_id = children[0].id();
+        let prev = page.get_prev_sibling(first_id);
+        assert!(prev.is_none());
+
+        // Last element should have a previous sibling
+        let last_id = children[2].id();
+        let prev = page.get_prev_sibling(last_id);
+        assert!(prev.is_some());
+    }
+
+    #[test]
+    fn test_get_parent_at_root_level() {
+        let page = create_test_page_with_texts();
+        let children = page.children();
+
+        // Top-level elements should return None for parent
+        let first_id = children[0].id();
+        assert!(page.get_parent(first_id).is_none());
+    }
+
+    #[test]
+    fn test_pdf_text_value_alias() {
+        let mut text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        // Test value() alias
+        assert_eq!(text.value(), "Hello");
+        assert_eq!(text.text(), text.value());
+
+        // Test set_value() alias
+        text.set_value("Goodbye");
+        assert_eq!(text.value(), "Goodbye");
+    }
+
+    #[test]
+    fn test_pdf_text_append() {
+        let mut text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        text.append(" World");
+        assert_eq!(text.text(), "Hello World");
+    }
+
+    #[test]
+    fn test_pdf_text_replace() {
+        let mut text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello Hello Hello", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        let count = text.replace("Hello", "Hi");
+        assert_eq!(count, 3);
+        assert_eq!(text.text(), "Hi Hi Hi");
+    }
+
+    #[test]
+    fn test_pdf_text_clear() {
+        let mut text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        text.clear();
+        assert!(text.is_empty());
+        assert_eq!(text.len(), 0);
+    }
+
+    #[test]
+    fn test_pdf_text_contains() {
+        let text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello World", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        assert!(text.contains("World"));
+        assert!(!text.contains("Foo"));
+    }
+
+    #[test]
+    fn test_pdf_text_starts_with_ends_with() {
+        let text = PdfText {
+            id: ElementId::new(),
+            content: create_test_text("Hello World", 0.0, 0.0),
+            path: ElementPath::new(),
+        };
+
+        assert!(text.starts_with("Hello"));
+        assert!(text.ends_with("World"));
+        assert!(!text.starts_with("World"));
+        assert!(!text.ends_with("Hello"));
     }
 }

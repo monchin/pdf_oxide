@@ -110,6 +110,10 @@ pub enum Error {
     /// Recursion depth limit exceeded
     #[error("Recursion depth limit exceeded (max: {0})")]
     RecursionLimitExceeded(u32),
+
+    /// Invalid operation (e.g., calling methods on uninitialized document)
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }
 
 #[cfg(test)]

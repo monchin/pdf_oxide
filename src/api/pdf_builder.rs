@@ -2,11 +2,12 @@
 //!
 //! Provides `Pdf` for simple operations and `PdfBuilder` for customized creation.
 
-use crate::editor::DocumentEditor;
-use crate::error::Result;
+use crate::converters::ConversionOptions;
+use crate::editor::{DocumentEditor, EditableDocument, PdfPage};
+use crate::error::{Error, Result};
 use crate::writer::{DocumentBuilder, DocumentMetadata, PageSize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Column alignment for GFM tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,16 +242,41 @@ impl Default for PdfConfig {
     }
 }
 
-/// A high-level PDF document.
+/// A high-level PDF document with unified DOM access.
 ///
-/// This type provides a simple API for creating and manipulating PDFs.
-/// For more complex operations, use `DocumentEditor` directly.
-#[derive(Debug)]
+/// This type provides a simple, unified API for:
+/// - Creating PDFs from Markdown, HTML, or plain text
+/// - Opening existing PDFs for reading and editing
+/// - Navigating the document structure with a DOM-like API
+/// - Modifying text, images, and other content
+/// - Saving changes back to PDF
+///
+/// # Example
+///
+/// ```ignore
+/// use pdf_oxide::api::Pdf;
+///
+/// // Create from Markdown
+/// let pdf = Pdf::from_markdown("# Hello")?;
+/// pdf.save("hello.pdf")?;
+///
+/// // Open and edit existing PDF
+/// let mut doc = Pdf::open("input.pdf")?;
+/// let page = doc.page(0)?;
+/// for text in page.find_text_containing("old") {
+///     doc.page(0)?.set_text(text.id(), "new")?;
+/// }
+/// doc.save("output.pdf")?;
+/// ```
 pub struct Pdf {
-    /// The underlying PDF bytes
+    /// The underlying PDF bytes (for created PDFs)
     bytes: Vec<u8>,
     /// Configuration used to create this PDF
     config: PdfConfig,
+    /// Document editor (for opened PDFs)
+    editor: Option<DocumentEditor>,
+    /// Source file path (for opened PDFs)
+    source_path: Option<PathBuf>,
 }
 
 impl Pdf {
@@ -259,6 +285,8 @@ impl Pdf {
         Self {
             bytes: Vec::new(),
             config: PdfConfig::default(),
+            editor: None,
+            source_path: None,
         }
     }
 
@@ -324,51 +352,937 @@ impl Pdf {
         PdfBuilder::new().from_text(content)
     }
 
-    /// Open an existing PDF file.
+    /// Open an existing PDF file for reading and editing.
     ///
-    /// Returns a `DocumentEditor` for modifying the PDF.
+    /// Returns a `Pdf` instance with full DOM access for navigating and
+    /// modifying the document content.
     ///
     /// # Example
     ///
     /// ```ignore
     /// use pdf_oxide::api::Pdf;
     ///
-    /// let mut editor = Pdf::open("existing.pdf")?;
-    /// editor.set_title("New Title");
-    /// editor.save("modified.pdf")?;
+    /// let mut doc = Pdf::open("existing.pdf")?;
+    ///
+    /// // Get page count
+    /// println!("Pages: {}", doc.page_count()?);
+    ///
+    /// // Access page DOM
+    /// let page = doc.page(0)?;
+    /// for text in page.find_text_containing("Hello") {
+    ///     println!("Found: {} at {:?}", text.text(), text.bbox());
+    /// }
+    ///
+    /// // Modify content
+    /// let mut page = doc.page(0)?;
+    /// let texts = page.find_text_containing("old");
+    /// for t in &texts {
+    ///     page.set_text(t.id(), "new")?;
+    /// }
+    /// doc.save_page(page)?;
+    ///
+    /// // Save changes
+    /// doc.save("modified.pdf")?;
     /// ```
-    pub fn open(path: impl AsRef<Path>) -> Result<DocumentEditor> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let source_path = path.as_ref().to_path_buf();
+        let editor = DocumentEditor::open(&path)?;
+        Ok(Self {
+            bytes: Vec::new(),
+            config: PdfConfig::default(),
+            editor: Some(editor),
+            source_path: Some(source_path),
+        })
+    }
+
+    /// Open an existing PDF file (legacy API, returns DocumentEditor directly).
+    ///
+    /// Prefer using `Pdf::open()` for the unified API with DOM access.
+    pub fn open_editor(path: impl AsRef<Path>) -> Result<DocumentEditor> {
         DocumentEditor::open(path)
     }
 
-    /// Get the PDF bytes.
+    /// Get the number of pages in the document.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let doc = Pdf::open("input.pdf")?;
+    /// println!("Document has {} pages", doc.page_count()?);
+    /// ```
+    pub fn page_count(&mut self) -> Result<usize> {
+        if let Some(ref mut editor) = self.editor {
+            editor.page_count()
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Get a page for DOM-like navigation and editing.
+    ///
+    /// Returns a `PdfPage` that provides hierarchical access to page content.
+    /// After modifying the page, call `save_page()` to persist changes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let page = doc.page(0)?;
+    ///
+    /// // Query content
+    /// for text in page.find_text_containing("Hello") {
+    ///     println!("Text: {} at {:?}", text.text(), text.bbox());
+    /// }
+    ///
+    /// // Navigate DOM tree
+    /// for element in page.children() {
+    ///     match element {
+    ///         PdfElement::Text(t) => println!("Text: {}", t.text()),
+    ///         PdfElement::Image(i) => println!("Image: {}x{}", i.width(), i.height()),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub fn page(&mut self, index: usize) -> Result<PdfPage> {
+        if let Some(ref mut editor) = self.editor {
+            editor.get_page(index)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Save a modified page back to the document.
+    ///
+    /// Call this after modifying a page obtained from `page()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let mut page = doc.page(0)?;
+    ///
+    /// // Modify content
+    /// let texts = page.find_text_containing("old");
+    /// for t in &texts {
+    ///     page.set_text(t.id(), "new")?;
+    /// }
+    ///
+    /// // Save modifications
+    /// doc.save_page(page)?;
+    /// doc.save("output.pdf")?;
+    /// ```
+    pub fn save_page(&mut self, page: PdfPage) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.save_page(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Check if the document has unsaved modifications.
+    pub fn is_modified(&self) -> bool {
+        if let Some(ref editor) = self.editor {
+            editor.is_modified()
+        } else {
+            false
+        }
+    }
+
+    // =========================================================================
+    // Document Metadata
+    // =========================================================================
+
+    /// Set the document title.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.set_title("My Document");
+    /// doc.save("output.pdf")?;
+    /// ```
+    pub fn set_title(&mut self, title: impl Into<String>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_title(title);
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the document author.
+    pub fn set_author(&mut self, author: impl Into<String>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_author(author);
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the document subject.
+    pub fn set_subject(&mut self, subject: impl Into<String>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_subject(subject);
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the document keywords.
+    pub fn set_keywords(&mut self, keywords: impl Into<String>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_keywords(keywords);
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    // =========================================================================
+    // Conversion Methods
+    // =========================================================================
+
+    /// Convert a page to Markdown.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("paper.pdf")?;
+    /// let markdown = doc.to_markdown(0)?;
+    /// println!("{}", markdown);
+    /// ```
+    pub fn to_markdown(&mut self, page: usize) -> Result<String> {
+        if let Some(ref mut editor) = self.editor {
+            let options = ConversionOptions::default();
+            editor.source_mut().to_markdown(page, &options)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Convert a page to HTML.
+    pub fn to_html(&mut self, page: usize) -> Result<String> {
+        if let Some(ref mut editor) = self.editor {
+            let options = ConversionOptions::default();
+            editor.source_mut().to_html(page, &options)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Convert a page to plain text.
+    pub fn to_text(&mut self, page: usize) -> Result<String> {
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_text(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Convert all pages to Markdown and save to a file.
+    pub fn to_markdown_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            let page_count = editor.page_count()?;
+            let options = ConversionOptions::default();
+            let mut content = String::new();
+
+            for i in 0..page_count {
+                if i > 0 {
+                    content.push_str("\n\n---\n\n");
+                }
+                content.push_str(&editor.source_mut().to_markdown(i, &options)?);
+            }
+
+            fs::write(path, content)?;
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Get the PDF bytes (for created PDFs).
+    ///
+    /// Returns empty slice for opened PDFs that haven't been converted to bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     /// Convert to PDF bytes, consuming the Pdf.
-    pub fn into_bytes(self) -> Vec<u8> {
+    ///
+    /// For opened PDFs, this serializes the document to bytes.
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        if self.editor.is_some() && self.bytes.is_empty() {
+            // Opened PDF - serialize it
+            if let Ok(bytes) = self.to_bytes() {
+                return bytes;
+            }
+        }
         self.bytes
     }
 
+    /// Get the document as bytes.
+    ///
+    /// For opened/modified PDFs, this serializes the current state.
+    pub fn to_bytes(&mut self) -> Result<Vec<u8>> {
+        if let Some(ref mut editor) = self.editor {
+            // Use a temporary file to get bytes
+            let temp_path =
+                std::env::temp_dir().join(format!("pdf_oxide_temp_{}.pdf", std::process::id()));
+            editor.save(&temp_path)?;
+            let bytes = fs::read(&temp_path)?;
+            let _ = fs::remove_file(&temp_path);
+            Ok(bytes)
+        } else if !self.bytes.is_empty() {
+            Ok(self.bytes.clone())
+        } else {
+            Err(Error::InvalidOperation("No document to serialize".to_string()))
+        }
+    }
+
     /// Save the PDF to a file.
+    ///
+    /// For created PDFs (from Markdown, HTML, text), saves the generated bytes.
+    /// For opened PDFs, saves all modifications.
     ///
     /// # Example
     ///
     /// ```ignore
     /// use pdf_oxide::api::Pdf;
     ///
+    /// // Save a created PDF
     /// let pdf = Pdf::from_markdown("# Hello")?;
     /// pdf.save("output.pdf")?;
+    ///
+    /// // Save a modified PDF
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let mut page = doc.page(0)?;
+    /// page.set_text(text_id, "modified")?;
+    /// doc.save_page(page)?;
+    /// doc.save("output.pdf")?;
     /// ```
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        fs::write(path.as_ref(), &self.bytes)?;
-        Ok(())
+    pub fn save(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            // Opened PDF - save via editor
+            editor.save(path)
+        } else if !self.bytes.is_empty() {
+            // Created PDF - save bytes
+            fs::write(path.as_ref(), &self.bytes)?;
+            Ok(())
+        } else {
+            Err(Error::InvalidOperation("No document to save".to_string()))
+        }
+    }
+
+    /// Save to a new file path (save as).
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        self.save(path)
+    }
+
+    /// Save the document with encryption/password protection.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path
+    /// * `user_password` - Password required to open the document (can be empty)
+    /// * `owner_password` - Password for full access and changing security settings
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    ///
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.save_encrypted("output.pdf", "userpass", "ownerpass")?;
+    /// ```
+    pub fn save_encrypted(
+        &mut self,
+        path: impl AsRef<Path>,
+        user_password: &str,
+        owner_password: &str,
+    ) -> Result<()> {
+        use crate::editor::{EncryptionAlgorithm, EncryptionConfig, Permissions, SaveOptions};
+
+        let config = EncryptionConfig {
+            user_password: user_password.to_string(),
+            owner_password: owner_password.to_string(),
+            algorithm: EncryptionAlgorithm::Aes256, // Use strongest by default
+            permissions: Permissions::all(),
+        };
+
+        if let Some(ref mut editor) = self.editor {
+            editor.save_with_options(path, SaveOptions::with_encryption(config))
+        } else {
+            Err(Error::InvalidOperation(
+                "Encryption is only supported for opened PDFs. Use Pdf::open() first.".to_string(),
+            ))
+        }
+    }
+
+    /// Save with encryption using a custom configuration.
+    ///
+    /// Allows setting custom permissions and algorithm.
+    ///
+    /// # Arguments
+    /// * `path` - Output file path
+    /// * `config` - Encryption configuration
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    /// use pdf_oxide::editor::{EncryptionConfig, EncryptionAlgorithm, Permissions};
+    ///
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let mut perms = Permissions::read_only();
+    /// perms.print = true; // Allow printing only
+    ///
+    /// let config = EncryptionConfig {
+    ///     user_password: "user".to_string(),
+    ///     owner_password: "owner".to_string(),
+    ///     algorithm: EncryptionAlgorithm::Aes128,
+    ///     permissions: perms,
+    /// };
+    /// doc.save_with_encryption("output.pdf", config)?;
+    /// ```
+    pub fn save_with_encryption(
+        &mut self,
+        path: impl AsRef<Path>,
+        config: crate::editor::EncryptionConfig,
+    ) -> Result<()> {
+        use crate::editor::SaveOptions;
+
+        if let Some(ref mut editor) = self.editor {
+            editor.save_with_options(path, SaveOptions::with_encryption(config))
+        } else {
+            Err(Error::InvalidOperation(
+                "Encryption is only supported for opened PDFs. Use Pdf::open() first.".to_string(),
+            ))
+        }
+    }
+
+    /// Get the source file path (for opened PDFs).
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    /// Get access to the underlying DocumentEditor (for advanced operations).
+    pub fn editor(&mut self) -> Option<&mut DocumentEditor> {
+        self.editor.as_mut()
     }
 
     /// Get the configuration used to create this PDF.
     pub fn config(&self) -> &PdfConfig {
         &self.config
+    }
+
+    // =========================================================================
+    // Page Properties: Rotation, Cropping
+    // =========================================================================
+
+    /// Get the rotation of a page in degrees (0, 90, 180, 270).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let rotation = doc.page_rotation(0)?;
+    /// println!("Page 0 is rotated {} degrees", rotation);
+    /// ```
+    pub fn page_rotation(&mut self, page: usize) -> Result<i32> {
+        if let Some(ref mut editor) = self.editor {
+            editor.get_page_rotation(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the rotation of a page.
+    ///
+    /// Rotation must be 0, 90, 180, or 270 degrees.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.set_page_rotation(0, 90)?;
+    /// doc.save("rotated.pdf")?;
+    /// ```
+    pub fn set_page_rotation(&mut self, page: usize, degrees: i32) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_page_rotation(page, degrees)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Rotate a page by the given degrees (adds to current rotation).
+    ///
+    /// The result is normalized to 0, 90, 180, or 270.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.rotate_page(0, 90)?;  // Rotate 90 degrees clockwise
+    /// doc.save("rotated.pdf")?;
+    /// ```
+    pub fn rotate_page(&mut self, page: usize, degrees: i32) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.rotate_page_by(page, degrees)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Rotate all pages by the given degrees.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.rotate_all_pages(180)?;  // Flip all pages upside down
+    /// doc.save("rotated.pdf")?;
+    /// ```
+    pub fn rotate_all_pages(&mut self, degrees: i32) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.rotate_all_pages(degrees)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Get the MediaBox of a page (physical page size).
+    ///
+    /// Returns [llx, lly, urx, ury] (lower-left x, lower-left y, upper-right x, upper-right y).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// let [llx, lly, urx, ury] = doc.page_media_box(0)?;
+    /// println!("Page size: {}x{}", urx - llx, ury - lly);
+    /// ```
+    pub fn page_media_box(&mut self, page: usize) -> Result<[f32; 4]> {
+        if let Some(ref mut editor) = self.editor {
+            editor.get_page_media_box(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the MediaBox of a page (physical page size).
+    pub fn set_page_media_box(&mut self, page: usize, rect: [f32; 4]) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_page_media_box(page, rect)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Get the CropBox of a page (visible/printable area).
+    ///
+    /// Returns None if no CropBox is set (defaults to MediaBox).
+    pub fn page_crop_box(&mut self, page: usize) -> Result<Option<[f32; 4]>> {
+        if let Some(ref mut editor) = self.editor {
+            editor.get_page_crop_box(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the CropBox of a page (visible/printable area).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// // Crop to a 6x9 inch area starting at 1 inch margins
+    /// doc.set_page_crop_box(0, [72.0, 72.0, 504.0, 720.0])?;
+    /// doc.save("cropped.pdf")?;
+    /// ```
+    pub fn set_page_crop_box(&mut self, page: usize, rect: [f32; 4]) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_page_crop_box(page, rect)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Crop margins from all pages.
+    ///
+    /// This sets the CropBox to be smaller than the MediaBox by the specified margins.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// // Crop 0.5 inch margins from all sides (72 points = 1 inch)
+    /// doc.crop_margins(36.0, 36.0, 36.0, 36.0)?;
+    /// doc.save("cropped.pdf")?;
+    /// ```
+    pub fn crop_margins(&mut self, left: f32, right: f32, top: f32, bottom: f32) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.crop_margins(left, right, top, bottom)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    // =========================================================================
+    // Content Erasing (Whiteout)
+    // =========================================================================
+
+    /// Erase a rectangular region on a page by covering it with white.
+    ///
+    /// This adds a white rectangle overlay that covers the specified region.
+    /// The original content is not removed but hidden beneath the white overlay.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - Page index (0-based)
+    /// * `rect` - Rectangle to erase [llx, lly, urx, ury]
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// // Erase a region in the upper-left corner
+    /// doc.erase_region(0, [72.0, 700.0, 200.0, 792.0])?;
+    /// doc.save("output.pdf")?;
+    /// ```
+    pub fn erase_region(&mut self, page: usize, rect: [f32; 4]) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.erase_region(page, rect)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Erase multiple rectangular regions on a page.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut doc = Pdf::open("input.pdf")?;
+    /// doc.erase_regions(0, &[
+    ///     [72.0, 700.0, 200.0, 792.0],  // Top region
+    ///     [300.0, 300.0, 500.0, 400.0], // Middle region
+    /// ])?;
+    /// doc.save("output.pdf")?;
+    /// ```
+    pub fn erase_regions(&mut self, page: usize, rects: &[[f32; 4]]) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.erase_regions(page, rects)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Clear all pending erase operations for a page.
+    pub fn clear_erase_regions(&mut self, page: usize) {
+        if let Some(ref mut editor) = self.editor {
+            editor.clear_erase_regions(page);
+        }
+    }
+
+    // ========================================================================
+    // Annotation Flattening
+    // ========================================================================
+
+    /// Flatten annotations on a specific page.
+    ///
+    /// Renders annotation appearance streams into the page content and removes
+    /// the annotations. This makes annotations permanent and non-editable.
+    ///
+    /// # Arguments
+    /// * `page` - Zero-based page index
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("document.pdf")?;
+    /// pdf.flatten_page_annotations(0)?;  // Flatten page 0
+    /// pdf.save("flattened.pdf")?;
+    /// ```
+    pub fn flatten_page_annotations(&mut self, page: usize) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.flatten_page_annotations(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Flatten annotations on all pages.
+    ///
+    /// Renders all annotation appearance streams into page content and removes
+    /// all annotations from the document.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("document.pdf")?;
+    /// pdf.flatten_all_annotations()?;
+    /// pdf.save("flattened.pdf")?;
+    /// ```
+    pub fn flatten_all_annotations(&mut self) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.flatten_all_annotations()
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Check if a page is marked for annotation flattening.
+    pub fn is_page_marked_for_flatten(&self, page: usize) -> bool {
+        if let Some(ref editor) = self.editor {
+            editor.is_page_marked_for_flatten(page)
+        } else {
+            false
+        }
+    }
+
+    /// Unmark a page for annotation flattening.
+    pub fn unmark_page_for_flatten(&mut self, page: usize) {
+        if let Some(ref mut editor) = self.editor {
+            editor.unmark_page_for_flatten(page);
+        }
+    }
+
+    // ========================================================================
+    // Redaction Application
+    // ========================================================================
+
+    /// Apply redactions on a specific page.
+    ///
+    /// Finds all redaction annotations on the page, draws colored overlays
+    /// to hide the content, and removes the redaction annotations.
+    ///
+    /// # Arguments
+    /// * `page` - Zero-based page index
+    ///
+    /// # Note
+    /// This implementation creates visual overlays but does not remove
+    /// the underlying content from the stream. For full content removal,
+    /// a more sophisticated implementation would be needed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("document.pdf")?;
+    /// pdf.apply_page_redactions(0)?;  // Apply redactions on page 0
+    /// pdf.save("redacted.pdf")?;
+    /// ```
+    pub fn apply_page_redactions(&mut self, page: usize) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.apply_page_redactions(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Apply redactions on all pages.
+    ///
+    /// Finds all redaction annotations throughout the document, draws
+    /// colored overlays to hide content, and removes the redaction annotations.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("document.pdf")?;
+    /// pdf.apply_all_redactions()?;
+    /// pdf.save("redacted.pdf")?;
+    /// ```
+    pub fn apply_all_redactions(&mut self) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.apply_all_redactions()
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Check if a page is marked for redaction application.
+    pub fn is_page_marked_for_redaction(&self, page: usize) -> bool {
+        if let Some(ref editor) = self.editor {
+            editor.is_page_marked_for_redaction(page)
+        } else {
+            false
+        }
+    }
+
+    /// Unmark a page for redaction application.
+    pub fn unmark_page_for_redaction(&mut self, page: usize) {
+        if let Some(ref mut editor) = self.editor {
+            editor.unmark_page_for_redaction(page);
+        }
+    }
+
+    // ===== Image Repositioning & Resizing =====
+
+    /// Get information about all images on a page.
+    ///
+    /// Returns a list of images with their names, positions, and sizes.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page index (0-based).
+    ///
+    /// # Returns
+    ///
+    /// A vector of `ImageInfo` structs containing image name, bounds (x, y, width, height),
+    /// and transformation matrix.
+    pub fn page_images(&mut self, page: usize) -> Result<Vec<crate::editor::ImageInfo>> {
+        if let Some(ref mut editor) = self.editor {
+            editor.get_page_images(page)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Reposition an image on a page.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page index (0-based).
+    /// * `image_name` - The name of the image XObject (e.g., "Im0").
+    /// * `x` - The new X position.
+    /// * `y` - The new Y position.
+    pub fn reposition_image(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.reposition_image(page, image_name, x, y)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Resize an image on a page.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page index (0-based).
+    /// * `image_name` - The name of the image XObject (e.g., "Im0").
+    /// * `width` - The new width.
+    /// * `height` - The new height.
+    pub fn resize_image(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        width: f32,
+        height: f32,
+    ) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.resize_image(page, image_name, width, height)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Set both position and size of an image on a page.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page index (0-based).
+    /// * `image_name` - The name of the image XObject (e.g., "Im0").
+    /// * `x` - The new X position.
+    /// * `y` - The new Y position.
+    /// * `width` - The new width.
+    /// * `height` - The new height.
+    pub fn set_image_bounds(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.set_image_bounds(page, image_name, x, y, width, height)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Clear all image modifications for a specific page.
+    pub fn clear_image_modifications(&mut self, page: usize) {
+        if let Some(ref mut editor) = self.editor {
+            editor.clear_image_modifications(page);
+        }
+    }
+
+    /// Check if a page has pending image modifications.
+    pub fn has_image_modifications(&self, page: usize) -> bool {
+        if let Some(ref editor) = self.editor {
+            editor.has_image_modifications(page)
+        } else {
+            false
+        }
     }
 }
 
@@ -475,6 +1389,8 @@ impl PdfBuilder {
         Ok(Pdf {
             bytes,
             config: self.config,
+            editor: None,
+            source_path: None,
         })
     }
 
@@ -484,6 +1400,8 @@ impl PdfBuilder {
         Ok(Pdf {
             bytes,
             config: self.config,
+            editor: None,
+            source_path: None,
         })
     }
 
@@ -493,6 +1411,8 @@ impl PdfBuilder {
         Ok(Pdf {
             bytes,
             config: self.config,
+            editor: None,
+            source_path: None,
         })
     }
 

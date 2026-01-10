@@ -3,6 +3,7 @@
 //! Serializes PDF objects to their byte representation according to
 //! PDF specification ISO 32000-1:2008.
 
+use crate::encryption::EncryptionWriteHandler;
 use crate::object::{Object, ObjectRef};
 use std::collections::HashMap;
 use std::io::Write;
@@ -55,6 +56,133 @@ impl ObjectSerializer {
         self.write_object(&mut buf, obj).unwrap();
         write!(buf, "\nendobj\n").unwrap();
         buf
+    }
+
+    /// Serialize an indirect object with encryption.
+    ///
+    /// Format: `{id} {gen} obj\n{encrypted_object}\nendobj\n`
+    ///
+    /// Strings and stream data within the object are encrypted using
+    /// the provided encryption handler.
+    pub fn serialize_indirect_encrypted(
+        &self,
+        id: u32,
+        gen: u16,
+        obj: &Object,
+        handler: &EncryptionWriteHandler,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        writeln!(buf, "{} {} obj", id, gen).unwrap();
+        self.write_object_encrypted(&mut buf, obj, id, gen, handler)
+            .unwrap();
+        write!(buf, "\nendobj\n").unwrap();
+        buf
+    }
+
+    /// Write an encrypted object to a buffer.
+    fn write_object_encrypted<W: Write>(
+        &self,
+        w: &mut W,
+        obj: &Object,
+        obj_num: u32,
+        gen_num: u16,
+        handler: &EncryptionWriteHandler,
+    ) -> std::io::Result<()> {
+        match obj {
+            Object::Null => write!(w, "null"),
+            Object::Boolean(b) => write!(w, "{}", if *b { "true" } else { "false" }),
+            Object::Integer(i) => write!(w, "{}", i),
+            Object::Real(r) => self.write_real(w, *r),
+            Object::String(s) => {
+                // Encrypt the string
+                let encrypted = handler.encrypt_string(s, obj_num, gen_num);
+                self.write_string(w, &encrypted)
+            },
+            Object::Name(n) => self.write_name(w, n),
+            Object::Array(arr) => self.write_array_encrypted(w, arr, obj_num, gen_num, handler),
+            Object::Dictionary(dict) => {
+                self.write_dictionary_encrypted(w, dict, obj_num, gen_num, handler)
+            },
+            Object::Stream { dict, data } => {
+                self.write_stream_encrypted(w, dict, data, obj_num, gen_num, handler)
+            },
+            Object::Reference(r) => write!(w, "{} {} R", r.id, r.gen),
+        }
+    }
+
+    /// Write an encrypted array.
+    fn write_array_encrypted<W: Write>(
+        &self,
+        w: &mut W,
+        arr: &[Object],
+        obj_num: u32,
+        gen_num: u16,
+        handler: &EncryptionWriteHandler,
+    ) -> std::io::Result<()> {
+        write!(w, "[")?;
+        for (i, obj) in arr.iter().enumerate() {
+            if i > 0 {
+                write!(w, " ")?;
+            }
+            self.write_object_encrypted(w, obj, obj_num, gen_num, handler)?;
+        }
+        write!(w, "]")
+    }
+
+    /// Write an encrypted dictionary.
+    fn write_dictionary_encrypted<W: Write>(
+        &self,
+        w: &mut W,
+        dict: &HashMap<String, Object>,
+        obj_num: u32,
+        gen_num: u16,
+        handler: &EncryptionWriteHandler,
+    ) -> std::io::Result<()> {
+        write!(w, "<<")?;
+
+        // Sort keys for deterministic output
+        let mut keys: Vec<_> = dict.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            if let Some(value) = dict.get(key) {
+                if !self.compact {
+                    write!(w, "\n  ")?;
+                }
+                self.write_name(w, key)?;
+                write!(w, " ")?;
+                self.write_object_encrypted(w, value, obj_num, gen_num, handler)?;
+            }
+        }
+
+        if !self.compact && !dict.is_empty() {
+            writeln!(w)?;
+        }
+        write!(w, ">>")
+    }
+
+    /// Write an encrypted stream.
+    fn write_stream_encrypted<W: Write>(
+        &self,
+        w: &mut W,
+        dict: &HashMap<String, Object>,
+        data: &[u8],
+        obj_num: u32,
+        gen_num: u16,
+        handler: &EncryptionWriteHandler,
+    ) -> std::io::Result<()> {
+        // Encrypt the stream data
+        let encrypted_data = handler.encrypt_stream(data, obj_num, gen_num);
+
+        // Update dictionary with encrypted length
+        let mut dict_with_length = dict.clone();
+        dict_with_length.insert("Length".to_string(), Object::Integer(encrypted_data.len() as i64));
+
+        // Write dictionary (with encrypted strings inside)
+        self.write_dictionary_encrypted(w, &dict_with_length, obj_num, gen_num, handler)?;
+        write!(w, "\nstream\n")?;
+        w.write_all(&encrypted_data)?;
+        write!(w, "\nendstream")
     }
 
     /// Write an object to a buffer.

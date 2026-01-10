@@ -149,7 +149,7 @@ This document demonstrates the PDF creation and editing capabilities
 of the pdf_oxide library.
 "#;
 
-    let pdf = PdfBuilder::new()
+    let mut pdf = PdfBuilder::new()
         .title("Sample Document")
         .author("Original Author")
         .subject("Sample Content")

@@ -173,6 +173,8 @@ pub struct SaveOptions {
     pub linearize: bool,
     /// Remove unused objects
     pub garbage_collect: bool,
+    /// Encryption configuration (None = no encryption)
+    pub encryption: Option<EncryptionConfig>,
 }
 
 impl SaveOptions {
@@ -192,6 +194,20 @@ impl SaveOptions {
             incremental: true,
             compress: false,
             garbage_collect: false,
+            ..Default::default()
+        }
+    }
+
+    /// Create options with encryption enabled.
+    ///
+    /// Uses full rewrite mode since incremental updates don't support
+    /// adding encryption to an existing PDF.
+    pub fn with_encryption(config: EncryptionConfig) -> Self {
+        Self {
+            incremental: false,
+            compress: true,
+            garbage_collect: true,
+            encryption: Some(config),
             ..Default::default()
         }
     }
@@ -263,6 +279,61 @@ impl Permissions {
             accessibility: true, // Always allow for compliance
             ..Default::default()
         }
+    }
+
+    /// Convert permissions to the 32-bit P value for the encryption dictionary.
+    ///
+    /// PDF Spec: Table 22 - User access permissions
+    ///
+    /// The returned value has reserved bits set appropriately:
+    /// - Bits 7-8 must be 1
+    /// - Bits 13-32 must be 1 (for compatibility)
+    pub fn to_bits(&self) -> i32 {
+        // Base value with required reserved bits set
+        // Bits 7-8 (0-indexed: 6-7) and bits 13-32 (0-indexed: 12-31) must be 1
+        let mut bits: i32 = 0xFFFFF0C0u32 as i32;
+
+        // Bit 3 (0-indexed: 2): Print
+        if self.print {
+            bits |= 1 << 2;
+        }
+
+        // Bit 4 (0-indexed: 3): Modify contents
+        if self.modify {
+            bits |= 1 << 3;
+        }
+
+        // Bit 5 (0-indexed: 4): Copy or extract text and graphics
+        if self.copy {
+            bits |= 1 << 4;
+        }
+
+        // Bit 6 (0-indexed: 5): Add or modify annotations
+        if self.annotate {
+            bits |= 1 << 5;
+        }
+
+        // Bit 9 (0-indexed: 8): Fill in form fields (R>=3)
+        if self.fill_forms {
+            bits |= 1 << 8;
+        }
+
+        // Bit 10 (0-indexed: 9): Extract text for accessibility (R>=3)
+        if self.accessibility {
+            bits |= 1 << 9;
+        }
+
+        // Bit 11 (0-indexed: 10): Assemble document (R>=3)
+        if self.assemble {
+            bits |= 1 << 10;
+        }
+
+        // Bit 12 (0-indexed: 11): Print high quality (R>=3)
+        if self.print_high_quality {
+            bits |= 1 << 11;
+        }
+
+        bits
     }
 }
 
@@ -394,6 +465,66 @@ pub struct DocumentEditor {
     structure_modified: bool,
     /// Modified page annotations (page_index → annotations)
     modified_annotations: HashMap<usize, Vec<crate::editor::dom::AnnotationWrapper>>,
+    /// Modified page properties (rotation, boxes)
+    modified_page_props: HashMap<usize, ModifiedPageProps>,
+    /// Erase regions per page (whiteout overlays)
+    erase_regions: HashMap<usize, Vec<[f32; 4]>>,
+    /// Pages where annotations should be flattened
+    flatten_annotations_pages: std::collections::HashSet<usize>,
+    /// Pages where redactions should be applied
+    apply_redactions_pages: std::collections::HashSet<usize>,
+    /// Image modifications per page: page_index -> (image_name -> modification)
+    image_modifications: HashMap<usize, HashMap<String, ImageModification>>,
+}
+
+/// Tracks modified page properties.
+#[derive(Debug, Clone, Default)]
+pub struct ModifiedPageProps {
+    /// New rotation value (0, 90, 180, 270)
+    pub rotation: Option<i32>,
+    /// New MediaBox
+    pub media_box: Option<[f32; 4]>,
+    /// New CropBox
+    pub crop_box: Option<[f32; 4]>,
+}
+
+/// Stores annotation appearance data for flattening.
+#[derive(Debug, Clone)]
+struct AnnotationAppearance {
+    /// Content stream bytes from the appearance
+    content: Vec<u8>,
+    /// BBox of the appearance XObject
+    bbox: [f32; 4],
+    /// Rect of the annotation on the page
+    annot_rect: [f32; 4],
+    /// Optional transformation matrix from the appearance
+    matrix: Option<[f32; 6]>,
+    /// Resources used by the appearance
+    resources: Option<Object>,
+}
+
+/// Information about an image on a page.
+#[derive(Debug, Clone)]
+pub struct ImageInfo {
+    /// XObject name (e.g., "Im1")
+    pub name: String,
+    /// Position and size: x, y, width, height
+    pub bounds: [f32; 4],
+    /// Full transformation matrix [a, b, c, d, e, f]
+    pub matrix: [f32; 6],
+}
+
+/// Modification to apply to an image.
+#[derive(Debug, Clone)]
+struct ImageModification {
+    /// New x position (if Some, changes position)
+    x: Option<f32>,
+    /// New y position (if Some, changes position)
+    y: Option<f32>,
+    /// New width (if Some, changes width)
+    width: Option<f32>,
+    /// New height (if Some, changes height)
+    height: Option<f32>,
 }
 
 impl DocumentEditor {
@@ -433,6 +564,11 @@ impl DocumentEditor {
             resource_manager: ResourceManager::new(),
             structure_modified: false,
             modified_annotations: HashMap::new(),
+            modified_page_props: HashMap::new(),
+            erase_regions: HashMap::new(),
+            flatten_annotations_pages: std::collections::HashSet::new(),
+            apply_redactions_pages: std::collections::HashSet::new(),
+            image_modifications: HashMap::new(),
         })
     }
 
@@ -451,6 +587,50 @@ impl DocumentEditor {
         id
     }
 
+    /// Apply page property modifications to a page object.
+    ///
+    /// Returns a new page object with the modifications applied.
+    fn apply_page_props_to_object(
+        &self,
+        page_obj: &Object,
+        props: &ModifiedPageProps,
+    ) -> Result<Object> {
+        let page_dict = page_obj
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
+
+        let mut new_dict = page_dict.clone();
+
+        // Apply rotation if modified
+        if let Some(rotation) = props.rotation {
+            new_dict.insert("Rotate".to_string(), Object::Integer(rotation as i64));
+        }
+
+        // Apply MediaBox if modified
+        if let Some(media_box) = props.media_box {
+            let box_array = Object::Array(vec![
+                Object::Real(media_box[0] as f64),
+                Object::Real(media_box[1] as f64),
+                Object::Real(media_box[2] as f64),
+                Object::Real(media_box[3] as f64),
+            ]);
+            new_dict.insert("MediaBox".to_string(), box_array);
+        }
+
+        // Apply CropBox if modified
+        if let Some(crop_box) = props.crop_box {
+            let box_array = Object::Array(vec![
+                Object::Real(crop_box[0] as f64),
+                Object::Real(crop_box[1] as f64),
+                Object::Real(crop_box[2] as f64),
+                Object::Real(crop_box[3] as f64),
+            ]);
+            new_dict.insert("CropBox".to_string(), box_array);
+        }
+
+        Ok(Object::Dictionary(new_dict))
+    }
+
     /// Check if the document has unsaved changes.
     pub fn is_modified(&self) -> bool {
         self.is_modified
@@ -459,6 +639,18 @@ impl DocumentEditor {
     /// Get the source file path.
     pub fn source_path(&self) -> &str {
         &self.source_path
+    }
+
+    /// Get immutable reference to the source document.
+    pub fn source(&self) -> &PdfDocument {
+        &self.source
+    }
+
+    /// Get mutable reference to the source document.
+    ///
+    /// This provides access to PdfDocument methods for extraction and conversion.
+    pub fn source_mut(&mut self) -> &mut PdfDocument {
+        &mut self.source
     }
 
     /// Get the PDF version.
@@ -841,7 +1033,15 @@ impl DocumentEditor {
     }
 
     /// Write a full rewrite of the PDF.
-    fn write_full(&mut self, path: impl AsRef<Path>) -> Result<()> {
+    fn write_full(
+        &mut self,
+        path: impl AsRef<Path>,
+        encryption_config: Option<&EncryptionConfig>,
+    ) -> Result<()> {
+        use crate::encryption::{
+            generate_file_id, Algorithm, EncryptDictBuilder, EncryptionWriteHandler,
+        };
+
         // For full rewrite, we need to:
         // 1. Collect all objects (original + modified + new)
         // 2. Optionally remove unused objects
@@ -862,6 +1062,56 @@ impl DocumentEditor {
         writer.write_all(b"%\x80\x81\x82\x83\n")?;
 
         let serializer = ObjectSerializer::compact();
+
+        // Set up encryption if configured
+        let (file_id, encrypt_dict, encryption_handler) = if let Some(config) = encryption_config {
+            let (id1, id2) = generate_file_id();
+
+            // Convert EncryptionAlgorithm to encryption::Algorithm
+            let algorithm = match config.algorithm {
+                EncryptionAlgorithm::Rc4_40 => Algorithm::RC4_40,
+                EncryptionAlgorithm::Rc4_128 => Algorithm::Rc4_128,
+                EncryptionAlgorithm::Aes128 => Algorithm::Aes128,
+                EncryptionAlgorithm::Aes256 => Algorithm::Aes256,
+            };
+
+            // Build encryption dictionary
+            let encrypt_dict = EncryptDictBuilder::new(algorithm)
+                .user_password(config.user_password.as_bytes())
+                .owner_password(config.owner_password.as_bytes())
+                .permissions(config.permissions.to_bits())
+                .encrypt_metadata(true)
+                .build(&id1);
+
+            // Create encryption handler
+            let handler = EncryptionWriteHandler::new(
+                config.user_password.as_bytes(),
+                &encrypt_dict.owner_password,
+                encrypt_dict.permissions,
+                &id1,
+                algorithm,
+                true,
+            );
+
+            (Some((id1, id2)), Some(encrypt_dict), Some(handler))
+        } else {
+            (None, None, None)
+        };
+
+        // Helper to serialize with or without encryption
+        let serialize_obj = |s: &ObjectSerializer,
+                             id: u32,
+                             gen: u16,
+                             obj: &Object,
+                             handler: &Option<EncryptionWriteHandler>|
+         -> Vec<u8> {
+            if let Some(ref h) = handler {
+                s.serialize_indirect_encrypted(id, gen, obj, h)
+            } else {
+                s.serialize_indirect(id, gen, obj)
+            }
+        };
+
         let mut xref_entries: Vec<(u32, u64, u16, bool)> = Vec::new(); // (id, offset, gen, in_use)
 
         // Object 0 is always free
@@ -883,6 +1133,20 @@ impl DocumentEditor {
         // For now, do a simple copy of essential objects
         // Full implementation would do complete object traversal
 
+        // Write encryption dictionary if encrypting (must not be encrypted itself)
+        let encrypt_obj_id = if let Some(ref enc_dict) = encrypt_dict {
+            let enc_id = self.allocate_object_id();
+            let enc_obj = enc_dict.to_object();
+            let offset = writer.stream_position()?;
+            // Encryption dict is NOT encrypted
+            let bytes = serializer.serialize_indirect(enc_id, 0, &enc_obj);
+            writer.write_all(&bytes)?;
+            xref_entries.push((enc_id, offset, 0, true));
+            Some(enc_id)
+        } else {
+            None
+        };
+
         // Write catalog (possibly modified)
         let catalog_obj = self
             .modified_objects
@@ -890,7 +1154,8 @@ impl DocumentEditor {
             .cloned()
             .unwrap_or(catalog);
         let offset = writer.stream_position()?;
-        let bytes = serializer.serialize_indirect(catalog_ref.id, 0, &catalog_obj);
+        let bytes =
+            serialize_obj(&serializer, catalog_ref.id, 0, &catalog_obj, &encryption_handler);
         writer.write_all(&bytes)?;
         xref_entries.push((catalog_ref.id, offset, 0, true));
 
@@ -899,7 +1164,8 @@ impl DocumentEditor {
             if let Some(pages_ref) = catalog_dict.get("Pages").and_then(|p| p.as_reference()) {
                 let pages_obj = self.source.load_object(pages_ref)?;
                 let offset = writer.stream_position()?;
-                let bytes = serializer.serialize_indirect(pages_ref.id, 0, &pages_obj);
+                let bytes =
+                    serialize_obj(&serializer, pages_ref.id, 0, &pages_obj, &encryption_handler);
                 writer.write_all(&bytes)?;
                 xref_entries.push((pages_ref.id, offset, 0, true));
 
@@ -910,9 +1176,215 @@ impl DocumentEditor {
                         for kid in kids {
                             if let Some(page_ref) = kid.as_reference() {
                                 let page_obj = self.source.load_object(page_ref)?;
+
+                                // Check if we have erase overlays for this page
+                                let has_erase_overlay =
+                                    self.erase_regions.contains_key(&page_index);
+                                let erase_overlay_id = if has_erase_overlay {
+                                    Some(self.allocate_object_id())
+                                } else {
+                                    None
+                                };
+
+                                // Check if we need to flatten annotations for this page
+                                let should_flatten =
+                                    self.flatten_annotations_pages.contains(&page_index);
+                                let flatten_data: Option<(
+                                    Vec<AnnotationAppearance>,
+                                    u32,
+                                    Vec<(u32, String)>,
+                                )> = if should_flatten {
+                                    // Get annotation appearances
+                                    let appearances =
+                                        self.get_annotation_appearances(page_index)?;
+                                    if !appearances.is_empty() {
+                                        // Allocate object IDs for each XObject and one for the overlay
+                                        let overlay_id = self.allocate_object_id();
+                                        let xobj_ids: Vec<(u32, String)> = appearances
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, _)| {
+                                                let id = self.allocate_object_id();
+                                                let name = format!("FlatAnnot{}", i);
+                                                (id, name)
+                                            })
+                                            .collect();
+                                        Some((appearances, overlay_id, xobj_ids))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // Check if we need to apply redactions for this page
+                                let should_apply_redactions =
+                                    self.apply_redactions_pages.contains(&page_index);
+                                let redaction_data: Option<(Vec<RedactionData>, u32)> =
+                                    if should_apply_redactions {
+                                        let redactions = self.get_redaction_data(page_index)?;
+                                        if !redactions.is_empty() {
+                                            let overlay_id = self.allocate_object_id();
+                                            Some((redactions, overlay_id))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                // Apply page property modifications if any
+                                let mut final_page_obj = if let Some(props) =
+                                    self.modified_page_props.get(&page_index)
+                                {
+                                    self.apply_page_props_to_object(&page_obj, props)?
+                                } else {
+                                    page_obj.clone()
+                                };
+
+                                // If we have an erase overlay, update Contents to include it
+                                if let (Some(overlay_obj_id), Some(page_dict)) =
+                                    (erase_overlay_id, final_page_obj.as_dict())
+                                {
+                                    let mut new_dict = page_dict.clone();
+                                    // Get existing Contents reference
+                                    if let Some(contents) = new_dict.get("Contents").cloned() {
+                                        // Create an array with original content + overlay
+                                        let overlay_ref =
+                                            Object::Reference(ObjectRef::new(overlay_obj_id, 0));
+                                        let contents_array = match contents {
+                                            Object::Reference(_) => {
+                                                Object::Array(vec![contents, overlay_ref])
+                                            },
+                                            Object::Array(mut arr) => {
+                                                arr.push(overlay_ref);
+                                                Object::Array(arr)
+                                            },
+                                            _ => Object::Array(vec![contents, overlay_ref]),
+                                        };
+                                        new_dict.insert("Contents".to_string(), contents_array);
+                                    }
+                                    final_page_obj = Object::Dictionary(new_dict);
+                                }
+
+                                // If we're flattening annotations, update page dictionary
+                                if let (
+                                    Some((ref appearances, flatten_overlay_id, ref xobj_ids)),
+                                    Some(page_dict),
+                                ) = (&flatten_data, final_page_obj.as_dict())
+                                {
+                                    let mut new_dict = page_dict.clone();
+
+                                    // Add flatten overlay to Contents
+                                    if let Some(contents) = new_dict.get("Contents").cloned() {
+                                        let overlay_ref = Object::Reference(ObjectRef::new(
+                                            *flatten_overlay_id,
+                                            0,
+                                        ));
+                                        let contents_array = match contents {
+                                            Object::Reference(_) => {
+                                                Object::Array(vec![contents, overlay_ref])
+                                            },
+                                            Object::Array(mut arr) => {
+                                                arr.push(overlay_ref);
+                                                Object::Array(arr)
+                                            },
+                                            _ => Object::Array(vec![contents, overlay_ref]),
+                                        };
+                                        new_dict.insert("Contents".to_string(), contents_array);
+                                    }
+
+                                    // Add XObjects to Resources
+                                    let resources = new_dict.get("Resources").cloned();
+                                    let mut resources_dict = match resources {
+                                        Some(Object::Dictionary(d)) => d,
+                                        Some(Object::Reference(res_ref)) => {
+                                            match self.source.load_object(res_ref) {
+                                                Ok(Object::Dictionary(d)) => d,
+                                                _ => HashMap::new(),
+                                            }
+                                        },
+                                        _ => HashMap::new(),
+                                    };
+
+                                    // Get or create XObject subdictionary
+                                    let mut xobject_dict = match resources_dict.get("XObject") {
+                                        Some(Object::Dictionary(d)) => d.clone(),
+                                        Some(Object::Reference(xobj_ref)) => {
+                                            match self.source.load_object(*xobj_ref) {
+                                                Ok(Object::Dictionary(d)) => d,
+                                                _ => HashMap::new(),
+                                            }
+                                        },
+                                        _ => HashMap::new(),
+                                    };
+
+                                    // Add our flattened annotation XObjects
+                                    for (obj_id, name) in xobj_ids {
+                                        xobject_dict.insert(
+                                            name.clone(),
+                                            Object::Reference(ObjectRef::new(*obj_id, 0)),
+                                        );
+                                    }
+
+                                    resources_dict.insert(
+                                        "XObject".to_string(),
+                                        Object::Dictionary(xobject_dict),
+                                    );
+                                    new_dict.insert(
+                                        "Resources".to_string(),
+                                        Object::Dictionary(resources_dict),
+                                    );
+
+                                    // Remove /Annots array
+                                    new_dict.remove("Annots");
+
+                                    final_page_obj = Object::Dictionary(new_dict);
+                                }
+
+                                // If we're applying redactions, update page dictionary
+                                if let (
+                                    Some((ref redactions, redact_overlay_id)),
+                                    Some(page_dict),
+                                ) = (&redaction_data, final_page_obj.as_dict())
+                                {
+                                    let mut new_dict = page_dict.clone();
+
+                                    // Add redaction overlay to Contents
+                                    if let Some(contents) = new_dict.get("Contents").cloned() {
+                                        let overlay_ref = Object::Reference(ObjectRef::new(
+                                            *redact_overlay_id,
+                                            0,
+                                        ));
+                                        let contents_array = match contents {
+                                            Object::Reference(_) => {
+                                                Object::Array(vec![contents, overlay_ref])
+                                            },
+                                            Object::Array(mut arr) => {
+                                                arr.push(overlay_ref);
+                                                Object::Array(arr)
+                                            },
+                                            _ => Object::Array(vec![contents, overlay_ref]),
+                                        };
+                                        new_dict.insert("Contents".to_string(), contents_array);
+                                    }
+
+                                    // Remove Redact annotations from /Annots array
+                                    // For now, we remove the entire /Annots array when applying redactions
+                                    // A more sophisticated implementation would only remove Redact subtypes
+                                    new_dict.remove("Annots");
+
+                                    final_page_obj = Object::Dictionary(new_dict);
+                                }
+
                                 let offset = writer.stream_position()?;
-                                let bytes =
-                                    serializer.serialize_indirect(page_ref.id, 0, &page_obj);
+                                let bytes = serialize_obj(
+                                    &serializer,
+                                    page_ref.id,
+                                    0,
+                                    &final_page_obj,
+                                    &encryption_handler,
+                                );
                                 writer.write_all(&bytes)?;
                                 xref_entries.push((page_ref.id, offset, 0, true));
 
@@ -939,10 +1411,12 @@ impl DocumentEditor {
                                                 let xobj_stream =
                                                     Self::build_image_xobject(&pending_image.image);
                                                 let offset = writer.stream_position()?;
-                                                let bytes = serializer.serialize_indirect(
+                                                let bytes = serialize_obj(
+                                                    &serializer,
                                                     xobj_id,
                                                     0,
                                                     &xobj_stream,
+                                                    &encryption_handler,
                                                 );
                                                 writer.write_all(&bytes)?;
                                                 xref_entries.push((xobj_id, offset, 0, true));
@@ -962,10 +1436,12 @@ impl DocumentEditor {
                                             // Allocate new object ID for the content stream
                                             let new_contents_id = self.allocate_object_id();
                                             let offset = writer.stream_position()?;
-                                            let bytes = serializer.serialize_indirect(
+                                            let bytes = serialize_obj(
+                                                &serializer,
                                                 new_contents_id,
                                                 0,
                                                 &content_stream_obj,
+                                                &encryption_handler,
                                             );
                                             writer.write_all(&bytes)?;
                                             xref_entries.push((new_contents_id, offset, 0, true));
@@ -981,20 +1457,162 @@ impl DocumentEditor {
                                             let _ = xobject_refs; // Suppress unused warning
                                         }
                                     } else {
-                                        // Use original contents
-                                        if let Some(contents_ref) =
-                                            page_dict.get("Contents").and_then(|c| c.as_reference())
-                                        {
-                                            let contents_obj =
-                                                self.source.load_object(contents_ref)?;
-                                            let offset = writer.stream_position()?;
-                                            let bytes = serializer.serialize_indirect(
-                                                contents_ref.id,
-                                                0,
-                                                &contents_obj,
-                                            );
-                                            writer.write_all(&bytes)?;
-                                            xref_entries.push((contents_ref.id, offset, 0, true));
+                                        // Check if we have image modifications for this page
+                                        let has_image_mods =
+                                            self.image_modifications.contains_key(&page_index);
+
+                                        if has_image_mods {
+                                            // Rewrite content stream with image modifications
+                                            if let Some(contents) = page_dict.get("Contents") {
+                                                match contents {
+                                                    Object::Reference(contents_ref) => {
+                                                        let contents_obj = self
+                                                            .source
+                                                            .load_object(*contents_ref)?;
+                                                        if let Ok(content_data) =
+                                                            contents_obj.decode_stream_data()
+                                                        {
+                                                            let mods = self
+                                                                .image_modifications
+                                                                .get(&page_index)
+                                                                .unwrap();
+                                                            match self.rewrite_content_stream_with_image_mods(&content_data, mods) {
+                                                                Ok(modified_content) => {
+                                                                    let modified_stream = Object::Stream {
+                                                                        dict: HashMap::new(),
+                                                                        data: modified_content.into(),
+                                                                    };
+                                                                    let offset = writer.stream_position()?;
+                                                                    let bytes = serialize_obj(&serializer,
+                                                                        contents_ref.id,
+                                                                        0,
+                                                                        &modified_stream,
+                                                                        &encryption_handler,
+                                                                    );
+                                                                    writer.write_all(&bytes)?;
+                                                                    xref_entries.push((contents_ref.id, offset, 0, true));
+                                                                }
+                                                                Err(_) => {
+                                                                    // Fallback to original content on error
+                                                                    let offset = writer.stream_position()?;
+                                                                    let bytes = serialize_obj(&serializer,
+                                                                        contents_ref.id,
+                                                                        0,
+                                                                        &contents_obj,
+                                                                        &encryption_handler,
+                                                                    );
+                                                                    writer.write_all(&bytes)?;
+                                                                    xref_entries.push((contents_ref.id, offset, 0, true));
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Can't decode, write original
+                                                            let offset =
+                                                                writer.stream_position()?;
+                                                            let bytes = serialize_obj(
+                                                                &serializer,
+                                                                contents_ref.id,
+                                                                0,
+                                                                &contents_obj,
+                                                                &encryption_handler,
+                                                            );
+                                                            writer.write_all(&bytes)?;
+                                                            xref_entries.push((
+                                                                contents_ref.id,
+                                                                offset,
+                                                                0,
+                                                                true,
+                                                            ));
+                                                        }
+                                                    },
+                                                    Object::Array(arr) => {
+                                                        // Multiple content streams - apply modifications to all
+                                                        let mods = self
+                                                            .image_modifications
+                                                            .get(&page_index)
+                                                            .unwrap();
+                                                        for item in arr {
+                                                            if let Object::Reference(ref_obj) = item
+                                                            {
+                                                                let stream_obj = self
+                                                                    .source
+                                                                    .load_object(*ref_obj)?;
+                                                                if let Ok(content_data) =
+                                                                    stream_obj.decode_stream_data()
+                                                                {
+                                                                    match self.rewrite_content_stream_with_image_mods(&content_data, mods) {
+                                                                        Ok(modified_content) => {
+                                                                            let modified_stream = Object::Stream {
+                                                                                dict: HashMap::new(),
+                                                                                data: modified_content.into(),
+                                                                            };
+                                                                            let offset = writer.stream_position()?;
+                                                                            let bytes = serialize_obj(&serializer,
+                                                                                ref_obj.id,
+                                                                                0,
+                                                                                &modified_stream,
+                                                                                &encryption_handler,
+                                                                            );
+                                                                            writer.write_all(&bytes)?;
+                                                                            xref_entries.push((ref_obj.id, offset, 0, true));
+                                                                        }
+                                                                        Err(_) => {
+                                                                            let offset = writer.stream_position()?;
+                                                                            let bytes = serialize_obj(&serializer,
+                                                                                ref_obj.id,
+                                                                                0,
+                                                                                &stream_obj,
+                                                                                &encryption_handler,
+                                                                            );
+                                                                            writer.write_all(&bytes)?;
+                                                                            xref_entries.push((ref_obj.id, offset, 0, true));
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    let offset =
+                                                                        writer.stream_position()?;
+                                                                    let bytes = serialize_obj(
+                                                                        &serializer,
+                                                                        ref_obj.id,
+                                                                        0,
+                                                                        &stream_obj,
+                                                                        &encryption_handler,
+                                                                    );
+                                                                    writer.write_all(&bytes)?;
+                                                                    xref_entries.push((
+                                                                        ref_obj.id, offset, 0, true,
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                    },
+                                                    _ => {},
+                                                }
+                                            }
+                                        } else {
+                                            // Use original contents
+                                            if let Some(contents_ref) = page_dict
+                                                .get("Contents")
+                                                .and_then(|c| c.as_reference())
+                                            {
+                                                let contents_obj =
+                                                    self.source.load_object(contents_ref)?;
+                                                let offset = writer.stream_position()?;
+                                                let bytes = serialize_obj(
+                                                    &serializer,
+                                                    contents_ref.id,
+                                                    0,
+                                                    &contents_obj,
+                                                    &encryption_handler,
+                                                );
+                                                writer.write_all(&bytes)?;
+                                                xref_entries.push((
+                                                    contents_ref.id,
+                                                    offset,
+                                                    0,
+                                                    true,
+                                                ));
+                                            }
                                         }
                                     }
 
@@ -1005,14 +1623,153 @@ impl DocumentEditor {
                                         let resources_obj =
                                             self.source.load_object(resources_ref)?;
                                         let offset = writer.stream_position()?;
-                                        let bytes = serializer.serialize_indirect(
+                                        let bytes = serialize_obj(
+                                            &serializer,
                                             resources_ref.id,
                                             0,
                                             &resources_obj,
+                                            &encryption_handler,
                                         );
                                         writer.write_all(&bytes)?;
                                         xref_entries.push((resources_ref.id, offset, 0, true));
                                     }
+                                }
+
+                                // Write erase overlay content stream if present
+                                if let Some(overlay_obj_id) = erase_overlay_id {
+                                    if let Some(overlay_content) =
+                                        self.generate_erase_overlay(page_index)
+                                    {
+                                        // Create stream object for the overlay
+                                        let overlay_stream = Object::Stream {
+                                            dict: HashMap::new(),
+                                            data: overlay_content.into(),
+                                        };
+                                        let offset = writer.stream_position()?;
+                                        let bytes = serialize_obj(
+                                            &serializer,
+                                            overlay_obj_id,
+                                            0,
+                                            &overlay_stream,
+                                            &encryption_handler,
+                                        );
+                                        writer.write_all(&bytes)?;
+                                        xref_entries.push((overlay_obj_id, offset, 0, true));
+                                    }
+                                }
+
+                                // Write flatten annotation XObjects and overlay
+                                if let Some((ref appearances, overlay_id, ref xobj_ids)) =
+                                    flatten_data
+                                {
+                                    // Write each appearance as a Form XObject
+                                    for ((obj_id, _name), appearance) in
+                                        xobj_ids.iter().zip(appearances.iter())
+                                    {
+                                        // Build Form XObject dictionary
+                                        let mut form_dict = HashMap::new();
+                                        form_dict.insert(
+                                            "Type".to_string(),
+                                            Object::Name("XObject".to_string()),
+                                        );
+                                        form_dict.insert(
+                                            "Subtype".to_string(),
+                                            Object::Name("Form".to_string()),
+                                        );
+                                        form_dict
+                                            .insert("FormType".to_string(), Object::Integer(1));
+                                        form_dict.insert(
+                                            "BBox".to_string(),
+                                            Object::Array(vec![
+                                                Object::Real(appearance.bbox[0] as f64),
+                                                Object::Real(appearance.bbox[1] as f64),
+                                                Object::Real(appearance.bbox[2] as f64),
+                                                Object::Real(appearance.bbox[3] as f64),
+                                            ]),
+                                        );
+
+                                        // Add matrix if present
+                                        if let Some(m) = appearance.matrix {
+                                            form_dict.insert(
+                                                "Matrix".to_string(),
+                                                Object::Array(vec![
+                                                    Object::Real(m[0] as f64),
+                                                    Object::Real(m[1] as f64),
+                                                    Object::Real(m[2] as f64),
+                                                    Object::Real(m[3] as f64),
+                                                    Object::Real(m[4] as f64),
+                                                    Object::Real(m[5] as f64),
+                                                ]),
+                                            );
+                                        }
+
+                                        // Add resources if present
+                                        if let Some(ref resources) = appearance.resources {
+                                            form_dict
+                                                .insert("Resources".to_string(), resources.clone());
+                                        }
+
+                                        // Create stream object
+                                        let form_stream = Object::Stream {
+                                            dict: form_dict,
+                                            data: appearance.content.clone().into(),
+                                        };
+
+                                        let offset = writer.stream_position()?;
+                                        let bytes = serialize_obj(
+                                            &serializer,
+                                            *obj_id,
+                                            0,
+                                            &form_stream,
+                                            &encryption_handler,
+                                        );
+                                        writer.write_all(&bytes)?;
+                                        xref_entries.push((*obj_id, offset, 0, true));
+                                    }
+
+                                    // Write the overlay content stream that invokes the XObjects
+                                    let xobj_names: Vec<String> =
+                                        xobj_ids.iter().map(|(_, name)| name.clone()).collect();
+                                    let overlay_content =
+                                        self.generate_flatten_overlay(appearances, &xobj_names);
+
+                                    let overlay_stream = Object::Stream {
+                                        dict: HashMap::new(),
+                                        data: overlay_content.into(),
+                                    };
+
+                                    let offset = writer.stream_position()?;
+                                    let bytes = serialize_obj(
+                                        &serializer,
+                                        overlay_id,
+                                        0,
+                                        &overlay_stream,
+                                        &encryption_handler,
+                                    );
+                                    writer.write_all(&bytes)?;
+                                    xref_entries.push((overlay_id, offset, 0, true));
+                                }
+
+                                // Write redaction overlay content stream if present
+                                if let Some((ref redactions, redact_overlay_id)) = redaction_data {
+                                    let overlay_content =
+                                        self.generate_redaction_overlay(redactions);
+
+                                    let overlay_stream = Object::Stream {
+                                        dict: HashMap::new(),
+                                        data: overlay_content.into(),
+                                    };
+
+                                    let offset = writer.stream_position()?;
+                                    let bytes = serialize_obj(
+                                        &serializer,
+                                        redact_overlay_id,
+                                        0,
+                                        &overlay_stream,
+                                        &encryption_handler,
+                                    );
+                                    writer.write_all(&bytes)?;
+                                    xref_entries.push((redact_overlay_id, offset, 0, true));
                                 }
 
                                 page_index += 1;
@@ -1029,7 +1786,7 @@ impl DocumentEditor {
             let info_id = self.allocate_object_id();
             let info_obj = info.to_object();
             let offset = writer.stream_position()?;
-            let bytes = serializer.serialize_indirect(info_id, 0, &info_obj);
+            let bytes = serialize_obj(&serializer, info_id, 0, &info_obj, &encryption_handler);
             writer.write_all(&bytes)?;
             xref_entries.push((info_id, offset, 0, true));
             Some(ObjectRef::new(info_id, 0))
@@ -1079,6 +1836,18 @@ impl DocumentEditor {
 
         if let Some(info_ref) = info_ref {
             write!(writer, "  /Info {} {} R\n", info_ref.id, info_ref.gen)?;
+        }
+
+        // Write encryption entries if encrypting
+        if let Some(enc_id) = encrypt_obj_id {
+            write!(writer, "  /Encrypt {} 0 R\n", enc_id)?;
+        }
+
+        // Write file ID if encryption is enabled
+        if let Some((id1, id2)) = file_id {
+            let id1_hex: String = id1.iter().map(|b| format!("{:02X}", b)).collect();
+            let id2_hex: String = id2.iter().map(|b| format!("{:02X}", b)).collect();
+            write!(writer, "  /ID [<{}> <{}>]\n", id1_hex, id2_hex)?;
         }
 
         write!(writer, ">>\n")?;
@@ -1316,6 +2085,1441 @@ impl DocumentEditor {
     pub fn save_page_from_editor(&mut self, page: crate::editor::dom::PdfPage) -> Result<()> {
         self.save_page(page)
     }
+
+    // =========================================================================
+    // Page Properties: Rotation, Cropping
+    // =========================================================================
+
+    /// Get the rotation of a page in degrees (0, 90, 180, 270).
+    ///
+    /// Returns the effective rotation, considering any modifications.
+    pub fn get_page_rotation(&mut self, index: usize) -> Result<i32> {
+        // Check if we have a modified rotation
+        if let Some(props) = self.modified_page_props.get(&index) {
+            if let Some(rotation) = props.rotation {
+                return Ok(rotation);
+            }
+        }
+
+        // Otherwise get from original document
+        let info = self.get_page_info(index)?;
+        Ok(info.rotation)
+    }
+
+    /// Set the rotation of a page.
+    ///
+    /// Rotation must be 0, 90, 180, or 270 degrees.
+    pub fn set_page_rotation(&mut self, index: usize, degrees: i32) -> Result<()> {
+        // Validate rotation
+        if ![0, 90, 180, 270].contains(&degrees) {
+            return Err(Error::InvalidPdf(
+                "Rotation must be 0, 90, 180, or 270 degrees".to_string(),
+            ));
+        }
+
+        // Validate page index
+        if index >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!(
+                "Page index {} out of range (document has {} pages)",
+                index,
+                self.current_page_count()
+            )));
+        }
+
+        // Store the modified rotation
+        let props = self.modified_page_props.entry(index).or_default();
+        props.rotation = Some(degrees);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Rotate a page by the given degrees (adds to current rotation).
+    ///
+    /// The result is normalized to 0, 90, 180, or 270.
+    pub fn rotate_page_by(&mut self, index: usize, degrees: i32) -> Result<()> {
+        let current = self.get_page_rotation(index)?;
+        let new_rotation = ((current + degrees) % 360 + 360) % 360;
+
+        // Normalize to valid PDF rotation
+        let normalized = match new_rotation {
+            0..=44 => 0,
+            45..=134 => 90,
+            135..=224 => 180,
+            225..=314 => 270,
+            _ => 0,
+        };
+
+        self.set_page_rotation(index, normalized)
+    }
+
+    /// Rotate all pages by the given degrees.
+    pub fn rotate_all_pages(&mut self, degrees: i32) -> Result<()> {
+        let count = self.current_page_count();
+        for i in 0..count {
+            self.rotate_page_by(i, degrees)?;
+        }
+        Ok(())
+    }
+
+    /// Get the MediaBox of a page (physical page size).
+    ///
+    /// Returns [llx, lly, urx, ury] (lower-left x, lower-left y, upper-right x, upper-right y).
+    pub fn get_page_media_box(&mut self, index: usize) -> Result<[f32; 4]> {
+        // Check if we have a modified MediaBox
+        if let Some(props) = self.modified_page_props.get(&index) {
+            if let Some(media_box) = props.media_box {
+                return Ok(media_box);
+            }
+        }
+
+        // Get from original document
+        let page_refs = self.get_page_refs()?;
+        if index >= page_refs.len() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", index)));
+        }
+
+        let page_ref = page_refs[index];
+        let page_obj = self.source.load_object(page_ref)?;
+        let page_dict = page_obj
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
+
+        if let Some(media_box) = page_dict.get("MediaBox").and_then(|m| m.as_array()) {
+            if media_box.len() >= 4 {
+                let llx = media_box[0]
+                    .as_real()
+                    .or_else(|| media_box[0].as_integer().map(|i| i as f64))
+                    .unwrap_or(0.0) as f32;
+                let lly = media_box[1]
+                    .as_real()
+                    .or_else(|| media_box[1].as_integer().map(|i| i as f64))
+                    .unwrap_or(0.0) as f32;
+                let urx = media_box[2]
+                    .as_real()
+                    .or_else(|| media_box[2].as_integer().map(|i| i as f64))
+                    .unwrap_or(612.0) as f32;
+                let ury = media_box[3]
+                    .as_real()
+                    .or_else(|| media_box[3].as_integer().map(|i| i as f64))
+                    .unwrap_or(792.0) as f32;
+                return Ok([llx, lly, urx, ury]);
+            }
+        }
+
+        // Default to Letter size
+        Ok([0.0, 0.0, 612.0, 792.0])
+    }
+
+    /// Set the MediaBox of a page.
+    pub fn set_page_media_box(&mut self, index: usize, box_: [f32; 4]) -> Result<()> {
+        if index >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", index)));
+        }
+
+        let props = self.modified_page_props.entry(index).or_default();
+        props.media_box = Some(box_);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Get the CropBox of a page (visible/printable area).
+    ///
+    /// Returns None if no CropBox is set (defaults to MediaBox).
+    pub fn get_page_crop_box(&mut self, index: usize) -> Result<Option<[f32; 4]>> {
+        // Check if we have a modified CropBox
+        if let Some(props) = self.modified_page_props.get(&index) {
+            if let Some(crop_box) = props.crop_box {
+                return Ok(Some(crop_box));
+            }
+        }
+
+        // Get from original document
+        let page_refs = self.get_page_refs()?;
+        if index >= page_refs.len() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", index)));
+        }
+
+        let page_ref = page_refs[index];
+        let page_obj = self.source.load_object(page_ref)?;
+        let page_dict = page_obj
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
+
+        if let Some(crop_box) = page_dict.get("CropBox").and_then(|c| c.as_array()) {
+            if crop_box.len() >= 4 {
+                let llx = crop_box[0]
+                    .as_real()
+                    .or_else(|| crop_box[0].as_integer().map(|i| i as f64))
+                    .unwrap_or(0.0) as f32;
+                let lly = crop_box[1]
+                    .as_real()
+                    .or_else(|| crop_box[1].as_integer().map(|i| i as f64))
+                    .unwrap_or(0.0) as f32;
+                let urx = crop_box[2]
+                    .as_real()
+                    .or_else(|| crop_box[2].as_integer().map(|i| i as f64))
+                    .unwrap_or(612.0) as f32;
+                let ury = crop_box[3]
+                    .as_real()
+                    .or_else(|| crop_box[3].as_integer().map(|i| i as f64))
+                    .unwrap_or(792.0) as f32;
+                return Ok(Some([llx, lly, urx, ury]));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Set the CropBox of a page.
+    pub fn set_page_crop_box(&mut self, index: usize, box_: [f32; 4]) -> Result<()> {
+        if index >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", index)));
+        }
+
+        let props = self.modified_page_props.entry(index).or_default();
+        props.crop_box = Some(box_);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Crop margins from all pages.
+    ///
+    /// This sets the CropBox to be smaller than the MediaBox by the specified margins.
+    pub fn crop_margins(&mut self, left: f32, right: f32, top: f32, bottom: f32) -> Result<()> {
+        let count = self.current_page_count();
+        for i in 0..count {
+            let media_box = self.get_page_media_box(i)?;
+            let crop_box = [
+                media_box[0] + left,
+                media_box[1] + bottom,
+                media_box[2] - right,
+                media_box[3] - top,
+            ];
+            self.set_page_crop_box(i, crop_box)?;
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // Content Erasing (Whiteout)
+    // =========================================================================
+
+    /// Erase a rectangular region on a page by covering it with white.
+    ///
+    /// This adds a white rectangle overlay that covers the specified region.
+    /// The original content is not removed but hidden beneath the white overlay.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - Page index (0-based)
+    /// * `rect` - Rectangle to erase [llx, lly, urx, ury]
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Erase a region in the upper-left corner
+    /// editor.erase_region(0, [72.0, 700.0, 200.0, 792.0])?;
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn erase_region(&mut self, page: usize, rect: [f32; 4]) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        // Add to erase regions for this page
+        let regions = self.erase_regions.entry(page).or_default();
+        regions.push(rect);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Erase multiple rectangular regions on a page.
+    pub fn erase_regions(&mut self, page: usize, rects: &[[f32; 4]]) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        let regions = self.erase_regions.entry(page).or_default();
+        regions.extend_from_slice(rects);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Clear all pending erase operations for a page.
+    pub fn clear_erase_regions(&mut self, page: usize) {
+        self.erase_regions.remove(&page);
+    }
+
+    /// Generate the content stream for erase overlays.
+    ///
+    /// Returns PDF operators that draw white rectangles over the specified regions.
+    fn generate_erase_overlay(&self, page: usize) -> Option<Vec<u8>> {
+        let regions = self.erase_regions.get(&page)?;
+        if regions.is_empty() {
+            return None;
+        }
+
+        let mut content = Vec::new();
+
+        // Save graphics state
+        content.extend_from_slice(b"q\n");
+
+        // Set fill color to white (RGB 1 1 1)
+        content.extend_from_slice(b"1 1 1 rg\n");
+
+        // Draw each rectangle
+        for rect in regions {
+            let x = rect[0];
+            let y = rect[1];
+            let width = rect[2] - rect[0];
+            let height = rect[3] - rect[1];
+
+            // Rectangle path and fill
+            content.extend_from_slice(
+                format!("{:.2} {:.2} {:.2} {:.2} re f\n", x, y, width, height).as_bytes(),
+            );
+        }
+
+        // Restore graphics state
+        content.extend_from_slice(b"Q\n");
+
+        Some(content)
+    }
+
+    // ========================================================================
+    // Annotation Flattening
+    // ========================================================================
+
+    /// Mark annotations on a page for flattening.
+    ///
+    /// When the document is saved, annotations on this page will be rendered
+    /// into the page content and removed from the annotations array.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Flatten annotations on page 0
+    /// editor.flatten_page_annotations(0)?;
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn flatten_page_annotations(&mut self, page: usize) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        self.flatten_annotations_pages.insert(page);
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Mark all pages for annotation flattening.
+    ///
+    /// When the document is saved, all annotations will be rendered
+    /// into the page content and removed.
+    pub fn flatten_all_annotations(&mut self) -> Result<()> {
+        let page_count = self.current_page_count();
+        for page in 0..page_count {
+            self.flatten_annotations_pages.insert(page);
+        }
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Check if a page has annotations marked for flattening.
+    pub fn is_page_marked_for_flatten(&self, page: usize) -> bool {
+        self.flatten_annotations_pages.contains(&page)
+    }
+
+    /// Clear the flatten annotation flag for a page.
+    pub fn unmark_page_for_flatten(&mut self, page: usize) {
+        self.flatten_annotations_pages.remove(&page);
+    }
+
+    /// Get annotation appearance stream data for flattening.
+    ///
+    /// Returns a list of (content_bytes, bbox, resources) for each annotation
+    /// that has an appearance stream.
+    fn get_annotation_appearances(&mut self, page: usize) -> Result<Vec<AnnotationAppearance>> {
+        let annotations = self.source.get_annotations(page)?;
+        let mut appearances = Vec::new();
+
+        for annotation in annotations {
+            // Skip annotations without a raw dictionary
+            let raw_dict = match &annotation.raw_dict {
+                Some(dict) => dict,
+                None => continue,
+            };
+
+            // Get the /AP (appearance) dictionary
+            let ap_dict = match raw_dict.get("AP") {
+                Some(Object::Dictionary(d)) => d.clone(),
+                Some(Object::Reference(ap_ref)) => match self.source.load_object(*ap_ref)? {
+                    Object::Dictionary(d) => d,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            // Get the /N (normal appearance) entry
+            let normal_appearance = match ap_dict.get("N") {
+                Some(obj) => obj.clone(),
+                None => continue,
+            };
+
+            // The normal appearance can be:
+            // 1. A reference to a Form XObject
+            // 2. A dictionary of appearance states (e.g., for checkboxes: /Yes, /Off)
+            let (appearance_obj, appearance_ref) = match normal_appearance {
+                Object::Reference(ref_obj) => {
+                    let obj = self.source.load_object(ref_obj)?;
+                    (obj, Some(ref_obj))
+                },
+                Object::Dictionary(ref dict) => {
+                    // Check if this is a Form XObject or a state dictionary
+                    if dict.get("Type").and_then(|t| t.as_name()) == Some("XObject") {
+                        (Object::Dictionary(dict.clone()), None)
+                    } else {
+                        // This is a state dictionary - get the current appearance state
+                        let state = annotation.appearance_state.as_deref().unwrap_or("Off");
+                        match dict.get(state) {
+                            Some(Object::Reference(ref_obj)) => {
+                                let obj = self.source.load_object(*ref_obj)?;
+                                (obj, Some(*ref_obj))
+                            },
+                            Some(obj) => (obj.clone(), None),
+                            None => continue,
+                        }
+                    }
+                },
+                _ => continue,
+            };
+
+            // Extract the Form XObject properties
+            let form_dict = match appearance_obj.as_dict() {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Get BBox
+            let bbox = match form_dict.get("BBox") {
+                Some(Object::Array(arr)) if arr.len() >= 4 => {
+                    let values: Vec<f64> = arr
+                        .iter()
+                        .filter_map(|o| o.as_real().or_else(|| o.as_integer().map(|i| i as f64)))
+                        .collect();
+                    if values.len() >= 4 {
+                        [
+                            values[0] as f32,
+                            values[1] as f32,
+                            values[2] as f32,
+                            values[3] as f32,
+                        ]
+                    } else {
+                        continue;
+                    }
+                },
+                _ => continue,
+            };
+
+            // Get Matrix (optional, defaults to identity)
+            let matrix = match form_dict.get("Matrix") {
+                Some(Object::Array(arr)) if arr.len() >= 6 => {
+                    let values: Vec<f64> = arr
+                        .iter()
+                        .filter_map(|o| o.as_real().or_else(|| o.as_integer().map(|i| i as f64)))
+                        .collect();
+                    if values.len() >= 6 {
+                        Some([
+                            values[0] as f32,
+                            values[1] as f32,
+                            values[2] as f32,
+                            values[3] as f32,
+                            values[4] as f32,
+                            values[5] as f32,
+                        ])
+                    } else {
+                        None
+                    }
+                },
+                _ => None,
+            };
+
+            // Get Resources (optional)
+            let resources = form_dict.get("Resources").cloned();
+
+            // Get the annotation's Rect (position on page)
+            let annot_rect = annotation.rect.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            let annot_rect = [
+                annot_rect[0] as f32,
+                annot_rect[1] as f32,
+                annot_rect[2] as f32,
+                annot_rect[3] as f32,
+            ];
+
+            // Get the content stream bytes
+            let content_bytes = if let Some(ref_obj) = appearance_ref {
+                // Load the object and decode its stream data
+                let stream_obj = match self.source.load_object(ref_obj) {
+                    Ok(obj) => obj,
+                    Err(_) => continue,
+                };
+                match stream_obj.decode_stream_data() {
+                    Ok(data) => data,
+                    Err(_) => continue,
+                }
+            } else {
+                // Inline stream - try to decode directly
+                match appearance_obj.decode_stream_data() {
+                    Ok(data) => data,
+                    Err(_) => continue,
+                }
+            };
+
+            appearances.push(AnnotationAppearance {
+                content: content_bytes,
+                bbox,
+                annot_rect,
+                matrix,
+                resources,
+            });
+        }
+
+        Ok(appearances)
+    }
+
+    /// Generate content stream to render flattened annotations.
+    ///
+    /// This creates PDF operators that invoke each annotation's appearance
+    /// as a Form XObject at the correct position.
+    fn generate_flatten_overlay(
+        &self,
+        appearances: &[AnnotationAppearance],
+        xobject_names: &[String],
+    ) -> Vec<u8> {
+        let mut content = Vec::new();
+
+        for (appearance, xobj_name) in appearances.iter().zip(xobject_names.iter()) {
+            // Save graphics state
+            content.extend_from_slice(b"q\n");
+
+            // Calculate transformation to position the XObject
+            // The appearance is defined in BBox coordinates and needs to be
+            // positioned at annot_rect on the page.
+            let bbox = appearance.bbox;
+            let rect = appearance.annot_rect;
+
+            // Calculate scale and translation
+            let bbox_width = bbox[2] - bbox[0];
+            let bbox_height = bbox[3] - bbox[1];
+            let rect_width = rect[2] - rect[0];
+            let rect_height = rect[3] - rect[1];
+
+            // Avoid division by zero
+            let sx = if bbox_width != 0.0 {
+                rect_width / bbox_width
+            } else {
+                1.0
+            };
+            let sy = if bbox_height != 0.0 {
+                rect_height / bbox_height
+            } else {
+                1.0
+            };
+
+            // Translation to position the XObject
+            let tx = rect[0] - bbox[0] * sx;
+            let ty = rect[1] - bbox[1] * sy;
+
+            // Apply transformation matrix: [sx 0 0 sy tx ty]
+            content.extend_from_slice(
+                format!("{:.6} 0 0 {:.6} {:.6} {:.6} cm\n", sx, sy, tx, ty).as_bytes(),
+            );
+
+            // If the appearance has its own matrix, apply it
+            if let Some(m) = appearance.matrix {
+                content.extend_from_slice(
+                    format!(
+                        "{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm\n",
+                        m[0], m[1], m[2], m[3], m[4], m[5]
+                    )
+                    .as_bytes(),
+                );
+            }
+
+            // Invoke the XObject
+            content.extend_from_slice(format!("/{} Do\n", xobj_name).as_bytes());
+
+            // Restore graphics state
+            content.extend_from_slice(b"Q\n");
+        }
+
+        content
+    }
+
+    // ========================================================================
+    // Redaction Application
+    // ========================================================================
+
+    /// Mark a page for redaction application.
+    ///
+    /// When the document is saved, redaction annotations on this page will be
+    /// applied: content will be visually obscured and the redaction annotations
+    /// removed.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Apply redactions on page 0
+    /// editor.apply_page_redactions(0)?;
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn apply_page_redactions(&mut self, page: usize) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        self.apply_redactions_pages.insert(page);
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Mark all pages for redaction application.
+    pub fn apply_all_redactions(&mut self) -> Result<()> {
+        let page_count = self.current_page_count();
+        for page in 0..page_count {
+            self.apply_redactions_pages.insert(page);
+        }
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Check if a page is marked for redaction application.
+    pub fn is_page_marked_for_redaction(&self, page: usize) -> bool {
+        self.apply_redactions_pages.contains(&page)
+    }
+
+    /// Clear the apply redactions flag for a page.
+    pub fn unmark_page_for_redaction(&mut self, page: usize) {
+        self.apply_redactions_pages.remove(&page);
+    }
+
+    /// Get redaction annotation data for a page.
+    ///
+    /// Returns a list of redaction areas with their fill colors.
+    fn get_redaction_data(&mut self, page: usize) -> Result<Vec<RedactionData>> {
+        use crate::annotation_types::AnnotationSubtype;
+
+        let annotations = self.source.get_annotations(page)?;
+        let mut redactions = Vec::new();
+
+        for annotation in annotations {
+            // Only process Redact annotations
+            if annotation.subtype_enum != AnnotationSubtype::Redact {
+                continue;
+            }
+
+            // Get the redaction rectangle
+            let rect = match annotation.rect {
+                Some(r) => [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32],
+                None => continue,
+            };
+
+            // Get interior color (IC entry) - the fill color for the redaction
+            // Default to black if not specified
+            let color = match &annotation.interior_color {
+                Some(color) if color.len() >= 3 => {
+                    [color[0] as f32, color[1] as f32, color[2] as f32]
+                },
+                _ => [0.0, 0.0, 0.0], // Default to black
+            };
+
+            // Also handle QuadPoints if present (multiple redaction areas)
+            if let Some(ref quad_points) = annotation.quad_points {
+                for quad in quad_points {
+                    // QuadPoints are 8 values: x1,y1,x2,y2,x3,y3,x4,y4
+                    // representing corners in a specific order
+                    // Convert to bounding box
+                    let xs = [quad[0], quad[2], quad[4], quad[6]];
+                    let ys = [quad[1], quad[3], quad[5], quad[7]];
+
+                    let min_x = xs.iter().cloned().fold(f64::INFINITY, f64::min) as f32;
+                    let max_x = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) as f32;
+                    let min_y = ys.iter().cloned().fold(f64::INFINITY, f64::min) as f32;
+                    let max_y = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max) as f32;
+
+                    redactions.push(RedactionData {
+                        rect: [min_x, min_y, max_x, max_y],
+                        color,
+                    });
+                }
+            } else {
+                // Just use the main Rect
+                redactions.push(RedactionData { rect, color });
+            }
+        }
+
+        Ok(redactions)
+    }
+
+    /// Generate content stream to draw redaction overlays.
+    fn generate_redaction_overlay(&self, redactions: &[RedactionData]) -> Vec<u8> {
+        let mut content = Vec::new();
+
+        for redaction in redactions {
+            // Save graphics state
+            content.extend_from_slice(b"q\n");
+
+            // Set fill color (RGB)
+            content.extend_from_slice(
+                format!(
+                    "{:.3} {:.3} {:.3} rg\n",
+                    redaction.color[0], redaction.color[1], redaction.color[2]
+                )
+                .as_bytes(),
+            );
+
+            // Draw filled rectangle
+            let x = redaction.rect[0];
+            let y = redaction.rect[1];
+            let width = redaction.rect[2] - redaction.rect[0];
+            let height = redaction.rect[3] - redaction.rect[1];
+
+            content.extend_from_slice(
+                format!("{:.2} {:.2} {:.2} {:.2} re f\n", x, y, width, height).as_bytes(),
+            );
+
+            // Restore graphics state
+            content.extend_from_slice(b"Q\n");
+        }
+
+        content
+    }
+
+    // ========================================================================
+    // Image Repositioning & Resizing
+    // ========================================================================
+
+    /// Get information about images on a page.
+    ///
+    /// Returns a list of images with their names, positions, and sizes.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let images = editor.get_page_images(0)?;
+    /// for img in images {
+    ///     println!("Image {} at ({}, {}) size {}x{}",
+    ///         img.name, img.bounds[0], img.bounds[1],
+    ///         img.bounds[2], img.bounds[3]);
+    /// }
+    /// ```
+    pub fn get_page_images(&mut self, page: usize) -> Result<Vec<ImageInfo>> {
+        use crate::content::parser::parse_content_stream;
+
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        // Get the original page index
+        let original_page_idx = self.page_order[page];
+        if original_page_idx < 0 {
+            return Err(Error::InvalidPdf("Page has been deleted".to_string()));
+        }
+
+        // Get page reference
+        let page_ref = self.source.get_page_ref(original_page_idx as usize)?;
+        let page_obj = self.source.load_object(page_ref)?;
+        let page_dict = page_obj
+            .as_dict()
+            .ok_or_else(|| Error::InvalidPdf("Page is not a dictionary".to_string()))?;
+
+        // Get Contents
+        let contents = match page_dict.get("Contents") {
+            Some(c) => c.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        // Load content stream data
+        let content_data = match contents {
+            Object::Reference(ref_obj) => {
+                let obj = self.source.load_object(ref_obj)?;
+                obj.decode_stream_data()?
+            },
+            Object::Array(arr) => {
+                // Concatenate multiple content streams
+                let mut data = Vec::new();
+                for item in arr {
+                    if let Object::Reference(ref_obj) = item {
+                        let obj = self.source.load_object(ref_obj)?;
+                        if let Ok(stream_data) = obj.decode_stream_data() {
+                            data.extend_from_slice(&stream_data);
+                            data.push(b'\n');
+                        }
+                    }
+                }
+                data
+            },
+            _ => return Ok(Vec::new()),
+        };
+
+        // Parse the content stream
+        let operators = parse_content_stream(&content_data)?;
+
+        // Track CTM through the operators to find images
+        let mut images = Vec::new();
+        let mut ctm_stack: Vec<[f32; 6]> = vec![[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]]; // Identity
+        let mut current_ctm = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+        for op in operators {
+            match op {
+                crate::content::operators::Operator::SaveState => {
+                    ctm_stack.push(current_ctm);
+                },
+                crate::content::operators::Operator::RestoreState => {
+                    if let Some(saved) = ctm_stack.pop() {
+                        current_ctm = saved;
+                    }
+                },
+                crate::content::operators::Operator::Cm { a, b, c, d, e, f } => {
+                    // Concatenate transformation matrix
+                    // New CTM = [a,b,c,d,e,f] * current_ctm
+                    let new_a = a * current_ctm[0] + b * current_ctm[2];
+                    let new_b = a * current_ctm[1] + b * current_ctm[3];
+                    let new_c = c * current_ctm[0] + d * current_ctm[2];
+                    let new_d = c * current_ctm[1] + d * current_ctm[3];
+                    let new_e = e * current_ctm[0] + f * current_ctm[2] + current_ctm[4];
+                    let new_f = e * current_ctm[1] + f * current_ctm[3] + current_ctm[5];
+                    current_ctm = [new_a, new_b, new_c, new_d, new_e, new_f];
+                },
+                crate::content::operators::Operator::Do { ref name } => {
+                    // Check if this is an image XObject (vs Form XObject)
+                    // For now, include all XObjects; a more refined implementation
+                    // would check the XObject's Subtype
+                    let matrix = current_ctm;
+
+                    // Extract position and size from matrix
+                    // Standard image matrix: [width, 0, 0, height, x, y]
+                    let x = matrix[4];
+                    let y = matrix[5];
+                    // Width and height from scaling components
+                    let width = (matrix[0] * matrix[0] + matrix[1] * matrix[1]).sqrt();
+                    let height = (matrix[2] * matrix[2] + matrix[3] * matrix[3]).sqrt();
+
+                    images.push(ImageInfo {
+                        name: name.clone(),
+                        bounds: [x, y, width, height],
+                        matrix,
+                    });
+                },
+                _ => {},
+            }
+        }
+
+        Ok(images)
+    }
+
+    /// Reposition an image on a page.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    /// * `image_name` - The XObject name (e.g., "Im1")
+    /// * `x` - New x position
+    /// * `y` - New y position
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// editor.reposition_image(0, "Im1", 100.0, 200.0)?;
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn reposition_image(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        let page_mods = self.image_modifications.entry(page).or_default();
+        let modification = page_mods
+            .entry(image_name.to_string())
+            .or_insert(ImageModification {
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            });
+        modification.x = Some(x);
+        modification.y = Some(y);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Resize an image on a page.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    /// * `image_name` - The XObject name (e.g., "Im1")
+    /// * `width` - New width
+    /// * `height` - New height
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// editor.resize_image(0, "Im1", 200.0, 150.0)?;
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn resize_image(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        width: f32,
+        height: f32,
+    ) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        let page_mods = self.image_modifications.entry(page).or_default();
+        let modification = page_mods
+            .entry(image_name.to_string())
+            .or_insert(ImageModification {
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            });
+        modification.width = Some(width);
+        modification.height = Some(height);
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Reposition and resize an image on a page.
+    ///
+    /// # Arguments
+    /// * `page` - The zero-based page index
+    /// * `image_name` - The XObject name (e.g., "Im1")
+    /// * `x` - New x position
+    /// * `y` - New y position
+    /// * `width` - New width
+    /// * `height` - New height
+    pub fn set_image_bounds(
+        &mut self,
+        page: usize,
+        image_name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Result<()> {
+        if page >= self.current_page_count() {
+            return Err(Error::InvalidPdf(format!("Page index {} out of range", page)));
+        }
+
+        let page_mods = self.image_modifications.entry(page).or_default();
+        page_mods.insert(
+            image_name.to_string(),
+            ImageModification {
+                x: Some(x),
+                y: Some(y),
+                width: Some(width),
+                height: Some(height),
+            },
+        );
+
+        self.is_modified = true;
+        Ok(())
+    }
+
+    /// Clear image modifications for a page.
+    pub fn clear_image_modifications(&mut self, page: usize) {
+        self.image_modifications.remove(&page);
+    }
+
+    /// Check if a page has image modifications.
+    pub fn has_image_modifications(&self, page: usize) -> bool {
+        self.image_modifications
+            .get(&page)
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Rewrite content stream with image modifications applied.
+    fn rewrite_content_stream_with_image_mods(
+        &self,
+        content_data: &[u8],
+        modifications: &HashMap<String, ImageModification>,
+    ) -> Result<Vec<u8>> {
+        use crate::content::parser::parse_content_stream;
+
+        let operators = parse_content_stream(content_data)?;
+        let mut output = Vec::new();
+
+        // Track the last cm operator to potentially modify it
+        let mut i = 0;
+        while i < operators.len() {
+            let op = &operators[i];
+
+            // Look for pattern: q ... cm ... Do ... Q
+            // We need to find cm operators that precede Do operators
+            match op {
+                crate::content::operators::Operator::Cm { a, b, c, d, e, f } => {
+                    // Look ahead to see if next relevant op is Do
+                    let mut j = i + 1;
+                    let mut found_do = None;
+                    while j < operators.len() {
+                        match &operators[j] {
+                            crate::content::operators::Operator::Do { name } => {
+                                found_do = Some(name.clone());
+                                break;
+                            },
+                            crate::content::operators::Operator::RestoreState => break,
+                            crate::content::operators::Operator::SaveState => break,
+                            crate::content::operators::Operator::Cm { .. } => break,
+                            _ => {},
+                        }
+                        j += 1;
+                    }
+
+                    if let Some(name) = found_do {
+                        if let Some(modification) = modifications.get(&name) {
+                            // Apply modification to the matrix
+                            let new_a = modification.width.unwrap_or(*a);
+                            let new_d = modification.height.unwrap_or(*d);
+                            let new_e = modification.x.unwrap_or(*e);
+                            let new_f = modification.y.unwrap_or(*f);
+
+                            output.extend_from_slice(
+                                format!(
+                                    "{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm\n",
+                                    new_a, b, c, new_d, new_e, new_f
+                                )
+                                .as_bytes(),
+                            );
+                            i += 1;
+                            continue;
+                        }
+                    }
+
+                    // No modification, output as-is
+                    output.extend_from_slice(
+                        format!("{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm\n", a, b, c, d, e, f)
+                            .as_bytes(),
+                    );
+                },
+                _ => {
+                    // Serialize the operator
+                    self.serialize_operator(&mut output, op);
+                },
+            }
+            i += 1;
+        }
+
+        Ok(output)
+    }
+
+    /// Serialize an operator to bytes.
+    fn serialize_operator(&self, output: &mut Vec<u8>, op: &crate::content::operators::Operator) {
+        use crate::content::operators::{Operator, TextElement};
+
+        match op {
+            // Graphics state
+            Operator::SaveState => output.extend_from_slice(b"q\n"),
+            Operator::RestoreState => output.extend_from_slice(b"Q\n"),
+            Operator::Cm { a, b, c, d, e, f } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm\n", a, b, c, d, e, f)
+                        .as_bytes(),
+                );
+            },
+            Operator::SetLineWidth { width } => {
+                output.extend_from_slice(format!("{:.6} w\n", width).as_bytes());
+            },
+            Operator::SetLineCap { cap_style } => {
+                output.extend_from_slice(format!("{} J\n", cap_style).as_bytes());
+            },
+            Operator::SetLineJoin { join_style } => {
+                output.extend_from_slice(format!("{} j\n", join_style).as_bytes());
+            },
+            Operator::SetMiterLimit { limit } => {
+                output.extend_from_slice(format!("{:.6} M\n", limit).as_bytes());
+            },
+            Operator::SetDash { array, phase } => {
+                output.push(b'[');
+                for (i, v) in array.iter().enumerate() {
+                    if i > 0 {
+                        output.push(b' ');
+                    }
+                    output.extend_from_slice(format!("{:.6}", v).as_bytes());
+                }
+                output.extend_from_slice(format!("] {:.6} d\n", phase).as_bytes());
+            },
+            Operator::SetFlatness { tolerance } => {
+                output.extend_from_slice(format!("{:.6} i\n", tolerance).as_bytes());
+            },
+            Operator::SetRenderingIntent { intent } => {
+                output.extend_from_slice(format!("/{} ri\n", intent).as_bytes());
+            },
+            Operator::SetExtGState { dict_name } => {
+                output.extend_from_slice(format!("/{} gs\n", dict_name).as_bytes());
+            },
+
+            // Path construction
+            Operator::MoveTo { x, y } => {
+                output.extend_from_slice(format!("{:.6} {:.6} m\n", x, y).as_bytes());
+            },
+            Operator::LineTo { x, y } => {
+                output.extend_from_slice(format!("{:.6} {:.6} l\n", x, y).as_bytes());
+            },
+            Operator::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} c\n", x1, y1, x2, y2, x3, y3)
+                        .as_bytes(),
+                );
+            },
+            Operator::CurveToV { x2, y2, x3, y3 } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} v\n", x2, y2, x3, y3).as_bytes(),
+                );
+            },
+            Operator::CurveToY { x1, y1, x3, y3 } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} y\n", x1, y1, x3, y3).as_bytes(),
+                );
+            },
+            Operator::ClosePath => output.extend_from_slice(b"h\n"),
+            Operator::Rectangle {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} re\n", x, y, width, height).as_bytes(),
+                );
+            },
+
+            // Path painting
+            Operator::Stroke => output.extend_from_slice(b"S\n"),
+            Operator::Fill => output.extend_from_slice(b"f\n"),
+            Operator::FillEvenOdd => output.extend_from_slice(b"f*\n"),
+            Operator::CloseFillStroke => output.extend_from_slice(b"b\n"),
+            Operator::EndPath => output.extend_from_slice(b"n\n"),
+
+            // Clipping
+            Operator::ClipNonZero => output.extend_from_slice(b"W\n"),
+            Operator::ClipEvenOdd => output.extend_from_slice(b"W*\n"),
+
+            // Text object
+            Operator::BeginText => output.extend_from_slice(b"BT\n"),
+            Operator::EndText => output.extend_from_slice(b"ET\n"),
+
+            // Text state
+            Operator::Tc { char_space } => {
+                output.extend_from_slice(format!("{:.6} Tc\n", char_space).as_bytes());
+            },
+            Operator::Tw { word_space } => {
+                output.extend_from_slice(format!("{:.6} Tw\n", word_space).as_bytes());
+            },
+            Operator::Tz { scale } => {
+                output.extend_from_slice(format!("{:.6} Tz\n", scale).as_bytes());
+            },
+            Operator::TL { leading } => {
+                output.extend_from_slice(format!("{:.6} TL\n", leading).as_bytes());
+            },
+            Operator::Tf { font, size } => {
+                output.extend_from_slice(format!("/{} {:.6} Tf\n", font, size).as_bytes());
+            },
+            Operator::Tr { render } => {
+                output.extend_from_slice(format!("{} Tr\n", render).as_bytes());
+            },
+            Operator::Ts { rise } => {
+                output.extend_from_slice(format!("{:.6} Ts\n", rise).as_bytes());
+            },
+
+            // Text positioning
+            Operator::Td { tx, ty } => {
+                output.extend_from_slice(format!("{:.6} {:.6} Td\n", tx, ty).as_bytes());
+            },
+            Operator::TD { tx, ty } => {
+                output.extend_from_slice(format!("{:.6} {:.6} TD\n", tx, ty).as_bytes());
+            },
+            Operator::Tm { a, b, c, d, e, f } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} Tm\n", a, b, c, d, e, f)
+                        .as_bytes(),
+                );
+            },
+            Operator::TStar => output.extend_from_slice(b"T*\n"),
+
+            // Text showing
+            Operator::Tj { text } => {
+                output.push(b'(');
+                for byte in text {
+                    match *byte {
+                        b'(' | b')' | b'\\' => {
+                            output.push(b'\\');
+                            output.push(*byte);
+                        },
+                        _ => output.push(*byte),
+                    }
+                }
+                output.extend_from_slice(b") Tj\n");
+            },
+            Operator::TJ { array } => {
+                output.push(b'[');
+                for item in array {
+                    match item {
+                        TextElement::String(text) => {
+                            output.push(b'(');
+                            for byte in text {
+                                match *byte {
+                                    b'(' | b')' | b'\\' => {
+                                        output.push(b'\\');
+                                        output.push(*byte);
+                                    },
+                                    _ => output.push(*byte),
+                                }
+                            }
+                            output.push(b')');
+                        },
+                        TextElement::Offset(offset) => {
+                            output.extend_from_slice(format!("{:.6}", offset).as_bytes());
+                        },
+                    }
+                }
+                output.extend_from_slice(b"] TJ\n");
+            },
+            Operator::Quote { text } => {
+                output.push(b'(');
+                for byte in text {
+                    match *byte {
+                        b'(' | b')' | b'\\' => {
+                            output.push(b'\\');
+                            output.push(*byte);
+                        },
+                        _ => output.push(*byte),
+                    }
+                }
+                output.extend_from_slice(b") '\n");
+            },
+            Operator::DoubleQuote {
+                word_space,
+                char_space,
+                text,
+            } => {
+                output
+                    .extend_from_slice(format!("{:.6} {:.6} (", word_space, char_space).as_bytes());
+                for byte in text {
+                    match *byte {
+                        b'(' | b')' | b'\\' => {
+                            output.push(b'\\');
+                            output.push(*byte);
+                        },
+                        _ => output.push(*byte),
+                    }
+                }
+                output.extend_from_slice(b") \"\n");
+            },
+
+            // Color space
+            Operator::SetStrokeColorSpace { name } => {
+                output.extend_from_slice(format!("/{} CS\n", name).as_bytes());
+            },
+            Operator::SetFillColorSpace { name } => {
+                output.extend_from_slice(format!("/{} cs\n", name).as_bytes());
+            },
+            Operator::SetStrokeColor { components } => {
+                for c in components {
+                    output.extend_from_slice(format!("{:.6} ", c).as_bytes());
+                }
+                output.extend_from_slice(b"SC\n");
+            },
+            Operator::SetFillColor { components } => {
+                for c in components {
+                    output.extend_from_slice(format!("{:.6} ", c).as_bytes());
+                }
+                output.extend_from_slice(b"sc\n");
+            },
+            Operator::SetStrokeColorN { components, name } => {
+                for c in components {
+                    output.extend_from_slice(format!("{:.6} ", c).as_bytes());
+                }
+                if let Some(p) = name {
+                    output.extend_from_slice(format!("/{} ", p).as_bytes());
+                }
+                output.extend_from_slice(b"SCN\n");
+            },
+            Operator::SetFillColorN { components, name } => {
+                for c in components {
+                    output.extend_from_slice(format!("{:.6} ", c).as_bytes());
+                }
+                if let Some(p) = name {
+                    output.extend_from_slice(format!("/{} ", p).as_bytes());
+                }
+                output.extend_from_slice(b"scn\n");
+            },
+            Operator::SetStrokeGray { gray } => {
+                output.extend_from_slice(format!("{:.6} G\n", gray).as_bytes());
+            },
+            Operator::SetFillGray { gray } => {
+                output.extend_from_slice(format!("{:.6} g\n", gray).as_bytes());
+            },
+            Operator::SetStrokeRgb { r, g, b } => {
+                output.extend_from_slice(format!("{:.6} {:.6} {:.6} RG\n", r, g, b).as_bytes());
+            },
+            Operator::SetFillRgb { r, g, b } => {
+                output.extend_from_slice(format!("{:.6} {:.6} {:.6} rg\n", r, g, b).as_bytes());
+            },
+            Operator::SetStrokeCmyk { c, m, y, k } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} K\n", c, m, y, k).as_bytes(),
+                );
+            },
+            Operator::SetFillCmyk { c, m, y, k } => {
+                output.extend_from_slice(
+                    format!("{:.6} {:.6} {:.6} {:.6} k\n", c, m, y, k).as_bytes(),
+                );
+            },
+
+            // XObject
+            Operator::Do { name } => {
+                output.extend_from_slice(format!("/{} Do\n", name).as_bytes());
+            },
+
+            // Marked content
+            Operator::BeginMarkedContent { tag } => {
+                output.extend_from_slice(format!("/{} BMC\n", tag).as_bytes());
+            },
+            Operator::BeginMarkedContentDict { tag, properties } => {
+                output.extend_from_slice(format!("/{} ", tag).as_bytes());
+                self.serialize_object(output, properties);
+                output.extend_from_slice(b" BDC\n");
+            },
+            Operator::EndMarkedContent => output.extend_from_slice(b"EMC\n"),
+
+            // Shading
+            Operator::PaintShading { name } => {
+                output.extend_from_slice(format!("/{} sh\n", name).as_bytes());
+            },
+
+            // Inline image (complex - serialize full BI...ID...EI sequence)
+            Operator::InlineImage { dict, data } => {
+                output.extend_from_slice(b"BI\n");
+                for (key, value) in dict {
+                    output.extend_from_slice(format!("/{} ", key).as_bytes());
+                    self.serialize_object(output, value);
+                    output.push(b'\n');
+                }
+                output.extend_from_slice(b"ID ");
+                output.extend_from_slice(data);
+                output.extend_from_slice(b"\nEI\n");
+            },
+
+            // Other operators (fallback for unrecognized operators)
+            Operator::Other { name, operands } => {
+                for operand in operands {
+                    self.serialize_object(output, operand);
+                    output.push(b' ');
+                }
+                output.extend_from_slice(name.as_bytes());
+                output.push(b'\n');
+            },
+        }
+    }
+
+    /// Serialize a PDF Object to bytes.
+    fn serialize_object(&self, output: &mut Vec<u8>, obj: &crate::object::Object) {
+        use crate::object::Object;
+        match obj {
+            Object::Null => output.extend_from_slice(b"null"),
+            Object::Boolean(b) => {
+                if *b {
+                    output.extend_from_slice(b"true");
+                } else {
+                    output.extend_from_slice(b"false");
+                }
+            },
+            Object::Integer(i) => output.extend_from_slice(format!("{}", i).as_bytes()),
+            Object::Real(r) => output.extend_from_slice(format!("{:.6}", r).as_bytes()),
+            Object::Name(n) => output.extend_from_slice(format!("/{}", n).as_bytes()),
+            Object::String(s) => {
+                output.push(b'(');
+                for byte in s {
+                    match *byte {
+                        b'(' | b')' | b'\\' => {
+                            output.push(b'\\');
+                            output.push(*byte);
+                        },
+                        _ => output.push(*byte),
+                    }
+                }
+                output.push(b')');
+            },
+            // Note: PDF HexStrings are stored as Object::String and serialized as literal strings
+            Object::Array(arr) => {
+                output.push(b'[');
+                for (i, item) in arr.iter().enumerate() {
+                    if i > 0 {
+                        output.push(b' ');
+                    }
+                    self.serialize_object(output, item);
+                }
+                output.push(b']');
+            },
+            Object::Dictionary(dict) => {
+                output.extend_from_slice(b"<<");
+                for (key, value) in dict {
+                    output.extend_from_slice(format!("/{} ", key).as_bytes());
+                    self.serialize_object(output, value);
+                }
+                output.extend_from_slice(b">>");
+            },
+            Object::Stream { .. } => {
+                // Streams are complex; for inline serialization just output placeholder
+                output.extend_from_slice(b"(stream)");
+            },
+            Object::Reference(obj_ref) => {
+                output.extend_from_slice(format!("{} {} R", obj_ref.id, obj_ref.gen).as_bytes());
+            },
+        }
+    }
+}
+
+/// Data for a redaction area.
+#[derive(Debug, Clone)]
+struct RedactionData {
+    /// Redaction rectangle [llx, lly, urx, ury]
+    rect: [f32; 4],
+    /// Fill color [r, g, b]
+    color: [f32; 3],
 }
 
 impl EditableDocument for DocumentEditor {
@@ -1473,7 +3677,7 @@ impl EditableDocument for DocumentEditor {
         if options.incremental {
             self.write_incremental(path)
         } else {
-            self.write_full(path)
+            self.write_full(path, options.encryption.as_ref())
         }
     }
 }

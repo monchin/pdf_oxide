@@ -256,7 +256,7 @@ mod pdf_save_tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("text.pdf");
 
-        let pdf = Pdf::from_text("Hello, World!").unwrap();
+        let mut pdf = Pdf::from_text("Hello, World!").unwrap();
         let result = pdf.save(&path);
 
         assert!(result.is_ok());
@@ -272,7 +272,7 @@ mod pdf_save_tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("markdown.pdf");
 
-        let pdf = Pdf::from_markdown("# Hello\n\nWorld").unwrap();
+        let mut pdf = Pdf::from_markdown("# Hello\n\nWorld").unwrap();
         let result = pdf.save(&path);
 
         assert!(result.is_ok());
@@ -284,7 +284,7 @@ mod pdf_save_tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("html.pdf");
 
-        let pdf = Pdf::from_html("<h1>Hello</h1>").unwrap();
+        let mut pdf = Pdf::from_html("<h1>Hello</h1>").unwrap();
         let result = pdf.save(&path);
 
         assert!(result.is_ok());
@@ -296,7 +296,7 @@ mod pdf_save_tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("metadata.pdf");
 
-        let pdf = PdfBuilder::new()
+        let mut pdf = PdfBuilder::new()
             .title("Test Document")
             .author("Test Author")
             .subject("Testing")
@@ -377,7 +377,7 @@ mod integration_tests {
         let path = dir.path().join("roundtrip.pdf");
 
         // Create PDF
-        let pdf = Pdf::from_markdown("# Test Document\n\nContent here.").unwrap();
+        let mut pdf = Pdf::from_markdown("# Test Document\n\nContent here.").unwrap();
         pdf.save(&path).unwrap();
 
         // Open with editor
@@ -394,7 +394,7 @@ mod integration_tests {
         let path = dir.path().join("workflow.pdf");
 
         // Build with full options
-        let pdf = PdfBuilder::new()
+        let mut pdf = PdfBuilder::new()
             .title("Complete Document")
             .author("Integration Test")
             .subject("Testing all features")

@@ -71,7 +71,7 @@ Images are embedded as XObject resources per PDF specification Section 8.9.
 The image data is stored in the PDF and referenced via the Do operator.
 "#;
 
-    let pdf = PdfBuilder::new()
+    let mut pdf = PdfBuilder::new()
         .title("Image Embedding Demo")
         .author("pdf_oxide")
         .subject("Demonstrates image embedding capabilities")
@@ -146,7 +146,7 @@ Images are created using the ImageData type:
     let id = manager.register("name", image);
 "#;
 
-    let pdf = PdfBuilder::new()
+    let mut pdf = PdfBuilder::new()
         .title("Generated Images")
         .author("pdf_oxide")
         .page_size(PageSize::Letter)

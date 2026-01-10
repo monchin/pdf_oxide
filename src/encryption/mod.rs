@@ -36,8 +36,13 @@ mod aes;
 mod algorithms;
 mod handler;
 mod rc4;
+mod write_handler;
 
+pub use algorithms::{
+    compute_encryption_key, compute_owner_password_hash, compute_user_password_hash,
+};
 pub use handler::EncryptionHandler;
+pub use write_handler::EncryptionWriteHandler;
 
 /// Encryption algorithm used in the PDF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +247,189 @@ impl EncryptDict {
             }
         }
     }
+
+    /// Serialize the encryption dictionary to a PDF Object.
+    ///
+    /// This creates a dictionary object suitable for the /Encrypt entry in the trailer.
+    pub fn to_object(&self) -> Object {
+        use std::collections::HashMap;
+
+        let mut dict: HashMap<String, Object> = HashMap::new();
+
+        // Required entries
+        dict.insert("Filter".to_string(), Object::Name(self.filter.clone()));
+        dict.insert("V".to_string(), Object::Integer(self.version as i64));
+        dict.insert("R".to_string(), Object::Integer(self.revision as i64));
+        dict.insert("O".to_string(), Object::String(self.owner_password.clone()));
+        dict.insert("U".to_string(), Object::String(self.user_password.clone()));
+        dict.insert("P".to_string(), Object::Integer(self.permissions as i64));
+
+        // Optional entries
+        if let Some(ref sub_filter) = self.sub_filter {
+            dict.insert("SubFilter".to_string(), Object::Name(sub_filter.clone()));
+        }
+
+        if let Some(length) = self.length {
+            dict.insert("Length".to_string(), Object::Integer(length as i64));
+        }
+
+        if !self.encrypt_metadata {
+            dict.insert("EncryptMetadata".to_string(), Object::Boolean(false));
+        }
+
+        // V=5/R=6 specific entries
+        if let Some(ref oe) = self.owner_encryption {
+            dict.insert("OE".to_string(), Object::String(oe.clone()));
+        }
+
+        if let Some(ref ue) = self.user_encryption {
+            dict.insert("UE".to_string(), Object::String(ue.clone()));
+        }
+
+        if let Some(ref perms) = self.perms {
+            dict.insert("Perms".to_string(), Object::String(perms.clone()));
+        }
+
+        // For V=4 (AES-128), add crypt filter entries
+        if self.version == 4 {
+            // Standard crypt filter dictionary
+            let mut cf_dict: HashMap<String, Object> = HashMap::new();
+            let mut std_cf: HashMap<String, Object> = HashMap::new();
+            std_cf.insert("CFM".to_string(), Object::Name("AESV2".to_string()));
+            std_cf.insert("AuthEvent".to_string(), Object::Name("DocOpen".to_string()));
+            std_cf.insert("Length".to_string(), Object::Integer(16));
+            cf_dict.insert("StdCF".to_string(), Object::Dictionary(std_cf));
+            dict.insert("CF".to_string(), Object::Dictionary(cf_dict));
+            dict.insert("StmF".to_string(), Object::Name("StdCF".to_string()));
+            dict.insert("StrF".to_string(), Object::Name("StdCF".to_string()));
+        }
+
+        // For V=5 (AES-256), add crypt filter entries
+        if self.version == 5 {
+            let mut cf_dict: HashMap<String, Object> = HashMap::new();
+            let mut std_cf: HashMap<String, Object> = HashMap::new();
+            std_cf.insert("CFM".to_string(), Object::Name("AESV3".to_string()));
+            std_cf.insert("AuthEvent".to_string(), Object::Name("DocOpen".to_string()));
+            std_cf.insert("Length".to_string(), Object::Integer(32));
+            cf_dict.insert("StdCF".to_string(), Object::Dictionary(std_cf));
+            dict.insert("CF".to_string(), Object::Dictionary(cf_dict));
+            dict.insert("StmF".to_string(), Object::Name("StdCF".to_string()));
+            dict.insert("StrF".to_string(), Object::Name("StdCF".to_string()));
+        }
+
+        Object::Dictionary(dict)
+    }
+}
+
+/// Builder for creating encryption dictionaries.
+///
+/// This provides a convenient way to create properly configured encryption
+/// for writing encrypted PDFs.
+pub struct EncryptDictBuilder {
+    algorithm: Algorithm,
+    user_password: Vec<u8>,
+    owner_password: Vec<u8>,
+    permissions: i32,
+    encrypt_metadata: bool,
+}
+
+impl EncryptDictBuilder {
+    /// Create a new builder with the specified algorithm.
+    pub fn new(algorithm: Algorithm) -> Self {
+        Self {
+            algorithm,
+            user_password: Vec::new(),
+            owner_password: Vec::new(),
+            permissions: -1, // All permissions granted by default
+            encrypt_metadata: true,
+        }
+    }
+
+    /// Set the user password (required for opening the document).
+    pub fn user_password(mut self, password: &[u8]) -> Self {
+        self.user_password = password.to_vec();
+        self
+    }
+
+    /// Set the owner password (required for full access).
+    pub fn owner_password(mut self, password: &[u8]) -> Self {
+        self.owner_password = password.to_vec();
+        self
+    }
+
+    /// Set user permissions (P value).
+    pub fn permissions(mut self, permissions: i32) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
+    /// Set whether to encrypt metadata.
+    pub fn encrypt_metadata(mut self, encrypt: bool) -> Self {
+        self.encrypt_metadata = encrypt;
+        self
+    }
+
+    /// Build the encryption dictionary.
+    ///
+    /// This computes all required hashes and returns the complete dictionary.
+    ///
+    /// # Arguments
+    /// * `file_id` - The first element of the PDF file identifier array
+    pub fn build(self, file_id: &[u8]) -> EncryptDict {
+        let (version, revision) = match self.algorithm {
+            Algorithm::None => (0, 0),
+            Algorithm::RC4_40 => (1, 2),
+            Algorithm::Rc4_128 => (2, 3),
+            Algorithm::Aes128 => (4, 4),
+            Algorithm::Aes256 => (5, 6),
+        };
+
+        let key_length = self.algorithm.key_length();
+
+        // Use owner password if provided, otherwise use user password
+        let owner_pass = if self.owner_password.is_empty() {
+            &self.user_password
+        } else {
+            &self.owner_password
+        };
+
+        // Compute owner password hash (O value)
+        let owner_hash = algorithms::compute_owner_password_hash(
+            owner_pass,
+            &self.user_password,
+            revision,
+            key_length,
+        );
+
+        // Compute encryption key from user password
+        let encryption_key = algorithms::compute_encryption_key(
+            &self.user_password,
+            &owner_hash,
+            self.permissions,
+            file_id,
+            revision,
+            key_length,
+            self.encrypt_metadata,
+        );
+
+        // Compute user password hash (U value)
+        let user_hash = algorithms::compute_user_password_hash(&encryption_key, file_id, revision);
+
+        EncryptDict {
+            filter: "Standard".to_string(),
+            sub_filter: None,
+            version,
+            length: Some((key_length * 8) as u32),
+            revision,
+            owner_password: owner_hash,
+            user_password: user_hash,
+            permissions: self.permissions,
+            encrypt_metadata: self.encrypt_metadata,
+            owner_encryption: None,
+            user_encryption: None,
+            perms: None,
+        }
+    }
 }
 
 /// PDF encryption permissions (P field).
@@ -297,4 +485,40 @@ impl Permissions {
     pub fn can_print_high_quality(&self) -> bool {
         (self.bits & (1 << 11)) != 0
     }
+}
+
+/// Generate a unique file ID for the PDF.
+///
+/// PDF Spec: Section 14.4 - File Identifiers
+///
+/// The file identifier array contains two strings:
+/// - First string: A permanent identifier based on file contents at creation
+/// - Second string: A changing identifier updated each time the file is saved
+///
+/// This function generates both strings as the same value (for new PDFs).
+/// For incremental updates, the first ID should be preserved.
+///
+/// # Returns
+///
+/// A tuple of (permanent_id, changing_id) as 16-byte vectors
+pub fn generate_file_id() -> (Vec<u8>, Vec<u8>) {
+    use md5::{Digest, Md5};
+
+    // Generate a UUID v4 and hash it with MD5 to get 16 bytes
+    let uuid = uuid::Uuid::new_v4();
+    let uuid_bytes = uuid.as_bytes();
+
+    let mut hasher = Md5::new();
+    hasher.update(uuid_bytes);
+
+    // Add current time for extra uniqueness
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    hasher.update(now.as_nanos().to_le_bytes());
+
+    let id = hasher.finalize().to_vec();
+
+    // For new PDFs, both IDs are the same
+    (id.clone(), id)
 }
