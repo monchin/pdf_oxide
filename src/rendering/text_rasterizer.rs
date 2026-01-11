@@ -9,13 +9,14 @@
 //! - Uses system fonts as fallback when embedded fonts aren't available
 //! - Renders text as simple glyphs at calculated positions
 
+use super::create_fill_paint;
 use crate::content::operators::TextElement;
 use crate::content::GraphicsState;
 use crate::document::PdfDocument;
 use crate::error::Result;
 use crate::object::Object;
 
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Transform};
+use tiny_skia::{Paint, PathBuilder, Pixmap, Transform};
 
 /// Rasterizer for PDF text operations.
 pub struct TextRasterizer {
@@ -45,11 +46,8 @@ impl TextRasterizer {
         let text_matrix = &gs.text_matrix;
         let font_size = gs.font_size;
 
-        // Create paint from fill color
-        let (r, g, b) = gs.fill_color_rgb;
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba(r, g, b, gs.fill_alpha).unwrap_or(Color::BLACK));
-        paint.anti_alias = true;
+        // Create paint from fill color (text uses fill color, not stroke)
+        let paint = create_fill_paint(gs, "Normal");
 
         // Calculate position in user space
         let x = text_matrix.e;
@@ -72,10 +70,7 @@ impl TextRasterizer {
         _resources: &Object,
         _doc: &mut PdfDocument,
     ) -> Result<()> {
-        let (r, g, b) = gs.fill_color_rgb;
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba(r, g, b, gs.fill_alpha).unwrap_or(Color::BLACK));
-        paint.anti_alias = true;
+        let paint = create_fill_paint(gs, "Normal");
 
         let font_size = gs.font_size;
         let text_matrix = &gs.text_matrix;

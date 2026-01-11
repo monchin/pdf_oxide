@@ -76,58 +76,27 @@ impl PdfAValidator {
     ) -> Result<ValidationResult> {
         let mut result = ValidationResult::new(level);
 
-        // Run all validators
-        // Each validator adds its errors/warnings to the result
-
-        // 1. XMP Metadata validation (required for all levels)
-        validators::validate_xmp_metadata(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
+        // Macro to run a validator and check for early return
+        macro_rules! run_validator {
+            ($validator:expr) => {
+                $validator(document, level, &mut result)?;
+                if self.should_stop(&result) {
+                    return Ok(self.finalize_result(result));
+                }
+            };
         }
 
-        // 2. Font embedding validation
-        validators::validate_fonts(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
+        // Run all validators in order
+        run_validator!(validators::validate_xmp_metadata);
+        run_validator!(validators::validate_fonts);
+        run_validator!(validators::validate_colors);
+        run_validator!(validators::validate_encryption);
+        run_validator!(validators::validate_transparency);
+        run_validator!(validators::validate_structure);
+        run_validator!(validators::validate_javascript);
+        run_validator!(validators::validate_embedded_files);
 
-        // 3. Color space validation
-        validators::validate_colors(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 4. Encryption validation (must be absent)
-        validators::validate_encryption(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 5. Transparency validation (PDF/A-1 restriction)
-        validators::validate_transparency(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 6. Document structure validation (for level A)
-        validators::validate_structure(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 7. JavaScript validation (must be absent)
-        validators::validate_javascript(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 8. Embedded files validation
-        validators::validate_embedded_files(document, level, &mut result)?;
-        if self.should_stop(&result) {
-            return Ok(self.finalize_result(result));
-        }
-
-        // 9. Annotations validation
+        // Last validator doesn't need early return check
         validators::validate_annotations(document, level, &mut result)?;
 
         Ok(self.finalize_result(result))

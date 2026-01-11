@@ -8,6 +8,22 @@ use super::types::{
 use crate::document::PdfDocument;
 use crate::error::Result;
 use crate::object::Object;
+use std::collections::HashMap;
+
+/// Type alias for PDF dictionary.
+type Dictionary = HashMap<String, Object>;
+
+/// Helper to extract the catalog dictionary from a document.
+///
+/// Returns `None` if the catalog is not a dictionary, allowing callers
+/// to handle this case appropriately.
+fn get_catalog_dict(document: &mut PdfDocument) -> Result<Option<Dictionary>> {
+    let catalog = document.catalog()?;
+    match catalog {
+        Object::Dictionary(d) => Ok(Some(d)),
+        _ => Ok(None),
+    }
+}
 
 /// Validate XMP metadata requirements.
 pub fn validate_xmp_metadata(
@@ -16,10 +32,9 @@ pub fn validate_xmp_metadata(
     result: &mut ValidationResult,
 ) -> Result<()> {
     // Get the catalog
-    let catalog = document.catalog()?;
-    let catalog_dict = match catalog {
-        Object::Dictionary(d) => d,
-        _ => {
+    let catalog_dict = match get_catalog_dict(document)? {
+        Some(d) => d,
+        None => {
             result.add_error(ComplianceError::new(
                 ErrorCode::MissingXmpMetadata,
                 "Document catalog is invalid",
@@ -85,10 +100,9 @@ pub fn validate_colors(
     result: &mut ValidationResult,
 ) -> Result<()> {
     // Check for output intent
-    let catalog = document.catalog()?;
-    let catalog_dict = match catalog {
-        Object::Dictionary(d) => d,
-        _ => return Ok(()),
+    let catalog_dict = match get_catalog_dict(document)? {
+        Some(d) => d,
+        None => return Ok(()),
     };
 
     let has_output_intent = catalog_dict.contains_key("OutputIntents");
@@ -173,10 +187,9 @@ pub fn validate_structure(
         return Ok(());
     }
 
-    let catalog = document.catalog()?;
-    let catalog_dict = match catalog {
-        Object::Dictionary(d) => d,
-        _ => return Ok(()),
+    let catalog_dict = match get_catalog_dict(document)? {
+        Some(d) => d,
+        None => return Ok(()),
     };
 
     // Check for MarkInfo with Marked = true
@@ -232,10 +245,9 @@ pub fn validate_javascript(
     _level: PdfALevel,
     result: &mut ValidationResult,
 ) -> Result<()> {
-    let catalog = document.catalog()?;
-    let catalog_dict = match catalog {
-        Object::Dictionary(d) => d,
-        _ => return Ok(()),
+    let catalog_dict = match get_catalog_dict(document)? {
+        Some(d) => d,
+        None => return Ok(()),
     };
 
     // Check Names dictionary for JavaScript
@@ -281,10 +293,9 @@ pub fn validate_embedded_files(
     level: PdfALevel,
     result: &mut ValidationResult,
 ) -> Result<()> {
-    let catalog = document.catalog()?;
-    let catalog_dict = match catalog {
-        Object::Dictionary(d) => d,
-        _ => return Ok(()),
+    let catalog_dict = match get_catalog_dict(document)? {
+        Some(d) => d,
+        None => return Ok(()),
     };
 
     // Check Names dictionary for EmbeddedFiles

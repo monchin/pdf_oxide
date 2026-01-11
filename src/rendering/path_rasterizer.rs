@@ -1,7 +1,8 @@
 //! Path rasterizer - renders PDF paths using tiny-skia.
 
+use super::{create_fill_paint, create_stroke_paint};
 use crate::content::GraphicsState;
-use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, Path, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Path, Pixmap, Stroke, Transform};
 
 /// Rasterizer for PDF path operations.
 pub struct PathRasterizer {
@@ -23,18 +24,7 @@ impl PathRasterizer {
         gs: &GraphicsState,
         fill_rule: FillRule,
     ) {
-        let (r, g, b) = gs.fill_color_rgb;
-        let alpha = gs.fill_alpha;
-
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba(r, g, b, alpha).unwrap_or(Color::BLACK));
-        paint.anti_alias = true;
-
-        // Apply blend mode if not normal
-        if gs.blend_mode != "Normal" {
-            paint.blend_mode = self.pdf_blend_mode_to_skia(&gs.blend_mode);
-        }
-
+        let paint = create_fill_paint(gs, &gs.blend_mode);
         pixmap.fill_path(path, &paint, fill_rule, transform, None);
     }
 
@@ -46,17 +36,7 @@ impl PathRasterizer {
         transform: Transform,
         gs: &GraphicsState,
     ) {
-        let (r, g, b) = gs.stroke_color_rgb;
-        let alpha = gs.stroke_alpha;
-
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba(r, g, b, alpha).unwrap_or(Color::BLACK));
-        paint.anti_alias = true;
-
-        // Apply blend mode if not normal
-        if gs.blend_mode != "Normal" {
-            paint.blend_mode = self.pdf_blend_mode_to_skia(&gs.blend_mode);
-        }
+        let paint = create_stroke_paint(gs, &gs.blend_mode);
 
         let dash = if !gs.dash_pattern.0.is_empty() {
             tiny_skia::StrokeDash::new(gs.dash_pattern.0.clone(), gs.dash_pattern.1)
@@ -94,25 +74,6 @@ impl PathRasterizer {
             _ => LineJoin::Miter,
         }
     }
-
-    /// Convert PDF blend mode to tiny-skia.
-    fn pdf_blend_mode_to_skia(&self, mode: &str) -> tiny_skia::BlendMode {
-        match mode {
-            "Normal" => tiny_skia::BlendMode::SourceOver,
-            "Multiply" => tiny_skia::BlendMode::Multiply,
-            "Screen" => tiny_skia::BlendMode::Screen,
-            "Overlay" => tiny_skia::BlendMode::Overlay,
-            "Darken" => tiny_skia::BlendMode::Darken,
-            "Lighten" => tiny_skia::BlendMode::Lighten,
-            "ColorDodge" => tiny_skia::BlendMode::ColorDodge,
-            "ColorBurn" => tiny_skia::BlendMode::ColorBurn,
-            "HardLight" => tiny_skia::BlendMode::HardLight,
-            "SoftLight" => tiny_skia::BlendMode::SoftLight,
-            "Difference" => tiny_skia::BlendMode::Difference,
-            "Exclusion" => tiny_skia::BlendMode::Exclusion,
-            _ => tiny_skia::BlendMode::SourceOver,
-        }
-    }
 }
 
 impl Default for PathRasterizer {
@@ -147,13 +108,5 @@ mod tests {
         assert_eq!(rasterizer.pdf_line_join_to_skia(0), LineJoin::Miter);
         assert_eq!(rasterizer.pdf_line_join_to_skia(1), LineJoin::Round);
         assert_eq!(rasterizer.pdf_line_join_to_skia(2), LineJoin::Bevel);
-    }
-
-    #[test]
-    fn test_blend_mode_conversion() {
-        let rasterizer = PathRasterizer::new();
-        assert_eq!(rasterizer.pdf_blend_mode_to_skia("Normal"), tiny_skia::BlendMode::SourceOver);
-        assert_eq!(rasterizer.pdf_blend_mode_to_skia("Multiply"), tiny_skia::BlendMode::Multiply);
-        assert_eq!(rasterizer.pdf_blend_mode_to_skia("Unknown"), tiny_skia::BlendMode::SourceOver);
     }
 }

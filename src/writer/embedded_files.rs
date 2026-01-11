@@ -284,25 +284,13 @@ impl EmbeddedFilesBuilder {
     }
 }
 
-/// Simple MD5 hash function for checksum calculation.
+/// MD5 hash function for checksum calculation.
 fn md5_hash(data: &[u8]) -> Vec<u8> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use md5::{Digest, Md5};
 
-    // Use a simple hash for now - in production, use proper MD5
-    // This is a placeholder that creates a 16-byte hash-like value
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    let hash1 = hasher.finish();
-
-    let mut hasher2 = DefaultHasher::new();
-    hash1.hash(&mut hasher2);
-    let hash2 = hasher2.finish();
-
-    let mut result = Vec::with_capacity(16);
-    result.extend_from_slice(&hash1.to_le_bytes());
-    result.extend_from_slice(&hash2.to_le_bytes());
-    result
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
 }
 
 /// Encode a string as UTF-16BE with BOM for PDF Unicode strings.
