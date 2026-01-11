@@ -47,6 +47,7 @@
 mod acroform;
 mod annotation_builder;
 mod appearance_stream;
+pub mod barcode;
 mod content_stream;
 mod document_builder;
 mod embedded_files;
@@ -56,6 +57,8 @@ mod freetext;
 mod graphics_state;
 mod image_handler;
 mod ink;
+pub mod layers;
+pub mod linearization;
 mod object_serializer;
 mod outline_builder;
 mod page_labels;
@@ -77,6 +80,9 @@ pub use annotation_builder::{
     Annotation, AnnotationBuilder, BorderStyle, HighlightMode, LinkAction, LinkAnnotation,
 };
 pub use appearance_stream::AppearanceStreamBuilder;
+pub use barcode::{
+    BarcodeGenerator, BarcodeOptions, BarcodeType, QrCodeOptions, QrErrorCorrection,
+};
 pub use content_stream::{
     BlendMode, ContentStreamBuilder, ContentStreamOp, LineCap, LineJoin, PendingImage,
     TextArrayItem,
@@ -98,6 +104,14 @@ pub use freetext::FreeTextAnnotation;
 pub use graphics_state::{ExtGStateBuilder, SoftMask, SoftMaskSubtype};
 pub use image_handler::{ColorSpace, ImageData, ImageFormat, ImageManager, ImagePlacement};
 pub use ink::InkAnnotation;
+pub use layers::{
+    Layer, LayerBuilder, LayerIntent, LayerMembership, LayerVisibility, VisibilityPolicy,
+};
+pub use linearization::{
+    HintTables, LinearizationAnalyzer, LinearizationConfig, LinearizationParams,
+    LinearizedPdfBuilder, ObjectInfo, PageOffsetEntry, PageOffsetHeader, SharedObjectEntry,
+    SharedObjectHeader,
+};
 pub use object_serializer::ObjectSerializer;
 pub use outline_builder::{
     FitMode, OutlineBuildResult, OutlineBuilder, OutlineDestination, OutlineItem, OutlineStyle,

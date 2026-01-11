@@ -352,6 +352,149 @@ impl Pdf {
         PdfBuilder::new().from_text(content)
     }
 
+    /// Create a PDF from an image file.
+    ///
+    /// Creates a single-page PDF where the image fills the page while
+    /// maintaining aspect ratio. Supports JPEG and PNG formats.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    ///
+    /// let pdf = Pdf::from_image("photo.jpg")?;
+    /// pdf.save("photo.pdf")?;
+    /// ```
+    pub fn from_image(path: impl AsRef<Path>) -> Result<Self> {
+        PdfBuilder::new().from_image(path)
+    }
+
+    /// Create a PDF from image bytes.
+    ///
+    /// Creates a single-page PDF from raw image data.
+    /// Auto-detects JPEG and PNG formats.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    ///
+    /// let image_bytes = std::fs::read("photo.jpg")?;
+    /// let pdf = Pdf::from_image_bytes(&image_bytes)?;
+    /// pdf.save("photo.pdf")?;
+    /// ```
+    pub fn from_image_bytes(data: &[u8]) -> Result<Self> {
+        PdfBuilder::new().from_image_bytes(data)
+    }
+
+    /// Create a multi-page PDF from multiple image files.
+    ///
+    /// Each image becomes a separate page. Pages are sized to fit each
+    /// image while maintaining aspect ratio.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    ///
+    /// let pdf = Pdf::from_images(&["page1.jpg", "page2.png", "page3.jpg"])?;
+    /// pdf.save("album.pdf")?;
+    /// ```
+    pub fn from_images<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
+        PdfBuilder::new().from_images(paths)
+    }
+
+    /// Create a PDF containing a QR code.
+    ///
+    /// Generates a QR code from the given data and creates a PDF with it.
+    /// Requires the `barcodes` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    ///
+    /// let pdf = Pdf::from_qrcode("https://example.com")?;
+    /// pdf.save("qrcode.pdf")?;
+    /// ```
+    #[cfg(feature = "barcodes")]
+    pub fn from_qrcode(data: &str) -> Result<Self> {
+        PdfBuilder::new().from_qrcode(data)
+    }
+
+    /// Create a PDF containing a QR code with custom options.
+    ///
+    /// Allows specifying size, error correction level, and colors.
+    /// Requires the `barcodes` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    /// use pdf_oxide::writer::barcode::{QrCodeOptions, QrErrorCorrection};
+    ///
+    /// let options = QrCodeOptions::new()
+    ///     .size(300)
+    ///     .error_correction(QrErrorCorrection::High);
+    /// let pdf = Pdf::from_qrcode_with_options("https://example.com", &options)?;
+    /// pdf.save("qrcode.pdf")?;
+    /// ```
+    #[cfg(feature = "barcodes")]
+    pub fn from_qrcode_with_options(
+        data: &str,
+        options: &crate::writer::barcode::QrCodeOptions,
+    ) -> Result<Self> {
+        PdfBuilder::new().from_qrcode_with_options(data, options)
+    }
+
+    /// Create a PDF containing a 1D barcode.
+    ///
+    /// Generates a barcode from the given data and creates a PDF with it.
+    /// Requires the `barcodes` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    /// use pdf_oxide::writer::barcode::BarcodeType;
+    ///
+    /// let pdf = Pdf::from_barcode(BarcodeType::Code128, "ABC123")?;
+    /// pdf.save("barcode.pdf")?;
+    /// ```
+    #[cfg(feature = "barcodes")]
+    pub fn from_barcode(
+        barcode_type: crate::writer::barcode::BarcodeType,
+        data: &str,
+    ) -> Result<Self> {
+        PdfBuilder::new().from_barcode(barcode_type, data)
+    }
+
+    /// Create a PDF containing a 1D barcode with custom options.
+    ///
+    /// Allows specifying size and colors.
+    /// Requires the `barcodes` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::api::Pdf;
+    /// use pdf_oxide::writer::barcode::{BarcodeType, BarcodeOptions};
+    ///
+    /// let options = BarcodeOptions::new()
+    ///     .width(300)
+    ///     .height(100);
+    /// let pdf = Pdf::from_barcode_with_options(BarcodeType::Ean13, "5901234123457", &options)?;
+    /// pdf.save("barcode.pdf")?;
+    /// ```
+    #[cfg(feature = "barcodes")]
+    pub fn from_barcode_with_options(
+        barcode_type: crate::writer::barcode::BarcodeType,
+        data: &str,
+        options: &crate::writer::barcode::BarcodeOptions,
+    ) -> Result<Self> {
+        PdfBuilder::new().from_barcode_with_options(barcode_type, data, options)
+    }
+
     /// Open an existing PDF file for reading and editing.
     ///
     /// Returns a `Pdf` instance with full DOM access for navigating and
@@ -2009,6 +2152,210 @@ impl PdfBuilder {
         })
     }
 
+    /// Build a PDF from an image file.
+    ///
+    /// Creates a single-page PDF where the image fills the page.
+    /// Supports JPEG and PNG formats.
+    pub fn from_image(self, path: impl AsRef<Path>) -> Result<Pdf> {
+        use crate::writer::ImageData;
+
+        let image = ImageData::from_file(path).map_err(|e| Error::Image(e.to_string()))?;
+        self.from_image_data(image)
+    }
+
+    /// Build a PDF from image bytes.
+    ///
+    /// Creates a single-page PDF from raw image data.
+    /// Auto-detects JPEG and PNG formats.
+    pub fn from_image_bytes(self, data: &[u8]) -> Result<Pdf> {
+        use crate::writer::ImageData;
+
+        let image = ImageData::from_bytes(data).map_err(|e| Error::Image(e.to_string()))?;
+        self.from_image_data(image)
+    }
+
+    /// Build a multi-page PDF from multiple image files.
+    ///
+    /// Each image becomes a separate page.
+    pub fn from_images<P: AsRef<Path>>(self, paths: &[P]) -> Result<Pdf> {
+        use crate::writer::ImageData;
+
+        if paths.is_empty() {
+            return Err(Error::InvalidPdf("No images provided".to_string()));
+        }
+
+        let images: Vec<ImageData> = paths
+            .iter()
+            .map(|p| ImageData::from_file(p).map_err(|e| Error::Image(e.to_string())))
+            .collect::<Result<Vec<_>>>()?;
+
+        self.from_image_data_multiple(images)
+    }
+
+    /// Internal: Build PDF from a single ImageData.
+    fn from_image_data(self, image: crate::writer::ImageData) -> Result<Pdf> {
+        let bytes = self.render_image(&image)?;
+        Ok(Pdf {
+            bytes,
+            config: self.config,
+            editor: None,
+            source_path: None,
+        })
+    }
+
+    /// Internal: Build PDF from multiple ImageData.
+    fn from_image_data_multiple(self, images: Vec<crate::writer::ImageData>) -> Result<Pdf> {
+        let bytes = self.render_images(&images)?;
+        Ok(Pdf {
+            bytes,
+            config: self.config,
+            editor: None,
+            source_path: None,
+        })
+    }
+
+    /// Build a PDF containing a QR code.
+    ///
+    /// Generates a QR code from the given data and creates a PDF with it.
+    /// Requires the `barcodes` feature.
+    #[cfg(feature = "barcodes")]
+    pub fn from_qrcode(self, data: &str) -> Result<Pdf> {
+        use crate::writer::barcode::QrCodeOptions;
+        self.from_qrcode_with_options(data, &QrCodeOptions::default().size(300))
+    }
+
+    /// Build a PDF containing a QR code with custom options.
+    ///
+    /// Allows specifying size, error correction level, and colors.
+    /// Requires the `barcodes` feature.
+    #[cfg(feature = "barcodes")]
+    pub fn from_qrcode_with_options(
+        self,
+        data: &str,
+        options: &crate::writer::barcode::QrCodeOptions,
+    ) -> Result<Pdf> {
+        use crate::writer::barcode::BarcodeGenerator;
+        use crate::writer::ImageData;
+
+        let png_bytes = BarcodeGenerator::generate_qr(data, options)?;
+        let image = ImageData::from_bytes(&png_bytes).map_err(|e| Error::Image(e.to_string()))?;
+        self.from_image_data(image)
+    }
+
+    /// Build a PDF containing a 1D barcode.
+    ///
+    /// Generates a barcode from the given data and creates a PDF with it.
+    /// Requires the `barcodes` feature.
+    #[cfg(feature = "barcodes")]
+    pub fn from_barcode(
+        self,
+        barcode_type: crate::writer::barcode::BarcodeType,
+        data: &str,
+    ) -> Result<Pdf> {
+        use crate::writer::barcode::BarcodeOptions;
+        self.from_barcode_with_options(barcode_type, data, &BarcodeOptions::default())
+    }
+
+    /// Build a PDF containing a 1D barcode with custom options.
+    ///
+    /// Allows specifying size and colors.
+    /// Requires the `barcodes` feature.
+    #[cfg(feature = "barcodes")]
+    pub fn from_barcode_with_options(
+        self,
+        barcode_type: crate::writer::barcode::BarcodeType,
+        data: &str,
+        options: &crate::writer::barcode::BarcodeOptions,
+    ) -> Result<Pdf> {
+        use crate::writer::barcode::BarcodeGenerator;
+        use crate::writer::ImageData;
+
+        let png_bytes = BarcodeGenerator::generate_1d(barcode_type, data, options)?;
+        let image = ImageData::from_bytes(&png_bytes).map_err(|e| Error::Image(e.to_string()))?;
+        self.from_image_data(image)
+    }
+
+    /// Render a single image to PDF bytes.
+    fn render_image(&self, image: &crate::writer::ImageData) -> Result<Vec<u8>> {
+        self.render_images(std::slice::from_ref(image))
+    }
+
+    /// Render multiple images to PDF bytes (one page per image).
+    fn render_images(&self, images: &[crate::writer::ImageData]) -> Result<Vec<u8>> {
+        use crate::elements::{
+            ColorSpace as ElemColorSpace, ImageContent, ImageFormat as ElemImageFormat,
+        };
+        use crate::geometry::Rect;
+        use crate::writer::{PdfWriter, PdfWriterConfig};
+
+        // Configure writer
+        let mut config = PdfWriterConfig::default();
+        config.title = self.config.title.clone();
+        config.author = self.config.author.clone();
+        config.subject = self.config.subject.clone();
+        config.creator = Some("pdf_oxide".to_string());
+
+        let mut writer = PdfWriter::with_config(config);
+
+        for image in images {
+            // Calculate page dimensions and image placement
+            let (page_width, page_height, img_x, img_y, img_w, img_h) =
+                self.calculate_image_page_layout(image);
+
+            // Convert writer::ImageData to elements::ImageContent
+            let image_content = ImageContent {
+                bbox: Rect::new(img_x, img_y, img_w, img_h),
+                format: match image.format {
+                    crate::writer::ImageFormat::Jpeg => ElemImageFormat::Jpeg,
+                    crate::writer::ImageFormat::Png => ElemImageFormat::Png,
+                    crate::writer::ImageFormat::Raw => ElemImageFormat::Raw,
+                },
+                data: image.data.clone(),
+                width: image.width,
+                height: image.height,
+                bits_per_component: image.bits_per_component,
+                color_space: match image.color_space {
+                    crate::writer::ColorSpace::DeviceGray => ElemColorSpace::Gray,
+                    crate::writer::ColorSpace::DeviceRGB => ElemColorSpace::RGB,
+                    crate::writer::ColorSpace::DeviceCMYK => ElemColorSpace::CMYK,
+                },
+                reading_order: None,
+                alt_text: None,
+            };
+
+            // Add page with image
+            let mut page = writer.add_page(page_width, page_height);
+            page.add_element(&crate::elements::ContentElement::Image(image_content));
+            page.finish();
+        }
+
+        writer.finish()
+    }
+
+    /// Calculate page layout for an image.
+    ///
+    /// Returns: (page_width, page_height, img_x, img_y, img_width, img_height)
+    fn calculate_image_page_layout(
+        &self,
+        image: &crate::writer::ImageData,
+    ) -> (f32, f32, f32, f32, f32, f32) {
+        // Get configured page size
+        let (page_width, page_height) = self.config.page_size.dimensions();
+
+        // Calculate available area (page minus margins)
+        let avail_w = page_width - self.config.margin_left - self.config.margin_right;
+        let avail_h = page_height - self.config.margin_top - self.config.margin_bottom;
+
+        // Fit image to available area
+        let (fit_w, fit_h) = image.fit_to_box(avail_w, avail_h);
+
+        // Center the image on page
+        let x = self.config.margin_left + (avail_w - fit_w) / 2.0;
+        let y = self.config.margin_bottom + (avail_h - fit_h) / 2.0;
+
+        (page_width, page_height, x, y, fit_w, fit_h)
+    }
+
     /// Render Markdown content to PDF bytes.
     #[allow(clippy::manual_strip)]
     fn render_markdown(&self, content: &str) -> Result<Vec<u8>> {
@@ -2420,5 +2767,77 @@ End of table.
         assert!(!super::is_table_line("Not a table"));
         assert!(!super::is_table_line("| Only one pipe"));
         assert!(!super::is_table_line(""));
+    }
+
+    #[test]
+    fn test_pdf_from_image_bytes_jpeg() {
+        // Minimal valid JPEG bytes (just header + EOF markers)
+        // This is a 1x1 white JPEG
+        let jpeg_bytes: Vec<u8> = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06,
+            0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D,
+            0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D,
+            0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28,
+            0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+            0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01,
+            0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
+            0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10,
+            0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00,
+            0x01, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
+            0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42,
+            0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16,
+            0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55,
+            0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73,
+            0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+            0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5,
+            0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA,
+            0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6,
+            0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA,
+            0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD5, 0xDB, 0x20, 0xA8, 0xF9, 0xFF, 0xD9,
+        ];
+
+        let result = Pdf::from_image_bytes(&jpeg_bytes);
+        assert!(result.is_ok(), "Failed to create PDF from JPEG: {:?}", result.err());
+
+        let pdf = result.unwrap();
+        assert!(!pdf.as_bytes().is_empty());
+        assert!(pdf.as_bytes().starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_pdf_from_images_empty() {
+        let paths: Vec<&str> = vec![];
+        let result = Pdf::from_images(&paths);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_image_page_layout() {
+        use crate::writer::ColorSpace;
+        use crate::writer::ImageData;
+
+        let builder = PdfBuilder::new().page_size(PageSize::Letter);
+
+        // Create a test image (100x50 pixels)
+        let image = ImageData::new(100, 50, ColorSpace::DeviceRGB, vec![0; 15000]);
+
+        let (page_w, page_h, x, y, w, h) = builder.calculate_image_page_layout(&image);
+
+        // Page should be Letter size
+        assert_eq!(page_w, 612.0);
+        assert_eq!(page_h, 792.0);
+
+        // Image should fit within margins and maintain aspect ratio
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+        assert!((w / h - 2.0).abs() < 0.01); // Aspect ratio should be 2:1
+
+        // Image should be centered
+        assert!(x > 0.0);
+        assert!(y > 0.0);
     }
 }
