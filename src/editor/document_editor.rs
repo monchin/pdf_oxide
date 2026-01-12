@@ -583,10 +583,13 @@ impl DocumentEditor {
 
     /// Find the maximum object ID in the document.
     fn find_max_object_id(doc: &PdfDocument) -> u32 {
-        // Access the xref table to find max ID
-        // For now, use a reasonable default since xref is private
-        // In practice, we'd need to expose this or track it during loading
-        1000 // Safe default - most PDFs have fewer than 1000 objects
+        // Get /Size from trailer - this is the number of xref entries (max ID + 1)
+        doc.trailer()
+            .as_dict()
+            .and_then(|d| d.get("Size"))
+            .and_then(|s| s.as_integer())
+            .map(|size| size as u32)
+            .unwrap_or(100) // Fallback to reasonable default
     }
 
     /// Allocate a new object ID.
@@ -1278,6 +1281,16 @@ impl DocumentEditor {
                                     None
                                 };
 
+                                // Check if we have new annotations to add for this page
+                                let new_annotation_count = self
+                                    .modified_annotations
+                                    .get(&page_index)
+                                    .map(|anns| anns.iter().filter(|a| a.is_new()).count())
+                                    .unwrap_or(0);
+                                let new_annotation_ids: Vec<u32> = (0..new_annotation_count)
+                                    .map(|_| self.allocate_object_id())
+                                    .collect();
+
                                 // Check if we need to flatten annotations for this page
                                 let should_flatten =
                                     self.flatten_annotations_pages.contains(&page_index);
@@ -1349,6 +1362,15 @@ impl DocumentEditor {
                                     } else {
                                         None
                                     }
+                                } else {
+                                    None
+                                };
+
+                                // Check if we have modified content for this page
+                                let modified_content_id: Option<u32> = if self.structure_modified
+                                    && self.modified_content.contains_key(&page_index)
+                                {
+                                    Some(self.allocate_object_id())
                                 } else {
                                     None
                                 };
@@ -1616,6 +1638,52 @@ impl DocumentEditor {
                                     final_page_obj = Object::Dictionary(new_dict);
                                 }
 
+                                // Add new annotations to the page's /Annots array
+                                if !new_annotation_ids.is_empty() {
+                                    if let Some(page_dict) = final_page_obj.as_dict() {
+                                        let mut new_dict = page_dict.clone();
+
+                                        // Get existing Annots array or create new one
+                                        let mut annots_array = match new_dict.get("Annots").cloned()
+                                        {
+                                            Some(Object::Array(arr)) => arr,
+                                            Some(Object::Reference(annots_ref)) => {
+                                                match self.source.load_object(annots_ref) {
+                                                    Ok(Object::Array(arr)) => arr,
+                                                    _ => vec![],
+                                                }
+                                            },
+                                            _ => vec![],
+                                        };
+
+                                        // Add references to new annotations
+                                        for annot_id in &new_annotation_ids {
+                                            annots_array.push(Object::Reference(ObjectRef::new(
+                                                *annot_id, 0,
+                                            )));
+                                        }
+
+                                        new_dict.insert(
+                                            "Annots".to_string(),
+                                            Object::Array(annots_array),
+                                        );
+                                        final_page_obj = Object::Dictionary(new_dict);
+                                    }
+                                }
+
+                                // Update page's /Contents reference if we have modified content
+                                if let Some(new_content_id) = modified_content_id {
+                                    if let Some(page_dict) = final_page_obj.as_dict() {
+                                        let mut new_dict = page_dict.clone();
+                                        // Replace the Contents reference with the new content stream
+                                        new_dict.insert(
+                                            "Contents".to_string(),
+                                            Object::Reference(ObjectRef::new(new_content_id, 0)),
+                                        );
+                                        final_page_obj = Object::Dictionary(new_dict);
+                                    }
+                                }
+
                                 let offset = writer.stream_position()?;
                                 let bytes = serialize_obj(
                                     &serializer,
@@ -1672,27 +1740,22 @@ impl DocumentEditor {
                                                 data: content_bytes.into(),
                                             };
 
-                                            // Allocate new object ID for the content stream
-                                            let new_contents_id = self.allocate_object_id();
-                                            let offset = writer.stream_position()?;
-                                            let bytes = serialize_obj(
-                                                &serializer,
-                                                new_contents_id,
-                                                0,
-                                                &content_stream_obj,
-                                                &encryption_handler,
-                                            );
-                                            writer.write_all(&bytes)?;
-                                            xref_entries.push((new_contents_id, offset, 0, true));
+                                            // Use the pre-allocated content ID (page /Contents already updated)
+                                            if let Some(content_id) = modified_content_id {
+                                                let offset = writer.stream_position()?;
+                                                let bytes = serialize_obj(
+                                                    &serializer,
+                                                    content_id,
+                                                    0,
+                                                    &content_stream_obj,
+                                                    &encryption_handler,
+                                                );
+                                                writer.write_all(&bytes)?;
+                                                xref_entries.push((content_id, offset, 0, true));
+                                            }
 
-                                            // Note: The page object's /Contents reference should be updated
-                                            // and XObject references added to Resources dictionary.
-                                            // This would require modifying the page_obj dictionary and re-serializing it.
-                                            // Full implementation would update page_dict and re-write the page object.
-
-                                            // TODO: For now, xobject_refs contains the image resource IDs
-                                            // that need to be added to the page's Resources/XObject dictionary.
-                                            // Full integration would require modifying the page object.
+                                            // TODO: xobject_refs contains image resource IDs that need
+                                            // to be added to the page's Resources/XObject dictionary.
                                             let _ = xobject_refs; // Suppress unused warning
                                         }
                                     } else {
@@ -1855,7 +1918,7 @@ impl DocumentEditor {
                                         }
                                     }
 
-                                    // Write resources if present
+                                    // Write resources if present (as reference)
                                     if let Some(resources_ref) =
                                         page_dict.get("Resources").and_then(|r| r.as_reference())
                                     {
@@ -1871,6 +1934,63 @@ impl DocumentEditor {
                                         );
                                         writer.write_all(&bytes)?;
                                         xref_entries.push((resources_ref.id, offset, 0, true));
+                                    }
+
+                                    // Write font objects referenced in Resources (handles inline Resources dict)
+                                    if let Some(resources) = page_dict.get("Resources") {
+                                        let resources_dict = match resources {
+                                            Object::Dictionary(d) => Some(d.clone()),
+                                            Object::Reference(r) => self
+                                                .source
+                                                .load_object(*r)
+                                                .ok()
+                                                .and_then(|o| o.as_dict().cloned()),
+                                            _ => None,
+                                        };
+                                        if let Some(res_dict) = resources_dict {
+                                            // Copy Font dictionary entries
+                                            if let Some(fonts) = res_dict.get("Font") {
+                                                let font_dict = match fonts {
+                                                    Object::Dictionary(d) => Some(d.clone()),
+                                                    Object::Reference(r) => self
+                                                        .source
+                                                        .load_object(*r)
+                                                        .ok()
+                                                        .and_then(|o| o.as_dict().cloned()),
+                                                    _ => None,
+                                                };
+                                                if let Some(fdict) = font_dict {
+                                                    for (_name, font_ref) in fdict.iter() {
+                                                        if let Some(ref_obj) =
+                                                            font_ref.as_reference()
+                                                        {
+                                                            // Check if we've already written this object
+                                                            if !xref_entries.iter().any(
+                                                                |(id, _, _, _)| *id == ref_obj.id,
+                                                            ) {
+                                                                if let Ok(font_obj) =
+                                                                    self.source.load_object(ref_obj)
+                                                                {
+                                                                    let offset =
+                                                                        writer.stream_position()?;
+                                                                    let bytes = serialize_obj(
+                                                                        &serializer,
+                                                                        ref_obj.id,
+                                                                        0,
+                                                                        &font_obj,
+                                                                        &encryption_handler,
+                                                                    );
+                                                                    writer.write_all(&bytes)?;
+                                                                    xref_entries.push((
+                                                                        ref_obj.id, offset, 0, true,
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1894,6 +2014,42 @@ impl DocumentEditor {
                                         );
                                         writer.write_all(&bytes)?;
                                         xref_entries.push((overlay_obj_id, offset, 0, true));
+                                    }
+                                }
+
+                                // Write new annotation objects
+                                if !new_annotation_ids.is_empty() {
+                                    // Get page refs for building annotations (needed for link destinations)
+                                    let page_refs = self.get_page_refs().unwrap_or_default();
+
+                                    if let Some(annotations) =
+                                        self.modified_annotations.get(&page_index)
+                                    {
+                                        let new_annotations: Vec<_> =
+                                            annotations.iter().filter(|a| a.is_new()).collect();
+
+                                        for (annot_id, annot_wrapper) in
+                                            new_annotation_ids.iter().zip(new_annotations.iter())
+                                        {
+                                            if let Some(writer_annot) =
+                                                annot_wrapper.writer_annotation()
+                                            {
+                                                // Build the annotation dictionary
+                                                let annot_dict = writer_annot.build(&page_refs);
+
+                                                // Write the annotation object
+                                                let offset = writer.stream_position()?;
+                                                let bytes = serialize_obj(
+                                                    &serializer,
+                                                    *annot_id,
+                                                    0,
+                                                    &Object::Dictionary(annot_dict),
+                                                    &encryption_handler,
+                                                );
+                                                writer.write_all(&bytes)?;
+                                                xref_entries.push((*annot_id, offset, 0, true));
+                                            }
+                                        }
                                     }
                                 }
 
