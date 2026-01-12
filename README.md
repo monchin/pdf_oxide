@@ -144,8 +144,10 @@ maturin develop
 
 ## Documentation
 
-- **API Docs**: [docs.rs/pdf_oxide](https://docs.rs/pdf_oxide)
-- **PDF Spec Reference**: [docs/spec/pdf.md](docs/spec/pdf.md)
+- **[Getting Started (Rust)](docs/getting-started-rust.md)** - Complete Rust guide
+- **[Getting Started (Python)](docs/getting-started-python.md)** - Complete Python guide
+- **[API Docs](https://docs.rs/pdf_oxide)** - Full API reference
+- **[PDF Spec Reference](docs/spec/pdf.md)** - ISO 32000-1:2008
 
 ```bash
 # Generate local docs
