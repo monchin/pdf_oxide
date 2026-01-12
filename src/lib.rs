@@ -77,18 +77,18 @@
 //! println!("{}", markdown);
 //! # Ok(())
 //! # }
-//! ```ignore
+//! ```
 //!
 //! ## Quick Start - Python
 //!
-//! ```python
+//! ```text
 //! from pdf_oxide import PdfDocument
 //!
 //! # Open and extract with automatic reading order
 //! doc = PdfDocument("paper.pdf")
 //! markdown = doc.to_markdown(0)
 //! print(markdown)
-//! ```ignore
+//! ```
 //!
 //! ## License
 //!

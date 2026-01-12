@@ -189,7 +189,7 @@ impl Color {
     /// let black = Color::new(0.0, 0.0, 0.0);
     /// let white = Color::new(1.0, 1.0, 1.0);
     /// let red = Color::new(1.0, 0.0, 0.0);
-    /// ```ignore
+    /// ```
     pub fn new(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b }
     }
@@ -270,7 +270,7 @@ impl TextBlock {
     /// let block = TextBlock::from_chars(chars);
     /// assert_eq!(block.text, "Hi");
     /// assert_eq!(block.avg_font_size, 12.0);
-    /// ```ignore
+    /// ```
     pub fn from_chars(chars: Vec<TextChar>) -> Self {
         assert!(!chars.is_empty(), "Cannot create TextBlock from empty chars");
 
@@ -342,7 +342,7 @@ impl TextBlock {
     /// let center = block.center();
     /// assert_eq!(center.x, 50.0);
     /// assert_eq!(center.y, 25.0);
-    /// ```ignore
+    /// ```
     pub fn center(&self) -> Point {
         self.bbox.center()
     }
@@ -386,7 +386,7 @@ impl TextBlock {
     ///
     /// assert!(block1.is_horizontally_aligned(&block2, 5.0));
     /// assert!(!block1.is_horizontally_aligned(&block2, 0.5));
-    /// ```ignore
+    /// ```
     pub fn is_horizontally_aligned(&self, other: &TextBlock, tolerance: f32) -> bool {
         (self.bbox.y - other.bbox.y).abs() < tolerance
     }
@@ -430,7 +430,7 @@ impl TextBlock {
     ///
     /// assert!(block1.is_vertically_aligned(&block2, 5.0));
     /// assert!(!block1.is_vertically_aligned(&block2, 0.5));
-    /// ```ignore
+    /// ```
     pub fn is_vertically_aligned(&self, other: &TextBlock, tolerance: f32) -> bool {
         (self.bbox.x - other.bbox.x).abs() < tolerance
     }

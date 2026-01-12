@@ -73,7 +73,7 @@ pub fn normalize_whitespace(text: &str) -> String {
 ///
 /// # Artifacts Removed
 ///
-/// - Standalone page numbers (e.g., "Page 1", "- 1 -", "[1]")
+/// - Standalone page numbers (e.g., "Page 1", "- 1 -", "\[1\]")
 /// - Common header/footer separators (lines of dashes, equals signs)
 /// - Repeated navigation elements
 ///

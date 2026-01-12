@@ -54,7 +54,7 @@ use std::collections::HashMap;
 /// let objects = parse_object_stream(&stream_obj)?;
 /// let obj_10 = objects.get(&10).unwrap();
 /// # Ok::<(), pdf_oxide::error::Error>(())
-/// ```ignore
+/// ```
 pub fn parse_object_stream(stream_obj: &Object) -> Result<HashMap<u32, Object>> {
     parse_object_stream_with_decryption(stream_obj, None, 0, 0)
 }

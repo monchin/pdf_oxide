@@ -15,7 +15,7 @@
 //! # Reference
 //!
 //! Adobe Technical Note #5080: Adobe-CNS1-7 Character Collection
-//! https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-CNS1
+//! <https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-CNS1>
 
 use phf::phf_map;
 

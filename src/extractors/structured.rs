@@ -34,7 +34,7 @@
 //!     }
 //! }
 //! # Ok::<(), pdf_oxide::error::Error>(())
-//! ```ignore
+//! ```
 
 use crate::document::PdfDocument;
 use crate::error::{Error, Result};

@@ -64,7 +64,7 @@ pub struct CharacterInfo {
     ///
     /// When true, word boundary detection will skip creating boundaries
     /// before or after this character. Used to preserve email addresses
-    /// (user@example.com) and URLs (http://example.com) as single tokens.
+    /// (`user@example.com`) and URLs (`http://example.com`) as single tokens.
     pub protected_from_split: bool,
 }
 

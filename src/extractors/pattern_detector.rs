@@ -2,7 +2,7 @@
 //!
 //! This module provides pattern detection to identify email addresses and URLs
 //! in character sequences, marking them as protected from word boundary splitting.
-//! This ensures patterns like "user@example.com" and "http://example.com" are
+//! This ensures patterns like `user@example.com` and `http://example.com` are
 //! preserved as single tokens during text extraction.
 //!
 //! # Pattern Detection Strategy
@@ -100,8 +100,8 @@ impl PatternDetector {
 
     /// Check if characters contain a URL pattern.
     ///
-    /// Pattern: scheme:// where scheme is http, https, ftp, or mailto:
-    /// Examples: http://example.com, https://example.com/path
+    /// Pattern: `scheme://` where scheme is http, https, ftp, or `mailto:`
+    /// Examples: `http://example.com`, `https://example.com/path`
     ///
     /// # Arguments
     ///

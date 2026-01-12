@@ -11,7 +11,7 @@
 //! This matches pdfplumber and pdfminer.six LAParams approach, achieving
 //! 0 spurious spaces on policy documents and maintaining quality on academic papers.
 //!
-//! Reference: pdfplumber (https://github.com/jsvine/pdfplumber)
+//! Reference: pdfplumber (<https://github.com/jsvine/pdfplumber>)
 //! Reference: pdfminer.six LAParams (word_margin parameter)
 
 use crate::layout::TextSpan;

@@ -12,7 +12,7 @@
 //!
 //! Phase 5.2: Global CMap Caching System
 //!   - Global cache prevents re-parsing of identical CMaps across fonts
-//!   - Reference counting with Arc<CMap> for efficient sharing
+//!   - Reference counting with `Arc<CMap>` for efficient sharing
 //!   - Cache keyed by stream hash for fast lookup
 //!   - Thread-safe design using Mutex and Arc
 //!
@@ -197,7 +197,7 @@ lazy_static::lazy_static! {
 /// # Thread Safety
 /// Multiple threads can safely call `get()` concurrently:
 /// - Parse happens once, even with concurrent access
-/// - Cached result is shared via Arc<CMap> globally
+/// - Cached result is shared via `Arc<CMap>` globally
 /// - Mutex ensures atomic updates to cached state
 ///
 /// # Performance Impact
@@ -244,7 +244,7 @@ impl LazyCMap {
     /// Get a reference to the parsed CMap.
     ///
     /// On first call, checks global cache, then parses if needed.
-    /// On subsequent calls, returns the cached Arc<CMap>.
+    /// On subsequent calls, returns the cached `Arc<CMap>`.
     ///
     /// # Caching Strategy
     /// 1. Check local `parsed` cache (fastest, no lock contention)

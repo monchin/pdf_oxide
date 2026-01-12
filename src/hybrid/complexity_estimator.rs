@@ -62,7 +62,7 @@ pub enum Complexity {
 ///
 /// let blocks = vec![create_block(0.0, 0.0), create_block(0.0, 30.0)];
 /// let complexity = ComplexityEstimator::estimate_page_complexity(&blocks, 612.0, 792.0);
-/// ```ignore
+/// ```
 pub struct ComplexityEstimator;
 
 impl ComplexityEstimator {

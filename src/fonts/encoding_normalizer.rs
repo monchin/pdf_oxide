@@ -112,7 +112,7 @@ impl EncodingNormalizer {
     /// # Returns
     ///
     /// - "Custom" for custom encodings with /Differences
-    /// - "Standard(<name>)" for standard encodings
+    /// - `"Standard(<name>)"` for standard encodings
     /// - "Identity" for identity encodings
     pub fn encoding_type(&self) -> String {
         match &self.encoding {

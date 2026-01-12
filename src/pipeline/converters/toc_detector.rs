@@ -65,7 +65,7 @@ impl TocDetector {
     ///
     /// # Returns
     ///
-    /// Option<Vec<TocEntry>> if detected with sufficient confidence, None otherwise
+    /// `Option<Vec<TocEntry>>` if detected with sufficient confidence, None otherwise
     pub fn detect_toc(&self, spans: &[TextSpan]) -> Option<Vec<TocEntry>> {
         if spans.is_empty() {
             return None;

@@ -32,7 +32,7 @@
 //!
 //! // Use for layout analysis
 //! let layout = xy_cut_adaptive(page_bbox, blocks, &params);
-//! ```ignore
+//! ```
 
 use crate::geometry::Rect;
 use crate::layout::TextChar;

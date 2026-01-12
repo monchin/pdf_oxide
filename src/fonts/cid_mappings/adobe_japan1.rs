@@ -16,7 +16,7 @@
 //! # Reference
 //!
 //! Adobe Technical Note #5078: Adobe-Japan1-7 Character Collection
-//! https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-Japan1
+//! <https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-Japan1>
 
 use phf::phf_map;
 

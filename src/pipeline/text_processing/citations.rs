@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 /// Citation type enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CitationType {
-    /// Numeric citations like [1], (1), or superscript
+    /// Numeric citations like \[1\], (1), or superscript
     Numeric,
     /// Author-year citations like (Smith, 2020) or Smith (2020)
     AuthorYear,

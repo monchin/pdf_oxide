@@ -60,7 +60,7 @@ use std::collections::{HashSet, VecDeque};
 /// let order = graph_based_reading_order(&blocks);
 /// // Block at x=0 comes before block at x=50
 /// assert_eq!(order, vec![0, 1]);
-/// ```ignore
+/// ```
 pub fn graph_based_reading_order(blocks: &[TextBlock]) -> Vec<usize> {
     if blocks.is_empty() {
         return vec![];

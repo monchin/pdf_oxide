@@ -15,7 +15,7 @@
 //! # Reference
 //!
 //! Adobe Technical Note #5079: Adobe-GB1-5 Character Collection
-//! https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-GB1
+//! <https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-GB1>
 
 use phf::phf_map;
 

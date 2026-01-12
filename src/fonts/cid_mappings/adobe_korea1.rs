@@ -15,7 +15,7 @@
 //! # Reference
 //!
 //! Adobe Technical Note #5093: Adobe-Korea1-2 Character Collection
-//! https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-Korea1
+//! <https://github.com/AdobeDocs/adobe-font-technology/tree/main/CID-Korea1>
 
 use phf::phf_map;
 
