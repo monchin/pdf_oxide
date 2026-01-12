@@ -22,23 +22,7 @@ Extract, create, and edit PDFs with one library. Rust core with bindings for eve
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://opensource.org/licenses)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-[📖 Documentation](https://docs.rs/pdf_oxide) | [📊 Comparison](COMPARISON.md) | [🤝 Contributing](CONTRIBUTING.md) | [🔒 Security](SECURITY.md)
-
-## Extract. Create. Edit.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        pdf_oxide                            │
-├───────────────────┬───────────────────┬─────────────────────┤
-│      EXTRACT      │      CREATE       │        EDIT         │
-├───────────────────┼───────────────────┼─────────────────────┤
-│ • Text & Layout   │ • Documents       │ • Annotations       │
-│ • Images          │ • Tables          │ • Form Fields       │
-│ • Forms           │ • Graphics        │ • Bookmarks         │
-│ • Annotations     │ • Templates       │ • Links             │
-│ • Bookmarks       │ • Images          │ • Content           │
-└───────────────────┴───────────────────┴─────────────────────┘
-```
+[📖 Documentation](https://docs.rs/pdf_oxide) | [📝 Changelog](CHANGELOG.md) | [🤝 Contributing](CONTRIBUTING.md) | [🔒 Security](SECURITY.md)
 
 ## Quick Start
 
@@ -74,799 +58,117 @@ editor.save("output.pdf")?;
 
 ## Features
 
-### Extract
-- **Text** - 100% accurate with Unicode, reading order, layout analysis
-- **Images** - JPEG, PNG, TIFF with CCITT bilevel support
-- **Forms** - Complete form field structure and values
-- **Annotations** - Comments, highlights, stamps, all types
-- **Structure** - Bookmarks, outlines, document hierarchy
-- **Conversion** - Markdown, HTML, PlainText output
-
-### Create
-- **Documents** - Fluent API for programmatic generation
-- **Text** - Unicode with Base14 fonts, styling
-- **Tables** - Headers, borders, cell spans, styling
-- **Images** - JPEG/PNG embedding with positioning
-- **Graphics** - Colors, gradients, patterns, blend modes
-- **Templates** - Headers, footers, page numbers, watermarks
-
-### Edit
-- **Annotations** - Highlights, notes, stamps, ink, shapes
-- **Forms** - Text fields, checkboxes, radios, dropdowns
-- **Links** - Internal navigation, external URLs
-- **Bookmarks** - Create and modify TOC
-- **Round-trip** - Preserve existing content while adding new
-
-## Detailed Examples
-
-### Rust - Extraction
-
-```rust
-use pdf_oxide::PdfDocument;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open a PDF
-    let mut doc = PdfDocument::open("paper.pdf")?;
-
-    // Get page count
-    println!("Pages: {}", doc.page_count());
-
-    // Extract text from first page
-    let text = doc.extract_text(0)?;
-    println!("{}", text);
-
-    // Convert to Markdown (uses intelligent processing automatically)
-    let markdown = doc.to_markdown(0, Default::default())?;
-
-    // Extract images
-    let images = doc.extract_images(0)?;
-    println!("Found {} images", images.len());
-
-    // Get bookmarks/outline
-    if let Some(outline) = doc.get_outline()? {
-        for item in outline {
-            println!("Bookmark: {}", item.title);
-        }
-    }
-
-    // Get annotations
-    let annotations = doc.get_annotations(0)?;
-    for annot in annotations {
-        if let Some(contents) = annot.contents {
-            println!("Annotation: {}", contents);
-        }
-    }
-
-    Ok(())
-}
-```
-
-### Rust - Advanced Usage (v0.2.0 Pipeline API)
-
-```rust
-use pdf_oxide::PdfDocument;
-use pdf_oxide::pipeline::{TextPipeline, TextPipelineConfig, ReadingOrderContext};
-use pdf_oxide::pipeline::converters::{MarkdownOutputConverter, OutputConverter};
-use pdf_oxide::converters::ConversionOptions;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = PdfDocument::open("paper.pdf")?;
-
-    // Extract spans (raw text with positions)
-    let spans = doc.extract_spans(0)?;
-
-    // Step 1: Apply intelligent text processing (auto-detects OCR vs native PDF)
-    let spans = doc.apply_intelligent_text_processing(spans)?;
-
-    // Step 2: Create pipeline with reading order strategy
-    let config = TextPipelineConfig::from_conversion_options(&ConversionOptions::default());
-    let pipeline = TextPipeline::with_config(config.clone());
-
-    // Step 3: Create reading order context
-    let context = ReadingOrderContext::new().with_page(0);
-
-    // Step 4: Process through pipeline (applies reading order + intelligent processing)
-    let ordered_spans = pipeline.process(spans, context)?;
-
-    // Step 5: Convert to Markdown or other format
-    let converter = MarkdownOutputConverter::new();
-    let markdown = converter.convert(&ordered_spans, &config)?;
-
-    println!("{}", markdown);
-
-    Ok(())
-}
-```
-
-#### Key v0.2.0 Improvements
-- **Automatic OCR Detection**: Detects scanned PDFs per text block
-- **Reading Order**: Proper document reading order via structure tree (PDF spec Section 14.7)
-- **Intelligent Processing**: Three-stage pipeline (punctuation, ligatures, hyphenation)
-- **Per-Block Analysis**: No global configuration needed, adapts per text span
-- **PDF Spec Aligned**: Follows ISO 32000-1:2008 (PDF 1.7)
-
-### Rust - HTML Conversion Example
-
-```rust
-use pdf_oxide::PdfDocument;
-use pdf_oxide::pipeline::converters::HtmlOutputConverter;
-use pdf_oxide::pipeline::{TextPipeline, TextPipelineConfig};
-use pdf_oxide::converters::ConversionOptions;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = PdfDocument::open("document.pdf")?;
-    let spans = doc.extract_spans(0)?;
-
-    // Create pipeline
-    let config = TextPipelineConfig::from_conversion_options(&ConversionOptions::default());
-    let pipeline = TextPipeline::with_config(config.clone());
-
-    // Process through pipeline
-    let ordered_spans = pipeline.process(spans, Default::default())?;
-
-    // Convert to HTML instead of Markdown
-    let converter = HtmlOutputConverter::new();
-    let html = converter.convert(&ordered_spans, &config)?;
-
-    println!("{}", html);
-    Ok(())
-}
-```
-
-### Rust - Markdown with Configuration
-
-```rust
-use pdf_oxide::PdfDocument;
-use pdf_oxide::converters::ConversionOptions;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = PdfDocument::open("paper.pdf")?;
-
-    // Create custom conversion options
-    let options = ConversionOptions {
-        detect_headings: true,      // Auto-detect heading levels by font size
-        include_images: true,        // Extract and reference images
-        preserve_layout: false,      // Use semantic structure instead of visual layout
-        image_output_dir: Some("./extracted_images".to_string()),
-    };
-
-    // Convert to Markdown with options
-    let markdown = doc.to_markdown(0, options)?;
-    println!("{}", markdown);
-
-    // Convert entire document
-    let full_markdown = doc.to_markdown_all(options)?;
-    std::fs::write("output.md", &full_markdown)?;
-
-    Ok(())
-}
-```
-
-### Rust - Intelligent OCR Detection (Mixed Documents)
-
-```rust
-use pdf_oxide::PdfDocument;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = PdfDocument::open("mixed_content.pdf")?;
-    let spans = doc.extract_spans(0)?;
-
-    // Apply intelligent text processing
-    // Automatically detects OCR blocks and applies appropriate cleaning:
-    // - Punctuation reconstruction for OCR text
-    // - Ligature handling (fi, fl, etc.)
-    // - Hyphenation cleanup
-    let processed = doc.apply_intelligent_text_processing(spans)?;
-
-    for span in &processed {
-        println!("Text: '{}' (cleaned: {})",
-                 &span.text,
-                 span.text.len()); // OCR artifacts automatically removed
-    }
-
-    Ok(())
-}
-```
-
-### Rust - Form Field Extraction
-
-```rust
-use pdf_oxide::PdfDocument;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut doc = PdfDocument::open("form.pdf")?;
-
-    // Extract form fields from page
-    let fields = doc.extract_form_fields(0)?;
-
-    for field in fields {
-        println!("Field: {}", field.name);
-        println!("  Type: {:?}", field.field_type);  // Text, Checkbox, Radio, Dropdown, etc.
-        println!("  Value: {:?}", field.value);
-        println!("  Required: {}", field.required);
-        println!("  Options: {:?}", field.options);  // For dropdown/radio fields
-        println!();
-    }
-
-    Ok(())
-}
-```
-
-### Python - HTML Conversion
-
-```python
-from pdf_oxide import PdfDocument
-
-# Open PDF and extract spans
-doc = PdfDocument("document.pdf")
-spans = doc.extract_spans(0)
-
-# Apply intelligent text processing
-processed_spans = doc.apply_intelligent_text_processing(spans)
-
-# Convert to HTML (semantic mode - best for readability)
-html = doc.to_html(
-    0,
-    preserve_layout=False,
-    detect_headings=True,
-    include_images=True,
-    image_output_dir="./images"
-)
-
-print(html)
-
-# Or use layout mode (preserves visual positioning)
-html_layout = doc.to_html(0, preserve_layout=True)
-```
-
-### Python - Markdown with Configuration
-
-```python
-from pdf_oxide import PdfDocument
-
-# Open a PDF
-doc = PdfDocument("paper.pdf")
-
-# Convert to Markdown with options
-markdown = doc.to_markdown(
-    0,
-    detect_headings=True,      # Auto-detect heading levels
-    include_images=True,        # Extract and reference images
-    image_output_dir="./extracted_images"
-)
-
-print(markdown)
-
-# Convert entire document to single Markdown file
-full_markdown = doc.to_markdown_all(
-    detect_headings=True,
-    include_images=True,
-    image_output_dir="./doc_images"
-)
-
-# Save to file
-with open("output.md", "w") as f:
-    f.write(full_markdown)
-```
-
-### Python - Intelligent OCR Detection
-
-```python
-from pdf_oxide import PdfDocument
-
-# Open PDF with mixed native and scanned content
-doc = PdfDocument("mixed_content.pdf")
-
-# Extract spans (text with positions)
-spans = doc.extract_spans(0)
-
-# Apply intelligent text processing
-# Automatically detects and cleans OCR blocks:
-# - Punctuation reconstruction
-# - Ligature handling (fi, fl, etc.)
-# - Hyphenation cleanup
-processed = doc.apply_intelligent_text_processing(spans)
-
-# Use processed spans for higher quality conversion
-markdown = doc.to_markdown(0, detect_headings=True)
-html = doc.to_html(0, preserve_layout=False, detect_headings=True)
-```
-
-### Python - Form Field Extraction
-
-```python
-from pdf_oxide import PdfDocument
-
-# Open PDF with form fields
-doc = PdfDocument("form.pdf")
-
-# Extract form fields
-fields = doc.extract_form_fields(0)
-
-# Access field information
-for field in fields:
-    print(f"Field Name: {field.name}")
-    print(f"Type: {field.field_type}")        # Text, Checkbox, Radio, Dropdown, etc.
-    print(f"Value: {field.value}")
-    print(f"Required: {field.required}")
-    if field.options:                         # For dropdown/radio buttons
-        print(f"Options: {field.options}")
-    print()
-
-# Extract all form data from page
-form_data = {field.name: field.value for field in fields}
-print(f"Form Data: {form_data}")
-```
-
-## PDF Creation Examples (v0.3.0)
-
-v0.3.0 introduces **PDF generation from code**:
-
-### Rust - Create PDF
-
-```rust
-use pdf_oxide::writer::DocumentBuilder;
-
-// Create a new PDF
-let mut builder = DocumentBuilder::new();
-builder.add_page(612.0, 792.0)  // Letter size
-    .text("Hello, World!", 72.0, 720.0, 24.0)
-    .text("Created with pdf_oxide", 72.0, 680.0, 12.0);
-
-// Save to file
-builder.save("output.pdf")?;
-```
-
-### Rust - Add Annotations
-
-```rust
-use pdf_oxide::writer::{DocumentBuilder, AnnotationBuilder};
-
-let mut builder = DocumentBuilder::new();
-let page = builder.add_page(612.0, 792.0);
-
-// Add text content
-page.text("Important document", 72.0, 720.0, 18.0);
-
-// Add highlight annotation
-page.highlight(72.0, 710.0, 200.0, 730.0, [1.0, 1.0, 0.0]);  // Yellow
-
-// Add sticky note
-page.sticky_note(300.0, 720.0, "Review this section");
-
-builder.save("annotated.pdf")?;
-```
-
-### Python - Create PDF
-
-```python
-from pdf_oxide import Pdf
-
-# Create new PDF
-pdf = Pdf.create()
-pdf.add_page().text("Hello from Python!", x=72, y=720, size=24)
-pdf.save("output.pdf")
-```
-
-**pdf_oxide** is now a **bidirectional PDF toolkit** - extract from PDFs AND create them!
+| Extract | Create | Edit |
+|---------|--------|------|
+| Text & Layout | Documents | Annotations |
+| Images | Tables | Form Fields |
+| Forms | Graphics | Bookmarks |
+| Annotations | Templates | Links |
+| Bookmarks | Images | Content |
+
+**v0.3.0 Highlights:** PDF/A conversion, PDF/X & PDF/UA validation, encryption, digital signatures, barcode generation, Office document conversion. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Installation
 
-### Rust Library
-
-Add to your `Cargo.toml`:
-
+### Rust
 ```toml
 [dependencies]
-pdf_oxide = "0.2"
+pdf_oxide = "0.3"
 ```
 
-### Python Package
-
+### Python
 ```bash
 pip install pdf_oxide
 ```
 
-#### Python API Reference
+## Examples
 
-**PdfDocument** - Main class for PDF operations
+### Rust - Extraction
+```rust
+use pdf_oxide::PdfDocument;
 
-Constructor:
-- `PdfDocument(path: str)` - Open a PDF file
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut doc = PdfDocument::open("paper.pdf")?;
 
-Methods:
-- `version() -> Tuple[int, int]` - Get PDF version (major, minor)
-- `page_count() -> int` - Get number of pages
-- `extract_text(page: int) -> str` - Extract text from a page
-- `to_markdown(page, preserve_layout=False, detect_headings=True, include_images=True, image_output_dir=None) -> str`
-- `to_html(page, preserve_layout=False, detect_headings=True, include_images=True, image_output_dir=None) -> str`
-- `to_markdown_all(...) -> str` - Convert all pages to Markdown
-- `to_html_all(...) -> str` - Convert all pages to HTML
+    // Extract text
+    let text = doc.extract_text(0)?;
 
-See `python/pdf_oxide/__init__.pyi` for full type hints and documentation.
+    // Convert to Markdown
+    let markdown = doc.to_markdown(0, Default::default())?;
 
-#### Python Examples
+    // Extract images
+    let images = doc.extract_images(0)?;
 
-See `examples/python_example.py` for a complete working example demonstrating all features.
+    // Get annotations
+    let annotations = doc.get_annotations(0)?;
 
-## Project Structure
-
-```
-pdf_oxide/
-├── src/                    # Rust source code
-│   ├── lib.rs              # Main library entry point
-│   ├── error.rs            # Error types
-│   ├── object.rs           # PDF object types
-│   ├── lexer.rs            # PDF lexer
-│   ├── parser.rs           # PDF parser
-│   ├── document.rs         # Document API
-│   ├── decoders.rs         # Stream decoders
-│   ├── geometry.rs         # Geometric primitives
-│   ├── layout.rs           # Layout analysis
-│   ├── content.rs          # Content stream parsing
-│   ├── fonts.rs            # Font handling
-│   ├── text.rs             # Text extraction
-│   ├── images.rs           # Image extraction
-│   ├── converters.rs       # Format converters
-│   ├── config.rs           # Configuration
-│   └── ml/                 # ML integration (optional)
-│
-├── python/                 # Python bindings
-│   ├── src/lib.rs          # PyO3 bindings
-│   └── pdf_oxide.pyi     # Type stubs
-│
-├── tests/                  # Integration tests
-│   ├── fixtures/           # Test PDFs
-│   └── *.rs                # Test files
-│
-├── benches/                # Benchmarks
-│   └── *.rs                # Criterion benchmarks
-│
-├── examples/               # Usage examples
-│   ├── rust/               # Rust examples
-│   └── python/             # Python examples
-│
-├── docs/                   # Documentation
-│   └── spec/               # PDF specification reference
-│       └── pdf.md          # ISO 32000-1:2008 excerpts
-│
-├── training/               # ML training scripts (optional)
-│   ├── dataset/            # Dataset tools
-│   ├── finetune_*.py       # Fine-tuning scripts
-│   └── evaluate.py         # Evaluation
-│
-├── models/                 # ONNX models (optional)
-│   ├── registry.json       # Model metadata
-│   └── *.onnx              # Model files
-│
-├── Cargo.toml              # Rust dependencies
-├── LICENSE-MIT             # MIT license
-├── LICENSE-APACHE          # Apache-2.0 license
-└── README.md               # This file
+    Ok(())
+}
 ```
 
-## Development Roadmap
+### Python
+```python
+from pdf_oxide import PdfDocument
 
-### ✅ Completed (v0.1.0) - Core Extraction
-- **Core PDF Parsing** - Complete PDF 1.0-1.7 support with robust error handling
-- **Text Extraction** - 100% accurate extraction with perfect word spacing
-- **Layout Analysis** - DBSCAN clustering and XY-Cut algorithms
-- **Image Extraction** - Extract embedded images with metadata
-- **Python Bindings** - Full PyO3 integration
-
-### ✅ Completed (v0.2.0) - Spec Alignment
-- **Intelligent Text Processing** - Auto-detection of OCR vs native PDFs
-- **Reading Order Strategies** - XY-Cut, structure tree, column-aware
-- **PDF Spec Compliance** - ISO 32000-1:2008 Sections 9, 14.7-14.8
-- **Image Embedding** - Base64 data URIs in HTML/Markdown output
-- **CJK Support** - Predefined CMaps for Chinese, Japanese, Korean
-
-### ✅ Completed (v0.3.0) - PDF Creation & Editing ✨ NEW
-- **PDF Creation API** - Fluent `DocumentBuilder` for programmatic generation
-- **Editor API** - DOM-like editing with round-trip preservation
-- **Annotations** - Full read/write (highlights, notes, stamps, ink, shapes)
-- **Form Fields** - Create text fields, checkboxes, radio buttons, dropdowns
-- **Table Rendering** - Styled tables with headers, borders, cell spans
-- **Advanced Graphics** - Gradients, patterns, blend modes, transparency
-- **Page Templates** - Headers, footers, watermarks, page numbering
-
-### 🔮 Planned (v0.4.0+) - Language Bindings & Advanced Features
-
-**Language Bindings**
-- 🟢 **Python** - Available now (PyO3)
-- 🔜 **Node.js** - JavaScript/TypeScript via napi-rs
-- 🔜 **WASM** - Browser and edge runtime support
-- 🔜 **Go** - CGO bindings
-- 🔜 **C/C++** - FFI layer for native integration
-- 🔜 **Ruby, Java, .NET** - Community contributions welcome
-
-**Advanced Features**
-- **Font Embedding** - TrueType/OpenType subsetting
-- **Tagged PDF Creation** - Accessible PDFs (WCAG/Section 508)
-- **Table Extraction** - Structure-aware parsing
-- **Encryption** - Password protection, digital signatures
-
-**Versioning:** pdf_oxide follows **forever 0.x versioning**. Each version represents progress toward comprehensive PDF mastery.
-
-**Current Status:** ✅ v0.3.0 - Full PDF toolkit (extraction + creation + editing) | 🐍 Python bindings available
-
-## Versioning Philosophy: Forever 0.x
-
-pdf_oxide follows **continuous evolution versioning**:
-
-- **Versions:** 0.1 → 0.2 → 0.3 → ... → 0.10 → ... → 0.100 → ... (never 1.0)
-- **Rationale:** Software is never "finished." Like TeX approaching π asymptotically (3.1, 3.14, 3.141...), we approach perfect PDF handling without claiming to be done.
-- **Why not 1.0?** Version 1.0 implies "feature complete" or "API frozen," but PDFs evolve and so should we.
-- **Production-Ready from 0.1.0+** - The 0.x doesn't mean unstable; it means "continuously improving"
-
-### Breaking Changes Policy
-
-- **Major features** (v0.x.0): Possible breaking changes with deprecation warnings
-- **Minor features** (v0.x.y): Backward compatible improvements
-- **Patches** (v0.x.y.z): Bug fixes and security updates
-
-### Deprecation Examples
-
-- **v0.2.0:** `MarkdownConverter` marked deprecated
-- **v0.3.0-v0.4.0:** Still works but flagged with migration warnings
-- **v0.5.0+:** Removed (3+ versions later)
-
-This gives users time to migrate while maintaining a clean codebase.
-
-## Building from Source
-
-### Prerequisites
-
-- Rust 1.70+ ([Install Rust](https://rustup.rs/))
-- Python 3.8+ (for Python bindings)
-- C compiler (gcc/clang)
-
-### Build Core Library
-
-```bash
-# Clone repository
-git clone https://github.com/yfedoseev/pdf_oxide
-cd pdf_oxide
-
-# Build
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run benchmarks
-cargo bench
+doc = PdfDocument("paper.pdf")
+text = doc.extract_text(0)
+markdown = doc.to_markdown(0, detect_headings=True)
 ```
 
-### Build Python Package
-
-```bash
-# Development install
-maturin develop
-
-# Release build
-maturin build --release
-
-# Install wheel
-pip install target/wheels/*.whl
-```
+For more examples, see the [examples/](examples/) directory.
 
 ## Performance
 
-Real-world benchmark results (103 diverse PDFs including forms, financial documents, and technical papers):
-
-### Benchmark Results
-
 | Metric | Result |
 |--------|--------|
-| **Total Time (103 PDFs)** | **5.43s** |
 | **Average Per PDF** | **53ms** |
-| **Success Rate** | 100% (103/103) |
-| **Bold Sections Detected** | 16,074 |
+| **Success Rate** | 100% |
+| **Quality Score** | 8.5+/10 |
 
-### Scaling Projections
+Benchmarked on 103 diverse PDFs including forms, financial documents, and technical papers.
 
-- **100 PDFs:** ~5.3 seconds
-- **1,000 PDFs:** ~53 seconds
-- **10,000 PDFs:** ~8.8 minutes
-- **100,000 PDFs:** ~1.5 hours
-
-**Perfect for:**
-- High-throughput batch processing
-- Real-time web services (53ms average latency)
-- Cost-effective cloud deployments
-- Resource-constrained environments
-
-See [COMPARISON.md](COMPARISON.md) for detailed analysis.
-
-## Quality Metrics & Improvements
-
-Based on comprehensive analysis of diverse PDFs and recent validation testing (49ms median performance, 100% success rate), with improvements to achieve production-grade accuracy:
-
-### Overall Quality
-
-| Metric | Result | Details |
-|--------|--------|---------|
-| **Quality Score** | **8.5+/10** | Up from 3.4/10 (150% improvement) |
-| **Text Extraction** | **100%** | Perfect character extraction with proper encoding |
-| **Word Spacing** | **100%** | Unified adaptive threshold algorithm |
-| **Bold Detection** | **16,074** | Bold sections detected in test suite |
-| **Form Field Extraction** | 13 files | Complete form structure extraction |
-| **Quality Rating** | **67% GOOD+** | 67% of files rated GOOD or EXCELLENT |
-| **Success Rate** | 100% | All 103 PDFs processed successfully |
-
-### Specific Quality Improvements (v0.1.2+)
-
-**Fixed Issues** from previous versions:
-
-| Issue | Before | After | Improvement |
-|-------|--------|-------|-------------|
-| **Spurious Spaces** | 1,623 in arxiv PDF | <50 | 96.9% reduction |
-| **Word Fusions** | 3 instances | 0 | 100% elimination |
-| **Empty Bold Markers** | 3 instances | 0 | 100% elimination |
-
-**Root Causes Addressed**:
-1. **Unified Space Decision**: Single source of truth eliminates double space insertion
-2. **Split Boundary Preservation**: CamelCase words stay split during merging
-3. **Bold Pre-Validation**: Whitespace blocks filtered before bold grouping
-4. **Adaptive Thresholds**: Document profile detection tunes thresholds automatically
-
-See [docs/QUALITY_FIX_IMPLEMENTATION.md](docs/QUALITY_FIX_IMPLEMENTATION.md) for comprehensive documentation.
-
-### Comprehensive Extraction Approach
-
-- **Adaptive Quality**: Automatically adjusts extraction strategy based on document type (academic papers, policy documents, mixed layouts)
-- **Captures all text**: Including technical diagrams and annotations
-- **Preserves structure**: Form fields, bookmarks, and annotations intact
-- **Extracts metadata**: PDF metadata, outline, and annotations
-- **Perfect for**: Archival, search indexing, complete content analysis, LLM consumption
-
-## Text Extraction Quality Troubleshooting
-
-### Common Issues and Solutions
-
-**Problem: Double spaces in extracted text (e.g., "Over  the  past")**
-- **Cause**: Adaptive threshold too low for document's gap distribution
-- **Solution**: Increase adaptive threshold multiplier or use legacy fixed thresholds
-- **See**: [docs/QUALITY_FIX_IMPLEMENTATION.md#troubleshooting-guide](docs/QUALITY_FIX_IMPLEMENTATION.md#part-5-troubleshooting-guide)
-
-**Problem: CamelCase words fused (e.g., "theGeneralwas")**
-- **Cause**: CamelCase detection or split preservation disabled
-- **Solution**: Enable CamelCase detection in config or use default settings
-- **See**: [docs/QUALITY_FIX_IMPLEMENTATION.md#camelcase-words-arent-being-split](docs/QUALITY_FIX_IMPLEMENTATION.md#part-5-troubleshooting-guide)
-
-**Problem: Empty bold markers in output (e.g., `** **`)**
-- **Cause**: Whitespace blocks inheriting bold styling
-- **Solution**: Pre-validation filtering is enabled by default; file an issue if still occurs
-- **See**: [docs/QUALITY_FIX_IMPLEMENTATION.md#bold-formatting-is-missing](docs/QUALITY_FIX_IMPLEMENTATION.md#part-5-troubleshooting-guide)
-
-For detailed troubleshooting and configuration options, see the comprehensive guide: **[docs/QUALITY_FIX_IMPLEMENTATION.md](docs/QUALITY_FIX_IMPLEMENTATION.md)**
-
-## Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run with features
-cargo test --features ml
-
-# Run integration tests
-cargo test --test '*'
-
-# Run quality-specific tests
-cargo test quality
-
-# Run benchmarks
-cargo bench
-
-# Run performance benchmarks
-cargo bench --bench pdf_extraction_performance
-
-# Generate coverage report
-cargo install cargo-tarpaulin
-cargo tarpaulin --out Html
-```
-
-## Documentation
-
-### Specification References
-- **docs/spec/pdf.md** - ISO 32000-1:2008 sections 9, 14.7-14.8 (PDF specification excerpts)
-
-### API Documentation
-
-```bash
-# Generate and open docs
-cargo doc --open
-
-# With all features
-cargo doc --all-features --open
-```
-
-## License
-
-Licensed under either of:
-
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-### What this means:
-
-✅ **You CAN**:
-- Use this library freely for **any purpose** (personal, commercial, SaaS, web services)
-- Modify and distribute the code
-- Use it in proprietary applications **without open-sourcing your code**
-- Sublicense and redistribute under different terms
-
-⚠️ **You MUST**:
-- Include the copyright notice and license text in your distributions
-- If using Apache-2.0 and modifying the library, note that you've made changes
-
-✅ **You DON'T need to**:
-- Open-source your application code
-- Share your modifications (but we'd appreciate contributions!)
-- Pay any fees or royalties
-
-### Why MIT OR Apache-2.0?
-
-We chose dual MIT/Apache-2.0 licensing (standard in the Rust ecosystem) to:
-- **Maximize adoption** - No restrictions on commercial or proprietary use
-- **Patent protection** - Apache-2.0 provides explicit patent grants
-- **Flexibility** - Users can choose the license that best fits their needs
-
-Apache-2.0 offers stronger patent protection, while MIT is simpler and more permissive.
-Choose whichever works best for your project.
-
-See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE) for full terms.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
-
-## Contributing
-
-We welcome contributions! To get started:
-
-### Getting Started
-
-1. Familiarize yourself with the codebase: `src/` for Rust, `python/` for Python bindings
-2. Check open issues for areas needing help
-3. Create an issue to discuss your approach
-4. Submit a pull request with tests
-
-### Development Setup
+## Building from Source
 
 ```bash
 # Clone and build
 git clone https://github.com/yfedoseev/pdf_oxide
 cd pdf_oxide
+cargo build --release
+
+# Run tests
+cargo test
+
+# Build Python bindings
+maturin develop
+```
+
+## Documentation
+
+- **API Docs**: [docs.rs/pdf_oxide](https://docs.rs/pdf_oxide)
+- **PDF Spec Reference**: [docs/spec/pdf.md](docs/spec/pdf.md)
+
+```bash
+# Generate local docs
+cargo doc --open
+```
+
+## Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+```bash
+# Development setup
 cargo build
-
-# Install development tools
-cargo install cargo-watch cargo-tarpaulin
-
-# Run tests on file changes
-cargo watch -x test
-
-# Format code
+cargo test
 cargo fmt
-
-# Run linter
 cargo clippy -- -D warnings
 ```
 
-## Support
+## License
 
-- **Documentation**: `docs/planning/`
-- **Issues**: [GitHub Issues](https://github.com/yfedoseev/pdf_oxide/issues)
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
 
 ## Citation
-
-If you use this library in academic research, please cite:
 
 ```bibtex
 @software{pdf_oxide,
@@ -879,6 +181,4 @@ If you use this library in academic research, please cite:
 
 ---
 
-**Built with** 🦀 Rust + 🐍 Python
-
-**Status**: ✅ Production Ready | **v0.3.0** | 🚀 53ms per PDF | 📄 Extract + Create + Edit | 💬 Full Annotations | 📋 Interactive Forms | ♾️ Forever 0.x
+**Built with** 🦀 Rust + 🐍 Python | **Status**: ✅ Production Ready | **v0.3.0** | 🚀 53ms per PDF
