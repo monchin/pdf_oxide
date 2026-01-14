@@ -57,7 +57,7 @@ md-5 = "0.10"        # MD5 for key derivation
 sha2 = "0.10"        # SHA-256 for newer encryption
 
 # Digital signatures (optional)
-x509-parser = { version = "0.16", optional = true }  # X.509 certificate parsing
+x509-parser = { version = "0.18", optional = true }  # X.509 certificate parsing
 cms = { version = "0.2", optional = true }            # CMS/PKCS#7 signatures
 rsa = { version = "0.9", optional = true }            # RSA signing
 der = { version = "0.7", optional = true }            # DER encoding
