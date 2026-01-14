@@ -1,6 +1,6 @@
 //! Integration tests for path (vector graphics) extraction.
 //!
-//! v0.3.2, Feature 1: Path Objects Extraction
+//! v0.3.1: Path Objects Extraction
 
 use pdf_oxide::document::PdfDocument;
 use pdf_oxide::elements::{LineCap, LineJoin, PathContent, PathOperation};

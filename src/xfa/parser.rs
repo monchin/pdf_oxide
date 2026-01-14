@@ -23,6 +23,11 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::HashMap;
 
+/// US Letter page width in points (8.5 inches × 72 points/inch).
+const LETTER_WIDTH: f32 = 612.0;
+/// US Letter page height in points (11 inches × 72 points/inch).
+const LETTER_HEIGHT: f32 = 792.0;
+
 /// XFA field type extracted from template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XfaFieldType {
@@ -155,8 +160,8 @@ impl Default for XfaPage {
         Self {
             name: String::new(),
             fields: Vec::new(),
-            width: 612.0,  // Letter width
-            height: 792.0, // Letter height
+            width: LETTER_WIDTH,
+            height: LETTER_HEIGHT,
         }
     }
 }

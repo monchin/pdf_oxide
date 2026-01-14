@@ -1,4 +1,4 @@
-//! Tests for TextChar transformation properties (v0.3.1, Issue #27).
+//! Tests for TextChar transformation properties (v0.3.1, Issue #18).
 //!
 //! These tests verify the extraction and usage of:
 //! - origin_x, origin_y (baseline position)

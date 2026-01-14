@@ -874,13 +874,11 @@ impl ThreeDAnnotation {
         // D - deactivation mode
         activation.insert("D".to_string(), Object::Name(self.deactivation.pdf_name().to_string()));
 
-        // AIS - activation state
+        // AIS - activation state (I = Interactive, L = Live)
         if self.interactive {
             activation.insert("AIS".to_string(), Object::Name("I".to_string()));
-        // Interactive
         } else {
             activation.insert("AIS".to_string(), Object::Name("L".to_string()));
-            // Live
         }
 
         // DIS - deactivation state
