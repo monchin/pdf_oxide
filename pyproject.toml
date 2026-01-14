@@ -38,10 +38,13 @@ Repository = "https://github.com/yfedoseev/pdf_oxide"
 "Bug Tracker" = "https://github.com/yfedoseev/pdf_oxide/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
 
 [tool.maturin]
-features = ["python", "pyo3/extension-module"]
+features = ["python"]
 python-source = "python"
 module-name = "pdf_oxide.pdf_oxide"
 
@@ -79,7 +82,6 @@ select = [
     "C4",     # flake8-comprehensions
     "SIM",    # flake8-simplify
     "TCH",    # flake8-type-checking
-    "RUF",    # Ruff-specific rules
 ]
 
 # Disable specific rules if needed
@@ -107,3 +109,7 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "lf"
+
+[tool.pdm.scripts]
+fmt = {composite = ["cargo fmt", "ruff check . --select I --fix", "ruff format ."]}
+lint = {composite = ["cargo check", "cargo clippy", "ruff check . --fix"]}

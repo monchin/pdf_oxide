@@ -43,26 +43,29 @@ pip install pdf_oxide
 ```
 
 ## Development
-
-### Building
-
 ```bash
-maturin develop
+# Install uv
+# refer to https://docs.astral.sh/uv/getting-started/installation/#standalone-installer
+
+# Install necessary tools for python dev
+uv tool install maturin
+uv tool install pdm
+uv tool install ruff
+uv tool install ty
+
+# Install python dependencies
+pdm sync
+
+# Build python bindings
+maturin develop --uv
+
+# format code
+pdm fmt
+
+# lint code
+pdm lint
 ```
 
-### Testing
-
-```bash
-pytest
-```
-
-### Type Checking
-
-The package includes type stubs (`__init__.pyi`) for full IDE support:
-
-```bash
-mypy script.py
-```
 
 ## API Documentation
 

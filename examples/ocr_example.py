@@ -24,15 +24,13 @@ Example:
         --dict models/en_dict.txt
 """
 
-import sys
 import argparse
+import sys
 from pathlib import Path
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Extract text from scanned PDFs using OCR"
-    )
+    parser = argparse.ArgumentParser(description="Extract text from scanned PDFs using OCR")
     parser.add_argument("pdf", help="Path to PDF file")
     parser.add_argument("--det", required=True, help="Path to detection model (ONNX)")
     parser.add_argument("--rec", required=True, help="Path to recognition model (ONNX)")
@@ -56,15 +54,17 @@ def main():
         sys.exit(1)
 
     # Import OCR classes (only available when OCR feature is enabled)
-    from pdf_oxide import OcrEngine, OcrConfig
+    from pdf_oxide import OcrConfig, OcrEngine
 
     # Validate paths
     if not Path(args.pdf).exists():
         print(f"Error: PDF file not found: {args.pdf}")
         sys.exit(1)
-    for path, name in [(args.det, "detection model"),
-                       (args.rec, "recognition model"),
-                       (args.dict, "dictionary")]:
+    for path, name in [
+        (args.det, "detection model"),
+        (args.rec, "recognition model"),
+        (args.dict, "dictionary"),
+    ]:
         if not Path(path).exists():
             print(f"Error: {name} not found: {path}")
             sys.exit(1)
@@ -76,22 +76,14 @@ def main():
 
     # Create OCR configuration
     print("Configuring OCR engine...")
-    config = OcrConfig(
-        det_threshold=0.3,
-        box_threshold=0.5,
-        rec_threshold=0.5,
-        num_threads=4
-    )
+    config = OcrConfig(det_threshold=0.3, box_threshold=0.5, rec_threshold=0.5, num_threads=4)
     print(f"Config: {config}")
 
     # Load OCR engine
     print("\nLoading OCR models...")
     try:
         engine = OcrEngine(
-            det_model_path=args.det,
-            rec_model_path=args.rec,
-            dict_path=args.dict,
-            config=config
+            det_model_path=args.det, rec_model_path=args.rec, dict_path=args.dict, config=config
         )
         print("OCR engine loaded successfully!")
     except Exception as e:
@@ -111,7 +103,7 @@ def main():
     # Determine pages to process
     if args.page is not None:
         if args.page < 0 or args.page >= page_count:
-            print(f"Error: Page {args.page} out of range (0-{page_count-1})")
+            print(f"Error: Page {args.page} out of range (0-{page_count - 1})")
             sys.exit(1)
         pages = [args.page]
     else:
@@ -135,11 +127,7 @@ def main():
             print("Page appears to be scanned, running OCR...")
             try:
                 # Use OCR extraction
-                text = doc.extract_text_with_ocr(
-                    page=page_idx,
-                    engine=engine,
-                    dpi=args.dpi
-                )
+                text = doc.extract_text_with_ocr(page=page_idx, engine=engine, dpi=args.dpi)
                 if text.strip():
                     print("\nExtracted text:")
                     print(text)
@@ -180,10 +168,10 @@ def demo_ocr_image(engine, image_path: str):
         print(f"\nFull text:\n{result['text']}")
 
         # Show individual spans
-        if result['spans']:
+        if result["spans"]:
             print("\nIndividual spans:")
-            for i, span in enumerate(result['spans']):
-                print(f"  {i+1}. [{span['confidence']:.2%}] {span['text']}")
+            for i, span in enumerate(result["spans"]):
+                print(f"  {i + 1}. [{span['confidence']:.2%}] {span['text']}")
 
     except Exception as e:
         print(f"OCR failed: {e}")

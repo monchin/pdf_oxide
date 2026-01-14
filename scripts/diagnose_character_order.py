@@ -12,6 +12,7 @@ This helps diagnose column mixing issues.
 
 import pdf_oxide
 
+
 def diagnose_character_order(pdf_path, page_num=0, max_chars=100):
     """
     Extract characters and analyze their order.
@@ -21,7 +22,7 @@ def diagnose_character_order(pdf_path, page_num=0, max_chars=100):
         page_num: Page number to analyze (0-indexed)
         max_chars: Maximum characters to display
     """
-    print(f"=== Diagnosing Character Order ===")
+    print("=== Diagnosing Character Order ===")
     print(f"PDF: {pdf_path}")
     print(f"Page: {page_num}")
     print()
@@ -34,50 +35,47 @@ def diagnose_character_order(pdf_path, page_num=0, max_chars=100):
     print()
 
     # Show first N characters in EXTRACTION ORDER
-    print("="*80)
+    print("=" * 80)
     print("EXTRACTION ORDER (as they appear in PDF content stream):")
-    print("="*80)
+    print("=" * 80)
     for i, char in enumerate(chars[:max_chars]):
         # Get character properties
-        c = char['char']
-        x = char['bbox']['x']
-        y = char['bbox']['y']
-        font_size = char['font_size']
+        c = char["char"]
+        x = char["bbox"]["x"]
+        y = char["bbox"]["y"]
+        font_size = char["font_size"]
 
         # Display character with position
-        display_char = c if c.isprintable() and c != ' ' else f"[{repr(c)}]"
+        display_char = c if c.isprintable() and c != " " else f"[{c!r}]"
         print(f"{i:3d}: '{display_char}' at X={x:6.1f} Y={y:6.1f} size={font_size:.1f}")
 
     print()
 
     # Sort by spatial position (Y descending, then X ascending)
     # In PDF coordinates, larger Y = higher on page
-    sorted_chars = sorted(
-        chars[:max_chars],
-        key=lambda ch: (-ch['bbox']['y'], ch['bbox']['x'])
-    )
+    sorted_chars = sorted(chars[:max_chars], key=lambda ch: (-ch["bbox"]["y"], ch["bbox"]["x"]))
 
-    print("="*80)
+    print("=" * 80)
     print("SPATIAL ORDER (top-to-bottom, left-to-right):")
-    print("="*80)
+    print("=" * 80)
     for i, char in enumerate(sorted_chars):
-        c = char['char']
-        x = char['bbox']['x']
-        y = char['bbox']['y']
-        font_size = char['font_size']
+        c = char["char"]
+        x = char["bbox"]["x"]
+        y = char["bbox"]["y"]
+        font_size = char["font_size"]
 
-        display_char = c if c.isprintable() and c != ' ' else f"[{repr(c)}]"
+        display_char = c if c.isprintable() and c != " " else f"[{c!r}]"
         print(f"{i:3d}: '{display_char}' at X={x:6.1f} Y={y:6.1f} size={font_size:.1f}")
 
     print()
 
     # Reconstruct text in both orders
-    extraction_order_text = ''.join(ch['char'] for ch in chars[:max_chars])
-    spatial_order_text = ''.join(ch['char'] for ch in sorted_chars)
+    extraction_order_text = "".join(ch["char"] for ch in chars[:max_chars])
+    spatial_order_text = "".join(ch["char"] for ch in sorted_chars)
 
-    print("="*80)
+    print("=" * 80)
     print("TEXT COMPARISON:")
-    print("="*80)
+    print("=" * 80)
     print(f"\nExtraction order text (first {max_chars} chars):")
     print(f"{extraction_order_text[:200]}")
     print()
@@ -104,14 +102,14 @@ def diagnose_character_order(pdf_path, page_num=0, max_chars=100):
     print()
 
     # Analyze Y-coordinate distribution to detect columns
-    print("="*80)
+    print("=" * 80)
     print("Y-COORDINATE ANALYSIS:")
-    print("="*80)
+    print("=" * 80)
 
     # Group characters by Y coordinate (within 5 units tolerance)
     y_groups = {}
     for char in chars[:max_chars]:
-        y = char['bbox']['y']
+        y = char["bbox"]["y"]
         # Find existing group within tolerance
         found_group = False
         for y_key in y_groups:
@@ -127,13 +125,13 @@ def diagnose_character_order(pdf_path, page_num=0, max_chars=100):
     print("\nLines with wide X range (potential multi-column):")
 
     for y, group in sorted(y_groups.items(), key=lambda x: -x[0])[:10]:
-        x_values = [ch['bbox']['x'] for ch in group]
+        x_values = [ch["bbox"]["x"] for ch in group]
         x_min, x_max = min(x_values), max(x_values)
         x_range = x_max - x_min
 
         # If X range is very large, likely multi-column
         if x_range > 200:
-            text = ''.join(ch['char'] for ch in sorted(group, key=lambda c: c['bbox']['x']))
+            text = "".join(ch["char"] for ch in sorted(group, key=lambda c: c["bbox"]["x"]))
             print(f"  Y={y:6.1f}: X range {x_min:6.1f} - {x_max:6.1f} (width: {x_range:6.1f})")
             print(f"            Text: {text[:80]}")
 

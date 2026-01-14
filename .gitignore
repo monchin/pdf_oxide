@@ -266,3 +266,10 @@ tests/golden_files/
 
 # Claude Code AI assistant configuration (internal development tool)
 .claude/
+
+
+# pdm-python
+.pdm-python
+
+# uv-python
+.python-version

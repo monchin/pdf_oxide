@@ -7,12 +7,13 @@ Usage:
 """
 
 import argparse
+import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
-import sys
+
 
 def fetch_arxiv_papers(category, max_results=20, start_index=0):
     """Fetch paper metadata from ArXiv API."""
@@ -23,11 +24,12 @@ def fetch_arxiv_papers(category, max_results=20, start_index=0):
 
     try:
         with urllib.request.urlopen(url) as response:
-            data = response.read().decode('utf-8')
+            data = response.read().decode("utf-8")
         return data
     except urllib.error.URLError as e:
         print(f"Error fetching from ArXiv: {e}")
         return None
+
 
 def parse_arxiv_response(xml_data):
     """Parse ArXiv API response XML."""
@@ -35,32 +37,28 @@ def parse_arxiv_response(xml_data):
         root = ET.fromstring(xml_data)
 
         # Namespace handling
-        ns = {'atom': 'http://www.w3.org/2005/Atom',
-              'arxiv': 'http://arxiv.org/schemas/atom'}
+        ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 
         entries = []
-        for entry in root.findall('atom:entry', ns):
-            paper_id = entry.find('atom:id', ns).text.split('/abs/')[-1]
-            title = entry.find('atom:title', ns).text.strip().replace('\n', ' ')
+        for entry in root.findall("atom:entry", ns):
+            paper_id = entry.find("atom:id", ns).text.split("/abs/")[-1]
+            title = entry.find("atom:title", ns).text.strip().replace("\n", " ")
 
             # Get PDF link
             pdf_link = None
-            for link in entry.findall('atom:link', ns):
-                if link.get('title') == 'pdf':
-                    pdf_link = link.get('href')
+            for link in entry.findall("atom:link", ns):
+                if link.get("title") == "pdf":
+                    pdf_link = link.get("href")
                     break
 
             if pdf_link:
-                entries.append({
-                    'id': paper_id,
-                    'title': title,
-                    'pdf_url': pdf_link
-                })
+                entries.append({"id": paper_id, "title": title, "pdf_url": pdf_link})
 
         return entries
     except ET.ParseError as e:
         print(f"Error parsing XML: {e}")
         return []
+
 
 def download_pdf(url, output_path, filename):
     """Download a PDF file."""
@@ -78,12 +76,17 @@ def download_pdf(url, output_path, filename):
         print(f"  Error downloading {filename}: {e}")
         return False
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Download ArXiv papers for testing')
-    parser.add_argument('--category', default='cs.AI', help='ArXiv category (e.g., cs.AI, cs.LG, math.CO)')
-    parser.add_argument('--max', type=int, default=20, help='Maximum number of papers to download')
-    parser.add_argument('--output', default='test_datasets/pdfs_1000/academic/arxiv', help='Output directory')
-    parser.add_argument('--start', type=int, default=0, help='Start index for pagination')
+    parser = argparse.ArgumentParser(description="Download ArXiv papers for testing")
+    parser.add_argument(
+        "--category", default="cs.AI", help="ArXiv category (e.g., cs.AI, cs.LG, math.CO)"
+    )
+    parser.add_argument("--max", type=int, default=20, help="Maximum number of papers to download")
+    parser.add_argument(
+        "--output", default="test_datasets/pdfs_1000/academic/arxiv", help="Output directory"
+    )
+    parser.add_argument("--start", type=int, default=0, help="Start index for pagination")
 
     args = parser.parse_args()
 
@@ -111,10 +114,10 @@ def main():
         print(f"[{i}/{len(papers)}] {paper['title'][:60]}...")
 
         # Create safe filename
-        paper_id = paper['id'].replace('/', '_')
+        paper_id = paper["id"].replace("/", "_")
         filename = f"arxiv_{paper_id}.pdf"
 
-        if download_pdf(paper['pdf_url'], output_path, filename):
+        if download_pdf(paper["pdf_url"], output_path, filename):
             successful += 1
 
         # Be nice to ArXiv servers
@@ -124,5 +127,6 @@ def main():
     print()
     print(f"Downloaded {successful}/{len(papers)} papers successfully")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

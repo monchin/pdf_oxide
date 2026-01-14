@@ -12,14 +12,11 @@ Usage:
 """
 
 import argparse
-import torch
 from pathlib import Path
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    AutoModel
-)
-from onnxruntime.quantization import quantize_dynamic, QuantType
+
+import torch
+from onnxruntime.quantization import QuantType, quantize_dynamic
+from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
 
 def convert_layout_reader():
@@ -45,9 +42,9 @@ def convert_layout_reader():
 
     # Create dummy input
     dummy_input = {
-        'input_ids': torch.randint(0, 1000, (1, 512)),
-        'bbox': torch.randint(0, 1000, (1, 512, 4)),
-        'attention_mask': torch.ones(1, 512, dtype=torch.long),
+        "input_ids": torch.randint(0, 1000, (1, 512)),
+        "bbox": torch.randint(0, 1000, (1, 512, 4)),
+        "attention_mask": torch.ones(1, 512, dtype=torch.long),
     }
 
     # Export to ONNX
@@ -57,17 +54,17 @@ def convert_layout_reader():
     print("Exporting to ONNX...")
     torch.onnx.export(
         model,
-        (dummy_input['input_ids'], dummy_input['bbox'], dummy_input['attention_mask']),
+        (dummy_input["input_ids"], dummy_input["bbox"], dummy_input["attention_mask"]),
         str(output_path),
         opset_version=14,
-        input_names=['input_ids', 'bbox', 'attention_mask'],
-        output_names=['last_hidden_state'],
+        input_names=["input_ids", "bbox", "attention_mask"],
+        output_names=["last_hidden_state"],
         dynamic_axes={
-            'input_ids': {0: 'batch', 1: 'sequence'},
-            'bbox': {0: 'batch', 1: 'sequence'},
-            'attention_mask': {0: 'batch', 1: 'sequence'},
-            'last_hidden_state': {0: 'batch', 1: 'sequence'},
-        }
+            "input_ids": {0: "batch", 1: "sequence"},
+            "bbox": {0: "batch", 1: "sequence"},
+            "attention_mask": {0: "batch", 1: "sequence"},
+            "last_hidden_state": {0: "batch", 1: "sequence"},
+        },
     )
 
     print(f"✓ Model exported to {output_path}")
@@ -76,11 +73,7 @@ def convert_layout_reader():
     # Quantize to INT8 for faster CPU inference
     print("Quantizing to INT8...")
     quantized_path = Path("models/layout_reader_int8.onnx")
-    quantize_dynamic(
-        str(output_path),
-        str(quantized_path),
-        weight_type=QuantType.QInt8
-    )
+    quantize_dynamic(str(output_path), str(quantized_path), weight_type=QuantType.QInt8)
 
     print(f"✓ Quantized model saved to {quantized_path}")
     print(f"  Size: {quantized_path.stat().st_size / 1024 / 1024:.1f} MB")
@@ -105,7 +98,7 @@ def convert_heading_classifier():
     try:
         model = AutoModelForSequenceClassification.from_pretrained(
             model_name,
-            num_labels=5  # H1, H2, H3, Body, Small
+            num_labels=5,  # H1, H2, H3, Body, Small
         )
         tokenizer = AutoTokenizer.from_pretrained(model_name)
     except Exception as e:
@@ -127,12 +120,12 @@ def convert_heading_classifier():
         (dummy_input,),
         str(output_path),
         opset_version=14,
-        input_names=['input_ids'],
-        output_names=['logits'],
+        input_names=["input_ids"],
+        output_names=["logits"],
         dynamic_axes={
-            'input_ids': {0: 'batch', 1: 'sequence'},
-            'logits': {0: 'batch'},
-        }
+            "input_ids": {0: "batch", 1: "sequence"},
+            "logits": {0: "batch"},
+        },
     )
 
     print(f"✓ Model exported to {output_path}")
@@ -141,11 +134,7 @@ def convert_heading_classifier():
     # Quantize
     print("Quantizing to INT8...")
     quantized_path = Path("models/heading_classifier_int8.onnx")
-    quantize_dynamic(
-        str(output_path),
-        str(quantized_path),
-        weight_type=QuantType.QInt8
-    )
+    quantize_dynamic(str(output_path), str(quantized_path), weight_type=QuantType.QInt8)
 
     print(f"✓ Quantized model saved to {quantized_path}")
     print(f"  Size: {quantized_path.stat().st_size / 1024 / 1024:.1f} MB")
@@ -163,16 +152,13 @@ def verify_models():
 
     import onnxruntime as ort
 
-    models = [
-        "models/layout_reader_int8.onnx",
-        "models/heading_classifier_int8.onnx"
-    ]
+    models = ["models/layout_reader_int8.onnx", "models/heading_classifier_int8.onnx"]
 
     success = True
     for model_path in models:
         if Path(model_path).exists():
             try:
-                session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+                session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
                 print(f"✓ {model_path} verified")
                 print(f"  Inputs: {[i.name for i in session.get_inputs()]}")
                 print(f"  Outputs: {[o.name for o in session.get_outputs()]}")
@@ -202,19 +188,15 @@ Note:
   - Models are cached in ~/.cache/huggingface
   - Conversion takes 5-10 minutes on CPU
   - Final model files are ~70MB total
-        """
+        """,
     )
     parser.add_argument(
-        '--model',
-        choices=['layout-reader', 'heading-classifier', 'all'],
-        default='all',
-        help='Model to convert'
+        "--model",
+        choices=["layout-reader", "heading-classifier", "all"],
+        default="all",
+        help="Model to convert",
     )
-    parser.add_argument(
-        '--skip-verify',
-        action='store_true',
-        help='Skip model verification step'
-    )
+    parser.add_argument("--skip-verify", action="store_true", help="Skip model verification step")
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
@@ -223,11 +205,11 @@ Note:
 
     success = True
 
-    if args.model in ['layout-reader', 'all']:
+    if args.model in ["layout-reader", "all"]:
         if not convert_layout_reader():
             success = False
 
-    if args.model in ['heading-classifier', 'all']:
+    if args.model in ["heading-classifier", "all"]:
         if not convert_heading_classifier():
             success = False
 
@@ -252,5 +234,5 @@ Note:
     print("=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

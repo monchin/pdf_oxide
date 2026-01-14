@@ -17,26 +17,31 @@ or specific to our implementation.
 import sys
 from pathlib import Path
 
+
 # PDF to test
 PDF_PATH = "test_datasets/pdfs/mixed/5PFVA6CO2FP66IJYJJ4YMWOLK5EHRCCD.pdf"
+
 
 def test_pymupdf4llm():
     """Test with PyMuPDF4LLM (optimized for LLM consumption)"""
     try:
         import pymupdf4llm
+
         result = pymupdf4llm.to_markdown(PDF_PATH)
         # Extract first page only
-        first_page = result.split('\n\n')[0] if result else ""
+        first_page = result.split("\n\n")[0] if result else ""
         return first_page[:500]
     except ImportError:
         return "❌ PyMuPDF4LLM not installed (pip install pymupdf4llm)"
     except Exception as e:
         return f"❌ Error: {e}"
 
+
 def test_pymupdf_raw():
     """Test with PyMuPDF raw text extraction"""
     try:
         import fitz  # PyMuPDF
+
         doc = fitz.open(PDF_PATH)
         page = doc[0]
         text = page.get_text("text")
@@ -47,10 +52,12 @@ def test_pymupdf_raw():
     except Exception as e:
         return f"❌ Error: {e}"
 
+
 def test_pdfplumber():
     """Test with pdfplumber"""
     try:
         import pdfplumber
+
         with pdfplumber.open(PDF_PATH) as pdf:
             page = pdf.pages[0]
             text = page.extract_text()
@@ -60,10 +67,12 @@ def test_pdfplumber():
     except Exception as e:
         return f"❌ Error: {e}"
 
+
 def test_pypdf2():
     """Test with PyPDF2"""
     try:
         from PyPDF2 import PdfReader
+
         reader = PdfReader(PDF_PATH)
         page = reader.pages[0]
         text = page.extract_text()
@@ -73,15 +82,17 @@ def test_pypdf2():
     except Exception as e:
         return f"❌ Error: {e}"
 
+
 def test_pdfminer():
     """Test with pdfminer.six"""
     try:
         from io import StringIO
+
         from pdfminer.high_level import extract_text_to_fp
         from pdfminer.layout import LAParams
 
         output = StringIO()
-        with open(PDF_PATH, 'rb') as f:
+        with open(PDF_PATH, "rb") as f:
             extract_text_to_fp(f, output, page_numbers=[0], laparams=LAParams())
         text = output.getvalue()
         return text[:500]
@@ -89,6 +100,7 @@ def test_pdfminer():
         return "❌ pdfminer.six not installed (pip install pdfminer.six)"
     except Exception as e:
         return f"❌ Error: {e}"
+
 
 def check_spacing_issue(text):
     """Check if text contains the characteristic spacing issue"""
@@ -107,6 +119,7 @@ def check_spacing_issue(text):
         return f"❌ SPACING ISSUE FOUND: {', '.join(found_issues)}"
     else:
         return "✅ No spacing issues detected"
+
 
 def main():
     # Check if PDF exists
@@ -169,6 +182,7 @@ def main():
         print("\n🎯 CONCLUSION: All libraries have this issue - likely a PDF authoring problem")
     elif has_issue and no_issue:
         print("\n🎯 CONCLUSION: Mixed results - some libraries handle it better than others")
+
 
 if __name__ == "__main__":
     main()
