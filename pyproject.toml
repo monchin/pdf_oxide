@@ -44,7 +44,7 @@ test = [
 ]
 
 [tool.maturin]
-features = ["python", "pyo3/extension-module"]
+features = ["python"]
 python-source = "python"
 module-name = "pdf_oxide.pdf_oxide"
 
