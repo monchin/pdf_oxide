@@ -14,45 +14,73 @@ import argparse
 import sys
 from pathlib import Path
 
+
 try:
     from sec_edgar_downloader import Downloader
 except ImportError:
     print("Installing sec-edgar-downloader...")
     import subprocess
+
     subprocess.check_call([sys.executable, "-m", "pip", "install", "sec-edgar-downloader"])
     from sec_edgar_downloader import Downloader
 
 # Major companies across diverse sectors
 COMPANIES = [
     # Tech
-    ("AAPL", "Apple"), ("MSFT", "Microsoft"), ("GOOGL", "Alphabet"),
-    ("AMZN", "Amazon"), ("META", "Meta"), ("NVDA", "Nvidia"),
-    ("TSLA", "Tesla"), ("NFLX", "Netflix"), ("ADBE", "Adobe"),
-    ("CRM", "Salesforce"), ("ORCL", "Oracle"), ("INTC", "Intel"),
-
+    ("AAPL", "Apple"),
+    ("MSFT", "Microsoft"),
+    ("GOOGL", "Alphabet"),
+    ("AMZN", "Amazon"),
+    ("META", "Meta"),
+    ("NVDA", "Nvidia"),
+    ("TSLA", "Tesla"),
+    ("NFLX", "Netflix"),
+    ("ADBE", "Adobe"),
+    ("CRM", "Salesforce"),
+    ("ORCL", "Oracle"),
+    ("INTC", "Intel"),
     # Finance
-    ("JPM", "JPMorgan"), ("BAC", "Bank of America"), ("WFC", "Wells Fargo"),
-    ("C", "Citigroup"), ("GS", "Goldman Sachs"), ("MS", "Morgan Stanley"),
-    ("BLK", "BlackRock"), ("SCHW", "Charles Schwab"),
-
+    ("JPM", "JPMorgan"),
+    ("BAC", "Bank of America"),
+    ("WFC", "Wells Fargo"),
+    ("C", "Citigroup"),
+    ("GS", "Goldman Sachs"),
+    ("MS", "Morgan Stanley"),
+    ("BLK", "BlackRock"),
+    ("SCHW", "Charles Schwab"),
     # Healthcare
-    ("JNJ", "Johnson & Johnson"), ("UNH", "UnitedHealth"), ("PFE", "Pfizer"),
-    ("ABBV", "AbbVie"), ("TMO", "Thermo Fisher"), ("LLY", "Eli Lilly"),
-
+    ("JNJ", "Johnson & Johnson"),
+    ("UNH", "UnitedHealth"),
+    ("PFE", "Pfizer"),
+    ("ABBV", "AbbVie"),
+    ("TMO", "Thermo Fisher"),
+    ("LLY", "Eli Lilly"),
     # Consumer
-    ("WMT", "Walmart"), ("HD", "Home Depot"), ("PG", "Procter & Gamble"),
-    ("KO", "Coca-Cola"), ("PEP", "PepsiCo"), ("NKE", "Nike"),
-    ("MCD", "McDonald's"), ("SBUX", "Starbucks"),
-
+    ("WMT", "Walmart"),
+    ("HD", "Home Depot"),
+    ("PG", "Procter & Gamble"),
+    ("KO", "Coca-Cola"),
+    ("PEP", "PepsiCo"),
+    ("NKE", "Nike"),
+    ("MCD", "McDonald's"),
+    ("SBUX", "Starbucks"),
     # Industrial
-    ("BA", "Boeing"), ("CAT", "Caterpillar"), ("GE", "General Electric"),
-    ("HON", "Honeywell"), ("UPS", "UPS"), ("LMT", "Lockheed Martin"),
-
+    ("BA", "Boeing"),
+    ("CAT", "Caterpillar"),
+    ("GE", "General Electric"),
+    ("HON", "Honeywell"),
+    ("UPS", "UPS"),
+    ("LMT", "Lockheed Martin"),
     # Energy
-    ("XOM", "ExxonMobil"), ("CVX", "Chevron"), ("COP", "ConocoPhillips"),
+    ("XOM", "ExxonMobil"),
+    ("CVX", "Chevron"),
+    ("COP", "ConocoPhillips"),
 ]
 
-def download_filings(ticker, company_name, output_dir, filing_types=['10-K', '10-Q', '8-K'], limit_per_type=2):
+
+def download_filings(
+    ticker, company_name, output_dir, filing_types=["10-K", "10-Q", "8-K"], limit_per_type=2
+):
     """Download filings for a single company."""
     print(f"\n{company_name} ({ticker})")
 
@@ -71,15 +99,19 @@ def download_filings(ticker, company_name, output_dir, filing_types=['10-K', '10
 
     return downloaded_count
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Download SEC EDGAR filings in bulk')
-    parser.add_argument('--max', type=int, default=200, help='Maximum PDFs to download')
-    parser.add_argument('--output', default='test_datasets/pdfs_1000/financial/sec',
-                       help='Output directory')
-    parser.add_argument('--types', default='10-K,10-Q,8-K',
-                       help='Filing types to download (comma-separated)')
-    parser.add_argument('--limit-per-type', type=int, default=2,
-                       help='Number of each filing type per company')
+    parser = argparse.ArgumentParser(description="Download SEC EDGAR filings in bulk")
+    parser.add_argument("--max", type=int, default=200, help="Maximum PDFs to download")
+    parser.add_argument(
+        "--output", default="test_datasets/pdfs_1000/financial/sec", help="Output directory"
+    )
+    parser.add_argument(
+        "--types", default="10-K,10-Q,8-K", help="Filing types to download (comma-separated)"
+    )
+    parser.add_argument(
+        "--limit-per-type", type=int, default=2, help="Number of each filing type per company"
+    )
 
     args = parser.parse_args()
 
@@ -87,9 +119,9 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    filing_types = args.types.split(',')
+    filing_types = args.types.split(",")
 
-    print(f"=== SEC EDGAR Bulk Downloader ===")
+    print("=== SEC EDGAR Bulk Downloader ===")
     print(f"Output directory: {output_dir}")
     print(f"Filing types: {', '.join(filing_types)}")
     print(f"Limit per type: {args.limit_per_type}")
@@ -103,7 +135,9 @@ def main():
         if total_downloaded >= args.max:
             break
 
-        count = download_filings(ticker, company_name, str(output_dir), filing_types, args.limit_per_type)
+        count = download_filings(
+            ticker, company_name, str(output_dir), filing_types, args.limit_per_type
+        )
         total_downloaded += count
 
         print(f"  Progress: {total_downloaded}/{args.max}")
@@ -112,12 +146,13 @@ def main():
             break
 
     print()
-    print(f"=== Download Complete ===")
+    print("=== Download Complete ===")
     print(f"Downloaded approximately {total_downloaded} filings")
     print(f"Location: {output_dir}")
     print()
     print("Note: SEC filings are often in HTML format.")
     print("      PDF extraction may vary by filing.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

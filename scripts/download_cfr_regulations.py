@@ -12,9 +12,10 @@ Usage:
 
 import argparse
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
+
 
 # CFR Titles with interesting/diverse content
 CFR_TITLES = [
@@ -50,14 +51,17 @@ CFR_TITLES = [
     (50, "Wildlife and Fisheries"),
 ]
 
-def download_cfr_title(title_num, title_name, output_dir, year='2024'):
+
+def download_cfr_title(title_num, title_name, output_dir, year="2024"):
     """Download a CFR title PDF."""
     # GovInfo.gov URL pattern for CFR PDFs
     # Example: https://www.govinfo.gov/content/pkg/CFR-2024-title21-vol1/pdf/CFR-2024-title21-vol1.pdf
 
     # Most titles have multiple volumes, try volume 1 first
-    url = f'https://www.govinfo.gov/content/pkg/CFR-{year}-title{title_num}-vol1/pdf/CFR-{year}-title{title_num}-vol1.pdf'
-    output_file = output_dir / f'CFR_{year}_Title{title_num:02d}_Vol1_{title_name.replace(" ", "_")}.pdf'
+    url = f"https://www.govinfo.gov/content/pkg/CFR-{year}-title{title_num}-vol1/pdf/CFR-{year}-title{title_num}-vol1.pdf"
+    output_file = (
+        output_dir / f"CFR_{year}_Title{title_num:02d}_Vol1_{title_name.replace(' ', '_')}.pdf"
+    )
 
     if output_file.exists():
         print(f"  Skipping Title {title_num} (already exists)")
@@ -65,20 +69,18 @@ def download_cfr_title(title_num, title_name, output_dir, year='2024'):
 
     try:
         print(f"  Downloading Title {title_num}: {title_name}...")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) PDF Library Testing'
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) PDF Library Testing"}
 
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=60) as response:
             data = response.read()
 
         # Verify it's a PDF
-        if data[:4] != b'%PDF':
-            print(f"    Warning: Not a PDF file")
+        if data[:4] != b"%PDF":
+            print("    Warning: Not a PDF file")
             return False
 
-        with open(output_file, 'wb') as f:
+        with open(output_file, "wb") as f:
             f.write(data)
 
         print(f"    Downloaded {len(data) // 1024 // 1024} MB")
@@ -94,12 +96,14 @@ def download_cfr_title(title_num, title_name, output_dir, year='2024'):
         print(f"    Error: {e}")
         return False
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Download Code of Federal Regulations PDFs')
-    parser.add_argument('--max', type=int, default=50, help='Maximum PDFs to download')
-    parser.add_argument('--output', default='test_datasets/pdfs_1000/government/cfr',
-                       help='Output directory')
-    parser.add_argument('--year', default='2024', help='CFR year edition')
+    parser = argparse.ArgumentParser(description="Download Code of Federal Regulations PDFs")
+    parser.add_argument("--max", type=int, default=50, help="Maximum PDFs to download")
+    parser.add_argument(
+        "--output", default="test_datasets/pdfs_1000/government/cfr", help="Output directory"
+    )
+    parser.add_argument("--year", default="2024", help="CFR year edition")
 
     args = parser.parse_args()
 
@@ -107,15 +111,17 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f'Downloading Code of Federal Regulations ({args.year})')
-    print(f'Output directory: {output_dir}')
+    print(f"Downloading Code of Federal Regulations ({args.year})")
+    print(f"Output directory: {output_dir}")
     print()
 
     successful = 0
     failed = 0
 
-    for title_num, title_name in CFR_TITLES[:args.max]:
-        print(f'[{successful + failed + 1}/{min(len(CFR_TITLES), args.max)}] Title {title_num}: {title_name}')
+    for title_num, title_name in CFR_TITLES[: args.max]:
+        print(
+            f"[{successful + failed + 1}/{min(len(CFR_TITLES), args.max)}] Title {title_num}: {title_name}"
+        )
 
         if download_cfr_title(title_num, title_name, output_dir, args.year):
             successful += 1
@@ -129,11 +135,12 @@ def main():
         time.sleep(2)
 
     print()
-    print(f'Downloaded {successful}/{successful + failed} CFR titles successfully')
-    print(f'Failed: {failed}')
+    print(f"Downloaded {successful}/{successful + failed} CFR titles successfully")
+    print(f"Failed: {failed}")
     print()
-    print('Note: CFR PDFs are large (often 10-50 MB each)')
-    print('      They contain comprehensive federal regulations')
+    print("Note: CFR PDFs are large (often 10-50 MB each)")
+    print("      They contain comprehensive federal regulations")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -7,32 +7,32 @@ Usage:
 """
 
 import argparse
-import time
 import json
-import urllib.request
+import time
 import urllib.error
+import urllib.request
 from pathlib import Path
-import sys
-import re
+
 
 # Major company CIKs (Central Index Key) for diverse sampling
 MAJOR_COMPANIES = [
-    ('0000320193', 'AAPL'),  # Apple
-    ('0001018724', 'AMZN'),  # Amazon
-    ('0001652044', 'GOOGL'), # Alphabet
-    ('0001326801', 'META'),  # Meta
-    ('0000789019', 'MSFT'),  # Microsoft
-    ('0001318605', 'TSLA'),  # Tesla
-    ('0001045810', 'NVDA'),  # Nvidia
-    ('0001067983', 'BRK'),   # Berkshire Hathaway
-    ('0000886982', 'JNJ'),   # Johnson & Johnson
-    ('0000019617', 'JPM'),   # JPMorgan Chase
-    ('0000051143', 'IBM'),   # IBM
-    ('0000037996', 'F'),     # Ford
-    ('0000789019', 'XOM'),   # ExxonMobil
-    ('0000021344', 'KO'),    # Coca-Cola
-    ('0000310158', 'WMT'),   # Walmart
+    ("0000320193", "AAPL"),  # Apple
+    ("0001018724", "AMZN"),  # Amazon
+    ("0001652044", "GOOGL"),  # Alphabet
+    ("0001326801", "META"),  # Meta
+    ("0000789019", "MSFT"),  # Microsoft
+    ("0001318605", "TSLA"),  # Tesla
+    ("0001045810", "NVDA"),  # Nvidia
+    ("0001067983", "BRK"),  # Berkshire Hathaway
+    ("0000886982", "JNJ"),  # Johnson & Johnson
+    ("0000019617", "JPM"),  # JPMorgan Chase
+    ("0000051143", "IBM"),  # IBM
+    ("0000037996", "F"),  # Ford
+    ("0000789019", "XOM"),  # ExxonMobil
+    ("0000021344", "KO"),  # Coca-Cola
+    ("0000310158", "WMT"),  # Walmart
 ]
+
 
 def fetch_company_filings(cik, filing_type, max_filings=5):
     """Fetch filing information for a company."""
@@ -43,36 +43,38 @@ def fetch_company_filings(cik, filing_type, max_filings=5):
     url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
 
     headers = {
-        'User-Agent': 'PDF Library Testing bot@example.com'  # SEC requires user agent
+        "User-Agent": "PDF Library Testing bot@example.com"  # SEC requires user agent
     }
 
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode('utf-8'))
+            data = json.loads(response.read().decode("utf-8"))
 
         # Extract recent filings
-        filings = data.get('filings', {}).get('recent', {})
-        forms = filings.get('form', [])
-        accession_numbers = filings.get('accessionNumber', [])
-        primary_documents = filings.get('primaryDocument', [])
-        filing_dates = filings.get('filingDate', [])
+        filings = data.get("filings", {}).get("recent", {})
+        forms = filings.get("form", [])
+        accession_numbers = filings.get("accessionNumber", [])
+        primary_documents = filings.get("primaryDocument", [])
+        filing_dates = filings.get("filingDate", [])
 
         results = []
         for i, form in enumerate(forms):
             if form == filing_type and len(results) < max_filings:
                 # Check if it's a PDF
-                if primary_documents[i].endswith('.pdf'):
-                    accession = accession_numbers[i].replace('-', '')
+                if primary_documents[i].endswith(".pdf"):
+                    accession = accession_numbers[i].replace("-", "")
                     doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}/{primary_documents[i]}"
 
-                    results.append({
-                        'company_cik': cik,
-                        'form_type': form,
-                        'filing_date': filing_dates[i],
-                        'url': doc_url,
-                        'filename': primary_documents[i]
-                    })
+                    results.append(
+                        {
+                            "company_cik": cik,
+                            "form_type": form,
+                            "filing_date": filing_dates[i],
+                            "url": doc_url,
+                            "filename": primary_documents[i],
+                        }
+                    )
 
         return results
 
@@ -80,10 +82,11 @@ def fetch_company_filings(cik, filing_type, max_filings=5):
         print(f"Error fetching filings for CIK {cik}: {e}")
         return []
 
+
 def download_filing(filing, output_path, ticker):
     """Download a single filing."""
     # Create safe filename
-    date = filing['filing_date'].replace('-', '')
+    date = filing["filing_date"].replace("-", "")
     filename = f"{ticker}_{filing['form_type']}_{date}.pdf"
     output_file = output_path / filename
 
@@ -93,15 +96,13 @@ def download_filing(filing, output_path, ticker):
 
     try:
         print(f"  Downloading {filename}...")
-        headers = {
-            'User-Agent': 'PDF Library Testing bot@example.com'
-        }
+        headers = {"User-Agent": "PDF Library Testing bot@example.com"}
 
-        req = urllib.request.Request(filing['url'], headers=headers)
+        req = urllib.request.Request(filing["url"], headers=headers)
         with urllib.request.urlopen(req) as response:
             data = response.read()
 
-        with open(output_file, 'wb') as f:
+        with open(output_file, "wb") as f:
             f.write(data)
 
         return True
@@ -110,12 +111,15 @@ def download_filing(filing, output_path, ticker):
         print(f"  Error downloading {filename}: {e}")
         return False
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Download SEC filings for testing')
-    parser.add_argument('--type', default='10-K', help='Filing type (10-K, 10-Q, 8-K)')
-    parser.add_argument('--max', type=int, default=50, help='Maximum total filings to download')
-    parser.add_argument('--per-company', type=int, default=3, help='Max filings per company')
-    parser.add_argument('--output', default='test_datasets/pdfs_1000/financial/10k', help='Output directory')
+    parser = argparse.ArgumentParser(description="Download SEC filings for testing")
+    parser.add_argument("--type", default="10-K", help="Filing type (10-K, 10-Q, 8-K)")
+    parser.add_argument("--max", type=int, default=50, help="Maximum total filings to download")
+    parser.add_argument("--per-company", type=int, default=3, help="Max filings per company")
+    parser.add_argument(
+        "--output", default="test_datasets/pdfs_1000/financial/10k", help="Output directory"
+    )
 
     args = parser.parse_args()
 
@@ -142,7 +146,7 @@ def main():
         for filing in filings:
             if total_downloaded >= args.max:
                 break
-            filing['ticker'] = ticker
+            filing["ticker"] = ticker
             all_filings.append(filing)
             total_downloaded += 1
 
@@ -155,9 +159,11 @@ def main():
     # Download all filings
     successful = 0
     for i, filing in enumerate(all_filings, 1):
-        print(f"[{i}/{len(all_filings)}] {filing['ticker']} {filing['form_type']} {filing['filing_date']}")
+        print(
+            f"[{i}/{len(all_filings)}] {filing['ticker']} {filing['form_type']} {filing['filing_date']}"
+        )
 
-        if download_filing(filing, output_path, filing['ticker']):
+        if download_filing(filing, output_path, filing["ticker"]):
             successful += 1
 
         # Rate limiting - SEC recommends max 10 requests per second
@@ -167,5 +173,6 @@ def main():
     print()
     print(f"Downloaded {successful}/{len(all_filings)} filings successfully")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

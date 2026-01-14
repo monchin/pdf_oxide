@@ -12,10 +12,12 @@ This script will:
 This will tell us WHY we're inserting spaces incorrectly.
 """
 
-import sys
+
 import fitz  # PyMuPDF
 
+
 PDF_PATH = "test_datasets/pdfs/mixed/5PFVA6CO2FP66IJYJJ4YMWOLK5EHRCCD.pdf"
+
 
 def analyze_content_stream(pdf_path):
     """Analyze the raw PDF content stream."""
@@ -32,19 +34,19 @@ def analyze_content_stream(pdf_path):
 
     print(f"\nFound {len(blocks['blocks'])} blocks")
 
-    for block_idx, block in enumerate(blocks['blocks'][:3]):  # First 3 blocks
-        if block['type'] == 0:  # Text block
+    for block_idx, block in enumerate(blocks["blocks"][:3]):  # First 3 blocks
+        if block["type"] == 0:  # Text block
             print(f"\n{'=' * 80}")
             print(f"BLOCK {block_idx}")
             print(f"{'=' * 80}")
             print(f"Bbox: {block['bbox']}")
 
-            for line_idx, line in enumerate(block['lines'][:5]):  # First 5 lines
+            for line_idx, line in enumerate(block["lines"][:5]):  # First 5 lines
                 print(f"\n  LINE {line_idx}:")
                 print(f"  Bbox: {line['bbox']}")
                 print(f"  Direction: {line['dir']}")
 
-                for span_idx, span in enumerate(line['spans'][:10]):  # First 10 spans
+                for span_idx, span in enumerate(line["spans"][:10]):  # First 10 spans
                     print(f"\n    SPAN {span_idx}:")
                     print(f"    Text: '{span['text']}'")
                     print(f"    Bbox: {span['bbox']}")
@@ -53,9 +55,9 @@ def analyze_content_stream(pdf_path):
                     print(f"    Origin: {span['origin']}")
 
                     # Calculate span width and character width
-                    bbox = span['bbox']
+                    bbox = span["bbox"]
                     span_width = bbox[2] - bbox[0]
-                    char_count = len(span['text'])
+                    char_count = len(span["text"])
 
                     if char_count > 0:
                         avg_char_width = span_width / char_count
@@ -64,9 +66,9 @@ def analyze_content_stream(pdf_path):
                         print(f"    Avg char width: {avg_char_width:.2f}pt")
 
                     # Calculate gap to next span
-                    if span_idx < len(line['spans']) - 1:
-                        next_span = line['spans'][span_idx + 1]
-                        gap = next_span['bbox'][0] - span['bbox'][2]
+                    if span_idx < len(line["spans"]) - 1:
+                        next_span = line["spans"][span_idx + 1]
+                        gap = next_span["bbox"][0] - span["bbox"][2]
                         print(f"    Gap to next: {gap:.2f}pt")
 
                         if char_count > 0:
@@ -74,11 +76,12 @@ def analyze_content_stream(pdf_path):
                             print(f"    Gap ratio: {gap_ratio:.2f}x char width")
 
                             if gap < avg_char_width * 0.5:
-                                print(f"    → Should MERGE (gap < 0.5x char width)")
+                                print("    → Should MERGE (gap < 0.5x char width)")
                             else:
-                                print(f"    → Should INSERT SPACE (gap >= 0.5x char width)")
+                                print("    → Should INSERT SPACE (gap >= 0.5x char width)")
 
     doc.close()
+
 
 def analyze_with_rawdict(pdf_path):
     """Analyze using rawdict to get more details."""
@@ -92,34 +95,35 @@ def analyze_with_rawdict(pdf_path):
     # Get raw dictionary with detailed positioning
     raw = page.get_text("rawdict")
 
-    for block in raw['blocks'][:2]:  # First 2 blocks
-        if block['type'] == 0:
+    for block in raw["blocks"][:2]:  # First 2 blocks
+        if block["type"] == 0:
             print(f"\nBlock bbox: {block['bbox']}")
-            for line in block['lines'][:3]:  # First 3 lines
+            for line in block["lines"][:3]:  # First 3 lines
                 print(f"  Line: {line['bbox']}")
 
-                spans = line['spans']
+                spans = line["spans"]
                 print(f"  {len(spans)} spans:")
 
                 for i, span in enumerate(spans[:15]):  # First 15 spans
-                    text = ''.join(chr(c) if c < 128 else f'\\x{c:02x}' for c in span['chars'])
-                    bbox = span['bbox']
+                    text = "".join(chr(c) if c < 128 else f"\\x{c:02x}" for c in span["chars"])
+                    bbox = span["bbox"]
                     width = bbox[2] - bbox[0]
-                    char_count = len(span['chars'])
+                    char_count = len(span["chars"])
 
                     print(f"    [{i}] '{text}' @ x={bbox[0]:.1f} w={width:.1f} chars={char_count}")
 
                     if i < len(spans) - 1:
                         next_span = spans[i + 1]
-                        gap = next_span['bbox'][0] - bbox[2]
+                        gap = next_span["bbox"][0] - bbox[2]
                         print(f"         gap={gap:.1f}pt", end="")
 
                         if char_count > 0:
                             avg_cw = width / char_count
-                            print(f" ({gap/avg_cw:.2f}x)", end="")
+                            print(f" ({gap / avg_cw:.2f}x)", end="")
                         print()
 
     doc.close()
+
 
 def main():
     print(f"Analyzing: {PDF_PATH}")
@@ -151,7 +155,9 @@ This will tell us what threshold to use!
     except Exception as e:
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()

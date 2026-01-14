@@ -19,6 +19,7 @@ Usage:
 
 import sys
 from pathlib import Path
+
 from pdf_oxide import PdfDocument
 
 
@@ -45,8 +46,8 @@ def main():
     print(f"Opening: {pdf_path}")
     try:
         doc = PdfDocument(pdf_path)
-        print(f"✓ Successfully opened PDF")
-    except IOError as e:
+        print("✓ Successfully opened PDF")
+    except OSError as e:
         print(f"✗ Failed to open PDF: {e}")
         sys.exit(1)
 
@@ -63,7 +64,7 @@ def main():
     page_count = doc.page_count()
     print(f"Total Pages: {page_count}")
 
-    print(f"Representation: {repr(doc)}")
+    print(f"Representation: {doc!r}")
     print()
 
     # Extract text from first page
@@ -168,9 +169,7 @@ def main():
     try:
         # Convert entire document to Markdown
         markdown_all = doc.to_markdown_all(
-            detect_headings=True,
-            include_images=True,
-            image_output_dir="./images"
+            detect_headings=True, include_images=True, image_output_dir="./images"
         )
         output_path = "output_full_document.md"
 

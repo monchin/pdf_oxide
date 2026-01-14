@@ -20,26 +20,26 @@ Outputs markdown files to separate directories for comparison.
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
-import subprocess
-import sys
-import traceback
+
 
 # Test if libraries are available
 AVAILABLE_LIBRARIES = {}
 
+
 def check_library_availability():
     """Check which libraries are installed."""
     libraries = {
-        'pymupdf': 'fitz',
-        'pymupdf4llm': 'pymupdf4llm',
-        'pdfplumber': 'pdfplumber',
-        'pypdf': 'pypdf',
-        'pdfminer.six': 'pdfminer',
-        'pikepdf': 'pikepdf',
-        'borb': 'borb',
-        'pypdfium2': 'pypdfium2',
+        "pymupdf": "fitz",
+        "pymupdf4llm": "pymupdf4llm",
+        "pdfplumber": "pdfplumber",
+        "pypdf": "pypdf",
+        "pdfminer.six": "pdfminer",
+        "pikepdf": "pikepdf",
+        "borb": "borb",
+        "pypdfium2": "pypdfium2",
     }
 
     for name, import_name in libraries.items():
@@ -54,13 +54,15 @@ def check_library_availability():
     # Check for our Rust library
     try:
         import pdf_oxide
-        AVAILABLE_LIBRARIES['pdf_oxide'] = True
-        print(f"✓ pdf_oxide (Rust) available")
+
+        AVAILABLE_LIBRARIES["pdf_oxide"] = True
+        print("✓ pdf_oxide (Rust) available")
     except ImportError:
-        AVAILABLE_LIBRARIES['pdf_oxide'] = False
-        print(f"✗ pdf_oxide (Rust) NOT installed")
+        AVAILABLE_LIBRARIES["pdf_oxide"] = False
+        print("✗ pdf_oxide (Rust) NOT installed")
 
     print()
+
 
 def extract_with_pdf_oxide(pdf_path, output_path):
     """Extract text with our Rust library."""
@@ -69,10 +71,11 @@ def extract_with_pdf_oxide(pdf_path, output_path):
     doc = pdf_oxide.PdfDocument(str(pdf_path))
     markdown = doc.to_markdown_all(detect_headings=True)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_pymupdf(pdf_path, output_path):
     """Extract text with PyMuPDF."""
@@ -85,13 +88,14 @@ def extract_with_pymupdf(pdf_path, output_path):
         text = page.get_text()
         text_parts.append(text)
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     doc.close()
     return len(markdown)
+
 
 def extract_with_pymupdf4llm(pdf_path, output_path):
     """Extract text with pymupdf4llm."""
@@ -99,10 +103,11 @@ def extract_with_pymupdf4llm(pdf_path, output_path):
 
     markdown = pymupdf4llm.to_markdown(str(pdf_path))
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_pdfplumber(pdf_path, output_path):
     """Extract text with pdfplumber."""
@@ -115,12 +120,13 @@ def extract_with_pdfplumber(pdf_path, output_path):
             if text:
                 text_parts.append(text)
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_pypdf(pdf_path, output_path):
     """Extract text with pypdf."""
@@ -134,12 +140,13 @@ def extract_with_pypdf(pdf_path, output_path):
         if text:
             text_parts.append(text)
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_pdfminer(pdf_path, output_path):
     """Extract text with pdfminer.six."""
@@ -147,10 +154,11 @@ def extract_with_pdfminer(pdf_path, output_path):
 
     text = extract_text(str(pdf_path))
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(text)
 
     return len(text)
+
 
 def extract_with_pikepdf(pdf_path, output_path):
     """Extract text with pikepdf (basic extraction)."""
@@ -165,12 +173,13 @@ def extract_with_pikepdf(pdf_path, output_path):
             # Very basic extraction - pikepdf doesn't have built-in text extraction
             text_parts.append(f"[Page {len(text_parts) + 1}]")
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_borb(pdf_path, output_path):
     """Extract text with borb."""
@@ -179,7 +188,7 @@ def extract_with_borb(pdf_path, output_path):
 
     text_parts = []
 
-    with open(pdf_path, 'rb') as pdf_file:
+    with open(pdf_path, "rb") as pdf_file:
         doc = PDF.loads(pdf_file)
 
         for page_num in range(len(doc.get_document_info().get_number_of_pages())):
@@ -189,12 +198,13 @@ def extract_with_borb(pdf_path, output_path):
             if text:
                 text_parts.append(text)
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
+
 
 def extract_with_pypdfium2(pdf_path, output_path):
     """Extract text with pypdfium2."""
@@ -213,25 +223,27 @@ def extract_with_pypdfium2(pdf_path, output_path):
 
     pdf.close()
 
-    markdown = '\n\n'.join(text_parts)
+    markdown = "\n\n".join(text_parts)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     return len(markdown)
 
+
 # Library extractors mapping
 EXTRACTORS = {
-    'pdf_oxide': extract_with_pdf_oxide,
-    'pymupdf': extract_with_pymupdf,
-    'pymupdf4llm': extract_with_pymupdf4llm,
-    'pdfplumber': extract_with_pdfplumber,
-    'pypdf': extract_with_pypdf,
-    'pdfminer.six': extract_with_pdfminer,
-    'pikepdf': extract_with_pikepdf,
-    'borb': extract_with_borb,
-    'pypdfium2': extract_with_pypdfium2,
+    "pdf_oxide": extract_with_pdf_oxide,
+    "pymupdf": extract_with_pymupdf,
+    "pymupdf4llm": extract_with_pymupdf4llm,
+    "pdfplumber": extract_with_pdfplumber,
+    "pypdf": extract_with_pypdf,
+    "pdfminer.six": extract_with_pdfminer,
+    "pikepdf": extract_with_pikepdf,
+    "borb": extract_with_borb,
+    "pypdfium2": extract_with_pypdfium2,
 }
+
 
 def benchmark_library(library_name, pdf_files, output_dir):
     """Benchmark a single library on all PDFs."""
@@ -244,19 +256,19 @@ def benchmark_library(library_name, pdf_files, output_dir):
         print(f"No extractor for {library_name}")
         return None
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Benchmarking: {library_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     results = {
-        'library': library_name,
-        'total_pdfs': len(pdf_files),
-        'successful': 0,
-        'failed': 0,
-        'total_time': 0.0,
-        'total_output_size': 0,
-        'errors': [],
-        'times': []
+        "library": library_name,
+        "total_pdfs": len(pdf_files),
+        "successful": 0,
+        "failed": 0,
+        "total_time": 0.0,
+        "total_output_size": 0,
+        "errors": [],
+        "times": [],
     }
 
     for i, pdf_path in enumerate(pdf_files, 1):
@@ -267,47 +279,54 @@ def benchmark_library(library_name, pdf_files, output_dir):
             output_size = extractor(pdf_path, output_file)
             elapsed = time.time() - start_time
 
-            results['successful'] += 1
-            results['total_time'] += elapsed
-            results['total_output_size'] += output_size
-            results['times'].append(elapsed)
+            results["successful"] += 1
+            results["total_time"] += elapsed
+            results["total_output_size"] += output_size
+            results["times"].append(elapsed)
 
-            print(f"  [{i}/{len(pdf_files)}] ✓ {pdf_path.name} ({elapsed:.3f}s, {output_size} bytes)")
+            print(
+                f"  [{i}/{len(pdf_files)}] ✓ {pdf_path.name} ({elapsed:.3f}s, {output_size} bytes)"
+            )
 
         except Exception as e:
-            results['failed'] += 1
-            error_msg = f"{pdf_path.name}: {str(e)}"
-            results['errors'].append(error_msg)
+            results["failed"] += 1
+            error_msg = f"{pdf_path.name}: {e!s}"
+            results["errors"].append(error_msg)
             print(f"  [{i}/{len(pdf_files)}] ✗ {pdf_path.name} - {str(e)[:100]}")
 
     # Calculate statistics
-    if results['successful'] > 0:
-        results['avg_time'] = results['total_time'] / results['successful']
-        results['avg_output_size'] = results['total_output_size'] / results['successful']
-        results['success_rate'] = (results['successful'] / results['total_pdfs']) * 100
+    if results["successful"] > 0:
+        results["avg_time"] = results["total_time"] / results["successful"]
+        results["avg_output_size"] = results["total_output_size"] / results["successful"]
+        results["success_rate"] = (results["successful"] / results["total_pdfs"]) * 100
     else:
-        results['avg_time'] = 0
-        results['avg_output_size'] = 0
-        results['success_rate'] = 0
+        results["avg_time"] = 0
+        results["avg_output_size"] = 0
+        results["success_rate"] = 0
 
     print(f"\nResults for {library_name}:")
-    print(f"  Success: {results['successful']}/{results['total_pdfs']} ({results['success_rate']:.1f}%)")
+    print(
+        f"  Success: {results['successful']}/{results['total_pdfs']} ({results['success_rate']:.1f}%)"
+    )
     print(f"  Total time: {results['total_time']:.2f}s")
-    print(f"  Avg time/PDF: {results['avg_time']*1000:.1f}ms")
+    print(f"  Avg time/PDF: {results['avg_time'] * 1000:.1f}ms")
     print(f"  Total output: {results['total_output_size']:,} bytes")
 
     return results
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Benchmark all PDF libraries')
-    parser.add_argument('--pdfs', default='test_datasets/pdfs',
-                       help='Directory containing PDFs to test')
-    parser.add_argument('--output', default='test_datasets/benchmark_outputs',
-                       help='Output directory for results')
-    parser.add_argument('--libraries', nargs='+',
-                       help='Specific libraries to test (default: all available)')
-    parser.add_argument('--limit', type=int,
-                       help='Limit number of PDFs to test')
+    parser = argparse.ArgumentParser(description="Benchmark all PDF libraries")
+    parser.add_argument(
+        "--pdfs", default="test_datasets/pdfs", help="Directory containing PDFs to test"
+    )
+    parser.add_argument(
+        "--output", default="test_datasets/benchmark_outputs", help="Output directory for results"
+    )
+    parser.add_argument(
+        "--libraries", nargs="+", help="Specific libraries to test (default: all available)"
+    )
+    parser.add_argument("--limit", type=int, help="Limit number of PDFs to test")
 
     args = parser.parse_args()
 
@@ -321,13 +340,13 @@ def main():
         print(f"Error: PDF directory not found: {pdf_dir}")
         sys.exit(1)
 
-    pdf_files = sorted(pdf_dir.rglob('*.pdf'))
+    pdf_files = sorted(pdf_dir.rglob("*.pdf"))
     if not pdf_files:
         print(f"Error: No PDFs found in {pdf_dir}")
         sys.exit(1)
 
     if args.limit:
-        pdf_files = pdf_files[:args.limit]
+        pdf_files = pdf_files[: args.limit]
 
     print(f"Found {len(pdf_files)} PDFs to test\n")
 
@@ -355,26 +374,28 @@ def main():
             all_results.append(results)
 
     # Save summary report
-    summary_file = output_base / 'benchmark_summary.json'
-    with open(summary_file, 'w') as f:
+    summary_file = output_base / "benchmark_summary.json"
+    with open(summary_file, "w") as f:
         json.dump(all_results, f, indent=2)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("BENCHMARK SUMMARY")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # Sort by average time (fastest first)
-    all_results.sort(key=lambda x: x['avg_time'])
+    all_results.sort(key=lambda x: x["avg_time"])
 
     print(f"{'Library':<20} {'Success':<12} {'Total Time':<12} {'Avg/PDF':<12} {'Output Size':<15}")
-    print(f"{'-'*20} {'-'*12} {'-'*12} {'-'*12} {'-'*15}")
+    print(f"{'-' * 20} {'-' * 12} {'-' * 12} {'-' * 12} {'-' * 15}")
 
     for result in all_results:
-        print(f"{result['library']:<20} "
-              f"{result['successful']}/{result['total_pdfs']:<9} "
-              f"{result['total_time']:>10.2f}s "
-              f"{result['avg_time']*1000:>10.1f}ms "
-              f"{result['total_output_size']:>13,} bytes")
+        print(
+            f"{result['library']:<20} "
+            f"{result['successful']}/{result['total_pdfs']:<9} "
+            f"{result['total_time']:>10.2f}s "
+            f"{result['avg_time'] * 1000:>10.1f}ms "
+            f"{result['total_output_size']:>13,} bytes"
+        )
 
     print(f"\nResults saved to: {output_base}")
     print(f"Summary: {summary_file}")
@@ -382,13 +403,14 @@ def main():
     # Show relative performance
     if len(all_results) > 1:
         baseline = all_results[0]
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"RELATIVE PERFORMANCE (vs {baseline['library']})")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         for result in all_results[1:]:
-            speedup = result['avg_time'] / baseline['avg_time']
+            speedup = result["avg_time"] / baseline["avg_time"]
             print(f"{result['library']:<20} {speedup:>6.1f}× slower")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

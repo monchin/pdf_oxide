@@ -6,15 +6,18 @@ This helps us tune XY-Cut parameters for untagged PDFs.
 """
 
 import sys
-sys.path.insert(0, '/home/yfedoseev/projects/pdf_oxide')
+
+
+sys.path.insert(0, "/home/yfedoseev/projects/pdf_oxide")
 
 import pdf_oxide
 
+
 def analyze_layout(pdf_path):
     """Analyze the physical layout of a PDF page."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Layout Analysis: {pdf_path}")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     doc = pdf_oxide.PdfDocument(pdf_path)
 
@@ -34,19 +37,25 @@ def analyze_layout(pdf_path):
     font_sizes = [c.font_size for c in chars]
 
     print(f"Total characters: {len(chars)}")
-    print(f"\nPage Dimensions:")
+    print("\nPage Dimensions:")
     print(f"  X range: {min(xs):.1f} to {max(xs):.1f} (width: {max(xs) - min(xs):.1f})")
     print(f"  Y range: {min(ys):.1f} to {max(ys):.1f} (height: {max(ys) - min(ys):.1f})")
 
-    print(f"\nFont Statistics:")
-    print(f"  Font sizes: min={min(font_sizes):.1f}, median={sorted(font_sizes)[len(font_sizes)//2]:.1f}, max={max(font_sizes):.1f}")
-    print(f"  Char widths: min={min(widths):.1f}, median={sorted(widths)[len(widths)//2]:.1f}, max={max(widths):.1f}")
-    print(f"  Char heights: min={min(heights):.1f}, median={sorted(heights)[len(heights)//2]:.1f}, max={max(heights):.1f}")
+    print("\nFont Statistics:")
+    print(
+        f"  Font sizes: min={min(font_sizes):.1f}, median={sorted(font_sizes)[len(font_sizes) // 2]:.1f}, max={max(font_sizes):.1f}"
+    )
+    print(
+        f"  Char widths: min={min(widths):.1f}, median={sorted(widths)[len(widths) // 2]:.1f}, max={max(widths):.1f}"
+    )
+    print(
+        f"  Char heights: min={min(heights):.1f}, median={sorted(heights)[len(heights) // 2]:.1f}, max={max(heights):.1f}"
+    )
 
     # Analyze X distribution (for column detection)
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("COLUMN DETECTION ANALYSIS")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     # Create X histogram with 100 bins
     page_width = max(xs) - min(xs)
@@ -84,14 +93,14 @@ def analyze_layout(pdf_path):
         if density < threshold_20pct:
             valleys_20.append((x_pos, density))
 
-    print(f"\nValleys found:")
+    print("\nValleys found:")
     print(f"  With 10% threshold: {len(valleys_10)} valleys")
     print(f"  With 15% threshold: {len(valleys_15)} valleys")
     print(f"  With 20% threshold: {len(valleys_20)} valleys")
 
     # Find largest continuous valley (potential column gap)
     if valleys_15:
-        print(f"\n  Likely column gaps (15% threshold):")
+        print("\n  Likely column gaps (15% threshold):")
         # Group consecutive valleys
         gap_start = None
         gap_densities = []
@@ -100,19 +109,33 @@ def analyze_layout(pdf_path):
             if gap_start is None:
                 gap_start = x_pos
                 gap_densities = [density]
-            elif x_pos - valleys_15[valleys_15.index((x_pos, density))-1][0] < bin_width * 2:
+            elif x_pos - valleys_15[valleys_15.index((x_pos, density)) - 1][0] < bin_width * 2:
                 gap_densities.append(density)
             else:
                 # End of gap
                 gap_width = x_pos - gap_start
                 avg_gap_density = sum(gap_densities) / len(gap_densities)
-                print(f"    Gap at X={gap_start:.1f}-{x_pos:.1f} (width: {gap_width:.1f}, avg density: {avg_gap_density:.1f})")
+                print(
+                    f"    Gap at X={gap_start:.1f}-{x_pos:.1f} (width: {gap_width:.1f}, avg density: {avg_gap_density:.1f})"
+                )
                 gap_start = x_pos
                 gap_densities = [density]
 
     # Visualize X distribution
-    print(f"\nX Distribution (simplified histogram):")
-    print("  " + "0" * 10 + "1" * 10 + "2" * 10 + "3" * 10 + "4" * 10 + "5" * 10 + "6" * 10 + "7" * 10 + "8" * 10 + "9" * 10)
+    print("\nX Distribution (simplified histogram):")
+    print(
+        "  "
+        + "0" * 10
+        + "1" * 10
+        + "2" * 10
+        + "3" * 10
+        + "4" * 10
+        + "5" * 10
+        + "6" * 10
+        + "7" * 10
+        + "8" * 10
+        + "9" * 10
+    )
 
     # Create ASCII histogram
     max_density = max(bins) if bins else 1
@@ -128,36 +151,38 @@ def analyze_layout(pdf_path):
         print(line)
 
     print("  " + "^" * 100)
-    print(f"  0{' '*48}{page_width/2:.0f}{' '*47}{page_width:.0f}")
+    print(f"  0{' ' * 48}{page_width / 2:.0f}{' ' * 47}{page_width:.0f}")
 
     # Recommendations
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("RECOMMENDATIONS FOR XY-CUT")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
-    median_font_size = sorted(font_sizes)[len(font_sizes)//2]
-    median_char_height = sorted(heights)[len(heights)//2]
+    median_font_size = sorted(font_sizes)[len(font_sizes) // 2]
+    median_char_height = sorted(heights)[len(heights) // 2]
 
-    print(f"Document properties:")
+    print("Document properties:")
     print(f"  Median font size: {median_font_size:.1f}pt")
     print(f"  Median char height: {median_char_height:.1f}pt")
     print(f"  Page width: {page_width:.1f}pt")
 
-    print(f"\nRecommended XY-Cut parameters:")
+    print("\nRecommended XY-Cut parameters:")
     print(f"  min_region_size: {3 * median_char_height:.1f}  (3× char height)")
-    print(f"  valley_threshold: Use 15-20% of average (not 10%)")
+    print("  valley_threshold: Use 15-20% of average (not 10%)")
     print(f"    → Absolute threshold: {threshold_15pct:.1f} chars per bin")
     print(f"  projection_bins: {int(page_width):.0f}  (1pt per bin, not width/2)")
 
-    print(f"\nWhy current parameters fail:")
+    print("\nWhy current parameters fail:")
     print(f"  Current valley threshold (10%): {threshold_10pct:.1f}")
     print(f"  → Finds {len(valleys_10)} valleys (too few if < 1)")
     print(f"  Better threshold (15%): {threshold_15pct:.1f}")
     print(f"  → Finds {len(valleys_15)} valleys")
 
+
 def main():
-    pdf_path = 'test_datasets/pdfs/academic/arxiv_2510.21165v1.pdf'
+    pdf_path = "test_datasets/pdfs/academic/arxiv_2510.21165v1.pdf"
     analyze_layout(pdf_path)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -3,6 +3,7 @@
 
 import pdf_oxide
 
+
 # Test problematic PDF (5PFVA6CO2FP66IJYJJ4YMWOLK5EHRCCD.pdf)
 print("=" * 80)
 print("TESTING PROBLEMATIC PDF")
@@ -18,7 +19,7 @@ print(f"\n Number of spans: {len(spans)}")
 # Get first 300 chars of text
 text = "".join([s.text for s in spans])
 print(f"Total text length: {len(text)} characters")
-print(f"\nFirst 300 chars:")
+print("\nFirst 300 chars:")
 print(text[:300])
 print()
 

@@ -4,6 +4,7 @@
 import pathlib
 import shutil
 
+
 # Files to move based on benchmark slowness
 large_files = [
     # CFR regulation files (30 files, 0.7-2.3s each)
@@ -36,7 +37,6 @@ large_files = [
     "CFR_2024_Title47_Vol1_Telecommunication.pdf",
     "CFR_2024_Title49_Vol1_Transportation.pdf",
     "CFR_2024_Title50_Vol1_Wildlife_and_Fisheries.pdf",
-
     # Internet Archive newspaper scans (4 files, 5-6s each)
     "IA_001-jan.-4-1940-dec.-30-1941a.pdf",
     "IA_001-jan.-4-1940-dec.-30-1941b.pdf",

@@ -43,20 +43,21 @@ Dual-licensed under MIT OR Apache-2.0.
 """
 
 from .pdf_oxide import (
-    PdfDocument,
     VERSION,
-    # PDF Creation
-    Pdf,
+    BlendMode,
     # Advanced Graphics
     Color,
-    BlendMode,
     ExtGState,
     LinearGradient,
-    RadialGradient,
     LineCap,
     LineJoin,
     PatternPresets,
+    # PDF Creation
+    Pdf,
+    PdfDocument,
+    RadialGradient,
 )
+
 
 __all__ = [
     "PdfDocument",
