@@ -59,19 +59,24 @@ mod image_handler;
 mod ink;
 pub mod layers;
 pub mod linearization;
+mod movie;
 mod object_serializer;
 mod outline_builder;
 mod page_labels;
 mod page_template;
 mod pattern;
 mod pdf_writer;
+mod richmedia;
+mod screen;
 mod shading;
 mod shape_annotations;
+mod sound;
 mod special_annotations;
 mod stamp;
 mod table_renderer;
 mod text_annotations;
 mod text_markup;
+mod threed;
 mod watermark;
 mod xmp_metadata;
 
@@ -112,6 +117,7 @@ pub use linearization::{
     LinearizedPdfBuilder, ObjectInfo, PageOffsetEntry, PageOffsetHeader, SharedObjectEntry,
     SharedObjectHeader,
 };
+pub use movie::{MovieActivation, MovieAnnotation, MovieData, MoviePlayMode};
 pub use object_serializer::ObjectSerializer;
 pub use outline_builder::{
     FitMode, OutlineBuildResult, OutlineBuilder, OutlineDestination, OutlineItem, OutlineStyle,
@@ -126,6 +132,14 @@ pub use pattern::{
     TilingPatternBuilder,
 };
 pub use pdf_writer::{PageBuilder, PdfWriter, PdfWriterConfig};
+pub use richmedia::{
+    RichMediaActivation, RichMediaAnnotation, RichMediaAsset, RichMediaContent,
+    RichMediaDeactivation, RichMediaSettings, RichMediaWindow,
+};
+pub use screen::{
+    MediaClip, MediaPermissions, MediaPlayParams, MediaRendition, RenditionOperation,
+    ScreenAnnotation, TemporalAccess, WindowType,
+};
 pub use shading::{
     ColorSpace as ShadingColorSpace, GradientPresets, GradientStop, LinearGradientBuilder,
     RadialGradientBuilder,
@@ -133,6 +147,7 @@ pub use shading::{
 pub use shape_annotations::{
     CaptionPosition, LineAnnotation, PolygonAnnotation, PolygonType, ShapeAnnotation, ShapeType,
 };
+pub use sound::{SoundAnnotation, SoundData, SoundEncoding, SoundIcon};
 pub use special_annotations::{
     CaretAnnotation, CaretSymbol, FileAttachmentAnnotation, FileAttachmentIcon, PopupAnnotation,
     RedactAnnotation,
@@ -144,6 +159,10 @@ pub use table_renderer::{
 };
 pub use text_annotations::TextAnnotation;
 pub use text_markup::TextMarkupAnnotation;
+pub use threed::{
+    ThreeDActivation, ThreeDAnnotation, ThreeDBackground, ThreeDCamera, ThreeDDeactivation,
+    ThreeDFormat, ThreeDLighting, ThreeDProjection, ThreeDRenderMode, ThreeDStream, ThreeDView,
+};
 pub use watermark::{FixedPrintSettings, WatermarkAnnotation};
 pub use xmp_metadata::{iso_timestamp, XmpWriter};
 

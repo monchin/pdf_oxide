@@ -145,6 +145,40 @@ impl Rect {
             && self.bottom() > other.top()
     }
 
+    /// Compute the intersection of this rectangle with another.
+    ///
+    /// Returns the overlapping region as a new rectangle, or None if they don't overlap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let r1 = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// let r2 = Rect::new(50.0, 50.0, 100.0, 100.0);
+    /// let r3 = Rect::new(200.0, 200.0, 100.0, 100.0);
+    ///
+    /// let inter = r1.intersection(&r2).unwrap();
+    /// assert_eq!(inter.x, 50.0);
+    /// assert_eq!(inter.y, 50.0);
+    /// assert_eq!(inter.width, 50.0);
+    /// assert_eq!(inter.height, 50.0);
+    ///
+    /// assert!(r1.intersection(&r3).is_none());
+    /// ```
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        if !self.intersects(other) {
+            return None;
+        }
+
+        let x = self.left().max(other.left());
+        let y = self.top().max(other.top());
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+
+        Some(Rect::new(x, y, right - x, bottom - y))
+    }
+
     /// Check if this rectangle contains a point.
     ///
     /// # Examples

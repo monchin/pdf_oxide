@@ -238,20 +238,26 @@ mod tests {
     use crate::layout::text_block::{Color, FontWeight, TextBlock, TextChar};
 
     fn create_test_block(x: f32, y: f32, text: &str) -> TextBlock {
+        let bbox = Rect {
+            x,
+            y,
+            width: 10.0,
+            height: 10.0,
+        };
         let char_data = TextChar {
             char: 'A',
-            bbox: Rect {
-                x,
-                y,
-                width: 10.0,
-                height: 10.0,
-            },
+            bbox,
             font_name: "Arial".to_string(),
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
             color: Color::black(),
             mcid: None,
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
         };
 
         TextBlock {

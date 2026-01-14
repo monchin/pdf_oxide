@@ -57,6 +57,8 @@ pub enum AnnotationSubtype {
     ThreeD,
     /// Redaction annotation - Section 12.5.6.23
     Redact,
+    /// RichMedia annotation - Adobe Extension Level 3
+    RichMedia,
     /// Unknown annotation type
     Unknown,
 }
@@ -91,6 +93,7 @@ impl AnnotationSubtype {
             Self::Watermark => "Watermark",
             Self::ThreeD => "3D",
             Self::Redact => "Redact",
+            Self::RichMedia => "RichMedia",
             Self::Unknown => "Unknown",
         }
     }
@@ -124,6 +127,7 @@ impl AnnotationSubtype {
             "Watermark" => Self::Watermark,
             "3D" => Self::ThreeD,
             "Redact" => Self::Redact,
+            "RichMedia" => Self::RichMedia,
             _ => Self::Unknown,
         }
     }

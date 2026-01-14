@@ -186,6 +186,9 @@ mod tests {
             font: FontSpec::default(),
             style: TextStyle::default(),
             reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let element = ContentElement::Text(text);
@@ -205,6 +208,9 @@ mod tests {
             font: FontSpec::default(),
             style: TextStyle::default(),
             reading_order: None,
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         });
 
         assert!(text.is_text());
@@ -222,6 +228,9 @@ mod tests {
             font: FontSpec::default(),
             style: TextStyle::default(),
             reading_order: Some(5),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         });
 
         assert_eq!(text.reading_order(), Some(5));

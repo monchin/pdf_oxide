@@ -252,20 +252,26 @@ mod tests {
         font_size: f32,
         font: &str,
     ) -> TextBlock {
+        let bbox = Rect {
+            x,
+            y,
+            width: 10.0,
+            height: 10.0,
+        };
         let char_data = TextChar {
             char: 'A',
-            bbox: Rect {
-                x,
-                y,
-                width: 10.0,
-                height: 10.0,
-            },
+            bbox,
             font_name: font.to_string(),
             font_size,
             font_weight: FontWeight::Normal,
             is_italic: false,
             color: Color::black(),
             mcid: None,
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
         };
 
         TextBlock {

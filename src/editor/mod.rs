@@ -87,6 +87,7 @@
 
 mod document_editor;
 pub mod dom;
+pub mod form_fields;
 pub mod resource_manager;
 
 pub use document_editor::{
@@ -97,5 +98,8 @@ pub use dom::{
     AnnotationId, AnnotationWrapper, ElementId, ImageElementCollectionEditor, PageEditor,
     PathElementCollectionEditor, PdfElement, PdfImage, PdfPage, PdfPath, PdfStructure, PdfTable,
     PdfText, TableElementCollectionEditor, TextElementCollectionEditor,
+};
+pub use form_fields::{
+    FormFieldType, FormFieldValue, FormFieldWrapper, ParentFieldConfig, WidgetConfig,
 };
 pub use resource_manager::ResourceManager;

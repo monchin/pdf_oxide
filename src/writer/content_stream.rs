@@ -1325,6 +1325,9 @@ mod tests {
             font: FontSpec::new("Helvetica", 12.0),
             style: TextStyle::default(),
             reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let mut builder = ContentStreamBuilder::new();
@@ -1397,6 +1400,9 @@ mod tests {
             font: FontSpec::new("Helvetica", 12.0),
             style: TextStyle::default(),
             reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let structure = StructureElement {
@@ -1555,6 +1561,8 @@ mod tests {
             color_space: ColorSpace::RGB,
             reading_order: Some(0),
             alt_text: Some("Test image".to_string()),
+            horizontal_dpi: None,
+            vertical_dpi: None,
         };
 
         let mut builder = ContentStreamBuilder::new();
@@ -1593,6 +1601,9 @@ mod tests {
             font: FontSpec::new("Helvetica", 14.0),
             style: TextStyle::default(),
             reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
         builder.add_element(&ContentElement::Text(text_content));
 
@@ -1614,6 +1625,8 @@ mod tests {
             color_space: ColorSpace::RGB,
             reading_order: Some(2),
             alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
         };
         builder.add_element(&ContentElement::Image(image));
 
@@ -1643,6 +1656,8 @@ mod tests {
             color_space: ColorSpace::RGB,
             reading_order: None,
             alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
         };
 
         let mut builder = ContentStreamBuilder::new();

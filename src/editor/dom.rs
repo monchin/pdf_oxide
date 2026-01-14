@@ -33,8 +33,8 @@
 use crate::annotation_types::AnnotationSubtype;
 use crate::annotations::Annotation as ReadAnnotation;
 use crate::elements::{
-    ContentElement, ImageContent, PathContent, PathOperation, StructureElement, TableCellContent,
-    TableContent, TextContent,
+    ContentElement, ImageContent, LineCap, LineJoin, PathContent, PathOperation, StructureElement,
+    TableCellContent, TableContent, TextContent,
 };
 use crate::geometry::Rect;
 use crate::layout::Color;
@@ -214,6 +214,48 @@ impl PdfText {
     pub fn ends_with(&self, suffix: &str) -> bool {
         self.content.text.ends_with(suffix)
     }
+
+    // === Transformation accessors (v0.3.1, Issue #27) ===
+
+    /// Get the baseline origin point if available.
+    pub fn origin(&self) -> Option<crate::geometry::Point> {
+        self.content.origin
+    }
+
+    /// Get the rotation angle in degrees if available.
+    pub fn rotation_degrees(&self) -> Option<f32> {
+        self.content.rotation_degrees
+    }
+
+    /// Get the rotation angle in radians if available.
+    pub fn rotation_radians(&self) -> Option<f32> {
+        self.content.rotation_radians()
+    }
+
+    /// Get the transformation matrix [a, b, c, d, e, f] if available.
+    pub fn matrix(&self) -> Option<[f32; 6]> {
+        self.content.get_matrix()
+    }
+
+    /// Check if this text is rotated (non-zero rotation).
+    pub fn is_rotated(&self) -> bool {
+        self.content.is_rotated()
+    }
+
+    /// Set the transformation matrix.
+    pub fn set_matrix(&mut self, matrix: [f32; 6]) {
+        self.content.matrix = Some(matrix);
+    }
+
+    /// Set the origin point.
+    pub fn set_origin(&mut self, origin: crate::geometry::Point) {
+        self.content.origin = Some(origin);
+    }
+
+    /// Set the rotation angle in degrees.
+    pub fn set_rotation(&mut self, degrees: f32) {
+        self.content.rotation_degrees = Some(degrees);
+    }
 }
 
 /// Strongly-typed image element with DOM capabilities.
@@ -256,6 +298,38 @@ impl PdfImage {
     /// Set alternative text (fluent API).
     pub fn set_alt_text(&mut self, alt: impl Into<String>) {
         self.content.alt_text = Some(alt.into());
+    }
+
+    // DPI methods (v0.3.1)
+
+    /// Get the resolution as (horizontal_dpi, vertical_dpi).
+    pub fn resolution(&self) -> Option<(f32, f32)> {
+        self.content.resolution()
+    }
+
+    /// Get the horizontal DPI.
+    pub fn horizontal_dpi(&self) -> Option<f32> {
+        self.content.get_horizontal_dpi()
+    }
+
+    /// Get the vertical DPI.
+    pub fn vertical_dpi(&self) -> Option<f32> {
+        self.content.get_vertical_dpi()
+    }
+
+    /// Check if this image is high resolution (>= 300 DPI).
+    pub fn is_high_resolution(&self) -> bool {
+        self.content.is_high_resolution()
+    }
+
+    /// Check if this image is low resolution (< 150 DPI).
+    pub fn is_low_resolution(&self) -> bool {
+        self.content.is_low_resolution()
+    }
+
+    /// Check if this image is medium resolution (>= 150 and < 300 DPI).
+    pub fn is_medium_resolution(&self) -> bool {
+        self.content.is_medium_resolution()
     }
 }
 
@@ -324,6 +398,137 @@ impl PdfPath {
     /// Check if this path has a fill.
     pub fn has_fill(&self) -> bool {
         self.content.has_fill()
+    }
+
+    /// Get the line cap style.
+    pub fn line_cap(&self) -> LineCap {
+        self.content.line_cap
+    }
+
+    /// Get the line join style.
+    pub fn line_join(&self) -> LineJoin {
+        self.content.line_join
+    }
+
+    /// Check if this is a closed path.
+    pub fn is_closed(&self) -> bool {
+        self.content
+            .operations
+            .iter()
+            .any(|op| matches!(op, PathOperation::ClosePath))
+    }
+
+    /// Convert this path to an SVG path string.
+    ///
+    /// Returns a complete SVG element that can be embedded in an SVG document.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let svg = path.to_svg();
+    /// // Returns something like:
+    /// // <path d="M 10 10 L 100 10 L 100 100 Z" stroke="black" fill="none"/>
+    /// ```
+    pub fn to_svg(&self) -> String {
+        let mut d = String::new();
+
+        for op in &self.content.operations {
+            match op {
+                PathOperation::MoveTo(x, y) => {
+                    d.push_str(&format!("M {} {} ", x, y));
+                },
+                PathOperation::LineTo(x, y) => {
+                    d.push_str(&format!("L {} {} ", x, y));
+                },
+                PathOperation::CurveTo(x1, y1, x2, y2, x3, y3) => {
+                    d.push_str(&format!("C {} {} {} {} {} {} ", x1, y1, x2, y2, x3, y3));
+                },
+                PathOperation::Rectangle(x, y, w, h) => {
+                    // SVG doesn't have a rectangle path command, so we expand it
+                    d.push_str(&format!(
+                        "M {} {} L {} {} L {} {} L {} {} Z ",
+                        x,
+                        y,
+                        x + w,
+                        y,
+                        x + w,
+                        y + h,
+                        x,
+                        y + h
+                    ));
+                },
+                PathOperation::ClosePath => {
+                    d.push_str("Z ");
+                },
+            }
+        }
+
+        let d = d.trim_end();
+
+        // Build stroke attribute
+        let stroke = if self.has_stroke() {
+            if let Some(color) = self.stroke_color() {
+                format!(
+                    "stroke=\"rgb({},{},{})\" stroke-width=\"{}\"",
+                    (color.r * 255.0) as u8,
+                    (color.g * 255.0) as u8,
+                    (color.b * 255.0) as u8,
+                    self.stroke_width()
+                )
+            } else {
+                "stroke=\"black\"".to_string()
+            }
+        } else {
+            "stroke=\"none\"".to_string()
+        };
+
+        // Build fill attribute
+        let fill = if self.has_fill() {
+            if let Some(color) = self.fill_color() {
+                format!(
+                    "fill=\"rgb({},{},{})\"",
+                    (color.r * 255.0) as u8,
+                    (color.g * 255.0) as u8,
+                    (color.b * 255.0) as u8
+                )
+            } else {
+                "fill=\"black\"".to_string()
+            }
+        } else {
+            "fill=\"none\"".to_string()
+        };
+
+        // Build line cap attribute
+        let line_cap_attr = match self.line_cap() {
+            LineCap::Butt => "",
+            LineCap::Round => " stroke-linecap=\"round\"",
+            LineCap::Square => " stroke-linecap=\"square\"",
+        };
+
+        // Build line join attribute
+        let line_join_attr = match self.line_join() {
+            LineJoin::Miter => "",
+            LineJoin::Round => " stroke-linejoin=\"round\"",
+            LineJoin::Bevel => " stroke-linejoin=\"bevel\"",
+        };
+
+        format!("<path d=\"{}\" {} {}{}{}/>", d, stroke, fill, line_cap_attr, line_join_attr)
+    }
+
+    /// Convert this path to an SVG document.
+    ///
+    /// Returns a complete SVG document with viewport set to the path's bounding box.
+    pub fn to_svg_document(&self) -> String {
+        let bbox = self.bbox();
+        let path_element = self.to_svg();
+
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="{} {} {} {}" width="{}" height="{}">
+  {}
+</svg>"#,
+            bbox.x, bbox.y, bbox.width, bbox.height, bbox.width, bbox.height, path_element
+        )
     }
 }
 
@@ -716,6 +921,11 @@ impl AnnotationWrapper {
             WriteAnnotation::FileAttachment(_) => AnnotationSubtype::FileAttachment,
             WriteAnnotation::Redact(_) => AnnotationSubtype::Redact,
             WriteAnnotation::Watermark(_) => AnnotationSubtype::Watermark,
+            WriteAnnotation::Sound(_) => AnnotationSubtype::Sound,
+            WriteAnnotation::Movie(_) => AnnotationSubtype::Movie,
+            WriteAnnotation::Screen(_) => AnnotationSubtype::Screen,
+            WriteAnnotation::ThreeD(_) => AnnotationSubtype::ThreeD,
+            WriteAnnotation::RichMedia(_) => AnnotationSubtype::RichMedia,
         }
     }
 }
@@ -1858,6 +2068,9 @@ mod tests {
             },
             style: TextStyle::default(),
             reading_order: None,
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         }
     }
 

@@ -5,7 +5,7 @@
 
 use crate::document::PdfDocument;
 use crate::error::{Error, Result};
-use crate::object::Object;
+use crate::object::{Object, ObjectRef};
 
 /// A form field extracted from a PDF AcroForm.
 #[derive(Debug, Clone)]
@@ -22,6 +22,24 @@ pub struct FormField {
     pub full_name: String,
     /// Field bounding box from /Rect key [x1, y1, x2, y2]
     pub bounds: Option<[f64; 4]>,
+
+    // === Additional properties for modification support ===
+    /// Object reference for updating existing fields
+    pub object_ref: Option<ObjectRef>,
+    /// Field flags from /Ff key (ReadOnly, Required, NoExport, etc.)
+    pub flags: Option<u32>,
+    /// Default value from /DV key
+    pub default_value: Option<FieldValue>,
+    /// Maximum length for text fields from /MaxLen key
+    pub max_length: Option<u32>,
+    /// Text alignment from /Q key (0=left, 1=center, 2=right)
+    pub alignment: Option<u32>,
+    /// Default appearance string from /DA key
+    pub default_appearance: Option<String>,
+    /// Border style from /BS key
+    pub border_style: Option<BorderStyle>,
+    /// Appearance characteristics from /MK key
+    pub appearance_chars: Option<AppearanceCharacteristics>,
 }
 
 /// Field type from /FT key in field dictionary.
@@ -40,7 +58,7 @@ pub enum FieldType {
 }
 
 /// Field value from /V key in field dictionary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     /// Text string value
     Text(String),
@@ -52,6 +70,129 @@ pub enum FieldValue {
     Array(Vec<String>),
     /// No value present
     None,
+}
+
+/// Border style from /BS dictionary (PDF Table 166).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderStyle {
+    /// Border width in points
+    pub width: f32,
+    /// Border style type
+    pub style: BorderStyleType,
+    /// Dash pattern for dashed borders
+    pub dash_array: Option<Vec<u32>>,
+}
+
+impl Default for BorderStyle {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            style: BorderStyleType::Solid,
+            dash_array: None,
+        }
+    }
+}
+
+/// Border style type from /S key in /BS dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BorderStyleType {
+    /// Solid border
+    #[default]
+    Solid,
+    /// Dashed border
+    Dashed,
+    /// Beveled border (3D effect, raised)
+    Beveled,
+    /// Inset border (3D effect, recessed)
+    Inset,
+    /// Underline only
+    Underline,
+}
+
+impl BorderStyleType {
+    /// Parse from PDF name.
+    pub fn from_pdf_name(name: &str) -> Self {
+        match name {
+            "S" => BorderStyleType::Solid,
+            "D" => BorderStyleType::Dashed,
+            "B" => BorderStyleType::Beveled,
+            "I" => BorderStyleType::Inset,
+            "U" => BorderStyleType::Underline,
+            _ => BorderStyleType::Solid,
+        }
+    }
+
+    /// Convert to PDF name.
+    pub fn to_pdf_name(&self) -> &'static str {
+        match self {
+            BorderStyleType::Solid => "S",
+            BorderStyleType::Dashed => "D",
+            BorderStyleType::Beveled => "B",
+            BorderStyleType::Inset => "I",
+            BorderStyleType::Underline => "U",
+        }
+    }
+}
+
+/// Appearance characteristics from /MK dictionary (PDF Table 189).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AppearanceCharacteristics {
+    /// Background color (BG) - RGB values 0.0-1.0
+    pub background_color: Option<[f32; 3]>,
+    /// Border color (BC) - RGB values 0.0-1.0
+    pub border_color: Option<[f32; 3]>,
+    /// Normal caption (CA) - text shown on button
+    pub caption: Option<String>,
+    /// Rollover caption (RC) - text shown when hovering
+    pub rollover_caption: Option<String>,
+    /// Alternate caption (AC) - text shown when pressed
+    pub alternate_caption: Option<String>,
+    /// Rotation angle in degrees (R)
+    pub rotation: Option<u32>,
+}
+
+/// Field flag constants from PDF Table 221.
+pub mod field_flags {
+    /// Field is read-only (bit 1)
+    pub const READ_ONLY: u32 = 1;
+    /// Field is required (bit 2)
+    pub const REQUIRED: u32 = 1 << 1;
+    /// Field should not be exported (bit 3)
+    pub const NO_EXPORT: u32 = 1 << 2;
+
+    // Text field flags (PDF Table 228)
+    /// Text field allows multiple lines (bit 13)
+    pub const MULTILINE: u32 = 1 << 12;
+    /// Text field is a password field (bit 14)
+    pub const PASSWORD: u32 = 1 << 13;
+    /// Text field does not scroll (bit 24)
+    pub const DO_NOT_SCROLL: u32 = 1 << 23;
+    /// Text field allows comb formatting (bit 25)
+    pub const COMB: u32 = 1 << 24;
+    /// Text field is a rich text field (bit 26)
+    pub const RICH_TEXT: u32 = 1 << 25;
+
+    // Button field flags (PDF Table 226)
+    /// Button is a push button (bit 17)
+    pub const PUSH_BUTTON: u32 = 1 << 16;
+    /// Radio button (bit 16)
+    pub const RADIO: u32 = 1 << 15;
+    /// Radio buttons in group are exclusive (bit 26)
+    pub const RADIOS_IN_UNISON: u32 = 1 << 25;
+
+    // Choice field flags (PDF Table 230)
+    /// Choice is a combo box (bit 18)
+    pub const COMBO: u32 = 1 << 17;
+    /// Choice field is editable (bit 19)
+    pub const EDIT: u32 = 1 << 18;
+    /// Choice field is sorted (bit 20)
+    pub const SORT: u32 = 1 << 19;
+    /// Choice field allows multiple selection (bit 22)
+    pub const MULTI_SELECT: u32 = 1 << 21;
+    /// Do not spell check (bit 23)
+    pub const DO_NOT_SPELL_CHECK: u32 = 1 << 22;
+    /// Commit on change (bit 27)
+    pub const COMMIT_ON_SEL_CHANGE: u32 = 1 << 26;
 }
 
 /// AcroForm extractor.
@@ -194,6 +335,9 @@ impl FormExtractor {
         parent_name: &str,
         result: &mut Vec<FormField>,
     ) -> Result<()> {
+        // Capture object reference for later modification support
+        let object_ref = field_ref.as_reference();
+
         // Resolve field dictionary
         let field = Self::resolve_object(doc, field_ref)?;
         let field_dict = match field.as_dict() {
@@ -278,6 +422,58 @@ impl FormExtractor {
                 }
             });
 
+        // Extract field flags /Ff
+        let flags = field_dict
+            .get("Ff")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| match obj {
+                Object::Integer(i) => Some(i as u32),
+                _ => None,
+            });
+
+        // Extract default value /DV
+        let default_value = field_dict
+            .get("DV")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .map(|obj| Self::parse_field_value(&obj, &field_type));
+
+        // Extract max length /MaxLen (text fields only)
+        let max_length = field_dict
+            .get("MaxLen")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| match obj {
+                Object::Integer(i) => Some(i as u32),
+                _ => None,
+            });
+
+        // Extract text alignment /Q (0=left, 1=center, 2=right)
+        let alignment = field_dict
+            .get("Q")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| match obj {
+                Object::Integer(i) => Some(i as u32),
+                _ => None,
+            });
+
+        // Extract default appearance /DA
+        let default_appearance = field_dict
+            .get("DA")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| obj.as_string().map(|s| s.to_vec()))
+            .and_then(|bytes| Self::decode_text_string(&bytes));
+
+        // Extract border style /BS
+        let border_style = field_dict
+            .get("BS")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| Self::parse_border_style(&obj));
+
+        // Extract appearance characteristics /MK
+        let appearance_chars = field_dict
+            .get("MK")
+            .and_then(|obj| Self::resolve_object(doc, obj).ok())
+            .and_then(|obj| Self::parse_appearance_characteristics(doc, &obj));
+
         // Create form field
         let form_field = FormField {
             name: partial_name,
@@ -286,6 +482,14 @@ impl FormExtractor {
             tooltip,
             full_name,
             bounds,
+            object_ref,
+            flags,
+            default_value,
+            max_length,
+            alignment,
+            default_appearance,
+            border_style,
+            appearance_chars,
         };
 
         result.push(form_field);
@@ -347,6 +551,170 @@ impl FormExtractor {
             },
             _ => FieldValue::None,
         }
+    }
+
+    /// Parse border style from /BS dictionary.
+    fn parse_border_style(obj: &Object) -> Option<BorderStyle> {
+        let dict = obj.as_dict()?;
+
+        let width = dict
+            .get("W")
+            .and_then(|o| match o {
+                Object::Integer(i) => Some(*i as f32),
+                Object::Real(f) => Some(*f as f32),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+
+        let style = dict
+            .get("S")
+            .and_then(|o| o.as_name())
+            .map(BorderStyleType::from_pdf_name)
+            .unwrap_or(BorderStyleType::Solid);
+
+        let dash_array = dict.get("D").and_then(|o| o.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|item| match item {
+                    Object::Integer(i) => Some(*i as u32),
+                    _ => None,
+                })
+                .collect()
+        });
+
+        Some(BorderStyle {
+            width,
+            style,
+            dash_array,
+        })
+    }
+
+    /// Parse appearance characteristics from /MK dictionary.
+    fn parse_appearance_characteristics(
+        doc: &mut PdfDocument,
+        obj: &Object,
+    ) -> Option<AppearanceCharacteristics> {
+        let dict = obj.as_dict()?;
+
+        let parse_color = |arr: &[Object]| -> Option<[f32; 3]> {
+            if arr.len() == 3 {
+                let r = match &arr[0] {
+                    Object::Integer(i) => *i as f32,
+                    Object::Real(f) => *f as f32,
+                    _ => return None,
+                };
+                let g = match &arr[1] {
+                    Object::Integer(i) => *i as f32,
+                    Object::Real(f) => *f as f32,
+                    _ => return None,
+                };
+                let b = match &arr[2] {
+                    Object::Integer(i) => *i as f32,
+                    Object::Real(f) => *f as f32,
+                    _ => return None,
+                };
+                Some([r, g, b])
+            } else {
+                None
+            }
+        };
+
+        let background_color = dict
+            .get("BG")
+            .and_then(|o| Self::resolve_object(doc, o).ok())
+            .and_then(|o| o.as_array().cloned())
+            .and_then(|arr| parse_color(&arr));
+
+        let border_color = dict
+            .get("BC")
+            .and_then(|o| Self::resolve_object(doc, o).ok())
+            .and_then(|o| o.as_array().cloned())
+            .and_then(|arr| parse_color(&arr));
+
+        let caption = dict
+            .get("CA")
+            .and_then(|o| Self::resolve_object(doc, o).ok())
+            .and_then(|o| o.as_string().map(|s| s.to_vec()))
+            .and_then(|bytes| Self::decode_text_string(&bytes));
+
+        let rollover_caption = dict
+            .get("RC")
+            .and_then(|o| Self::resolve_object(doc, o).ok())
+            .and_then(|o| o.as_string().map(|s| s.to_vec()))
+            .and_then(|bytes| Self::decode_text_string(&bytes));
+
+        let alternate_caption = dict
+            .get("AC")
+            .and_then(|o| Self::resolve_object(doc, o).ok())
+            .and_then(|o| o.as_string().map(|s| s.to_vec()))
+            .and_then(|bytes| Self::decode_text_string(&bytes));
+
+        let rotation = dict.get("R").and_then(|o| match o {
+            Object::Integer(i) => Some(*i as u32),
+            _ => None,
+        });
+
+        Some(AppearanceCharacteristics {
+            background_color,
+            border_color,
+            caption,
+            rollover_caption,
+            alternate_caption,
+            rotation,
+        })
+    }
+
+    /// Export form field data to FDF format.
+    ///
+    /// Extracts all form fields from the document and writes them to an FDF file.
+    ///
+    /// # Arguments
+    ///
+    /// * `doc` - The PDF document to extract fields from
+    /// * `output_path` - Path to write the FDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::document::PdfDocument;
+    /// use pdf_oxide::extractors::forms::FormExtractor;
+    ///
+    /// let mut doc = PdfDocument::open("form.pdf")?;
+    /// FormExtractor::export_fdf(&mut doc, "form_data.fdf")?;
+    /// ```
+    pub fn export_fdf(
+        doc: &mut PdfDocument,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        let fields = Self::extract_fields(doc)?;
+        let writer = crate::fdf::FdfWriter::from_fields(fields);
+        writer.write_to_file(output_path)
+    }
+
+    /// Export form field data to XFDF format.
+    ///
+    /// Extracts all form fields from the document and writes them to an XFDF file.
+    ///
+    /// # Arguments
+    ///
+    /// * `doc` - The PDF document to extract fields from
+    /// * `output_path` - Path to write the XFDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::document::PdfDocument;
+    /// use pdf_oxide::extractors::forms::FormExtractor;
+    ///
+    /// let mut doc = PdfDocument::open("form.pdf")?;
+    /// FormExtractor::export_xfdf(&mut doc, "form_data.xfdf")?;
+    /// ```
+    pub fn export_xfdf(
+        doc: &mut PdfDocument,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        let fields = Self::extract_fields(doc)?;
+        let writer = crate::fdf::XfdfWriter::from_fields(fields);
+        writer.write_to_file(output_path)
     }
 }
 

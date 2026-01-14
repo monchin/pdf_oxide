@@ -154,6 +154,12 @@ pub mod pipeline;
 // PDF writing/creation (v0.3.0)
 pub mod writer;
 
+// FDF/XFDF form data export (v0.3.3)
+pub mod fdf;
+
+// XFA forms support (v0.3.2)
+pub mod xfa;
+
 // PDF editing (v0.3.0)
 pub mod editor;
 

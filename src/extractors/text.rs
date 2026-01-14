@@ -3207,6 +3207,12 @@ impl TextExtractor {
                                             .map(|font| font.is_italic())
                                             .unwrap_or(false);
                                         let font_name_str = font_name.unwrap_or_default();
+                                        // Compose CTM and text_matrix for full transformation
+                                        let final_matrix = ctm.multiply(&text_matrix);
+                                        // Calculate rotation from matrix: atan2(b, a)
+                                        let rotation_degrees =
+                                            final_matrix.b.atan2(final_matrix.a).to_degrees();
+
                                         let space_char = TextChar {
                                             char: ' ',
                                             bbox: Rect::new(
@@ -3221,6 +3227,19 @@ impl TextExtractor {
                                             color: Color::new(r, g, b),
                                             mcid: self.current_mcid,
                                             is_italic: is_italic_space,
+                                            // Transformation properties (v0.3.1)
+                                            origin_x: pos.x,
+                                            origin_y: pos.y,
+                                            rotation_degrees,
+                                            advance_width: tx.abs(),
+                                            matrix: Some([
+                                                final_matrix.a,
+                                                final_matrix.b,
+                                                final_matrix.c,
+                                                final_matrix.d,
+                                                final_matrix.e,
+                                                final_matrix.f,
+                                            ]),
                                         };
                                         self.chars.push(space_char);
                                     }
@@ -5040,6 +5059,12 @@ impl TextExtractor {
             let (r, g, b) = fill_color_rgb;
             let color = Color::new(r, g, b);
 
+            // Compose CTM and text_matrix for full transformation (v0.3.1)
+            // This gives us the complete transformation from text space to device space
+            let final_matrix = ctm.multiply(&text_matrix);
+            // Calculate rotation from matrix: atan2(b, a)
+            let rotation_degrees = final_matrix.b.atan2(final_matrix.a).to_degrees();
+
             // Process each character in the expanded string
             // For ligatures (e.g., "fi" from ﬁ), we create multiple TextChar objects
             // and distribute them horizontally across the glyph width
@@ -5071,15 +5096,33 @@ impl TextExtractor {
                         .and_then(|name| self.fonts.get(name))
                         .map(|font| font.is_italic())
                         .unwrap_or(false);
+
+                    // Calculate origin position for this character
+                    let char_origin_x = pos.x + x_offset;
+                    let char_origin_y = pos.y;
+
                     let text_char = TextChar {
                         char: unicode_char,
-                        bbox: Rect::new(pos.x + x_offset, pos.y, char_width, height),
+                        bbox: Rect::new(char_origin_x, char_origin_y, char_width, height),
                         font_name: font_name_str,
                         font_size: effective_font_size,
                         font_weight,
                         color,
                         mcid: self.current_mcid,
                         is_italic: is_italic_char,
+                        // Transformation properties (v0.3.1, Issue #27)
+                        origin_x: char_origin_x,
+                        origin_y: char_origin_y,
+                        rotation_degrees,
+                        advance_width: char_width,
+                        matrix: Some([
+                            final_matrix.a,
+                            final_matrix.b,
+                            final_matrix.c,
+                            final_matrix.d,
+                            final_matrix.e + x_offset, // Adjust translation for char position
+                            final_matrix.f,
+                        ]),
                     };
 
                     self.chars.push(text_char);

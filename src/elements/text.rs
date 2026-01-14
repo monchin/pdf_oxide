@@ -3,7 +3,7 @@
 //! This module provides the `TextContent` type and related structures
 //! for representing text in PDFs.
 
-use crate::geometry::Rect;
+use crate::geometry::{Point, Rect};
 use crate::layout::{Color, FontWeight, TextSpan};
 
 /// Text content that can be extracted from or written to a PDF.
@@ -23,6 +23,14 @@ pub struct TextContent {
     pub style: TextStyle,
     /// Reading order index (for extraction) or write order (for generation)
     pub reading_order: Option<usize>,
+
+    // Transformation properties (v0.3.1, Issue #27)
+    /// Baseline origin point (extracted from text matrix)
+    pub origin: Option<Point>,
+    /// Rotation angle in degrees (0-360)
+    pub rotation_degrees: Option<f32>,
+    /// Full transformation matrix [a, b, c, d, e, f]
+    pub matrix: Option<[f32; 6]>,
 }
 
 impl TextContent {
@@ -48,6 +56,9 @@ impl TextContent {
             font,
             style,
             reading_order: None,
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         }
     }
 
@@ -71,6 +82,43 @@ impl TextContent {
     pub fn font_size(&self) -> f32 {
         self.font.size
     }
+
+    // Transformation methods (v0.3.1, Issue #27)
+
+    /// Set the transformation matrix.
+    pub fn with_matrix(mut self, matrix: [f32; 6]) -> Self {
+        self.matrix = Some(matrix);
+        self
+    }
+
+    /// Set the origin point.
+    pub fn with_origin(mut self, origin: Point) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Set the rotation angle in degrees.
+    pub fn with_rotation(mut self, degrees: f32) -> Self {
+        self.rotation_degrees = Some(degrees);
+        self
+    }
+
+    /// Check if this text is rotated (non-zero rotation).
+    pub fn is_rotated(&self) -> bool {
+        self.rotation_degrees
+            .map(|r| r.abs() > 0.1)
+            .unwrap_or(false)
+    }
+
+    /// Get rotation angle in radians.
+    pub fn rotation_radians(&self) -> Option<f32> {
+        self.rotation_degrees.map(|d| d.to_radians())
+    }
+
+    /// Get the transformation matrix if available.
+    pub fn get_matrix(&self) -> Option<[f32; 6]> {
+        self.matrix
+    }
 }
 
 /// Convert from TextSpan (extraction result) to TextContent (unified representation).
@@ -91,6 +139,10 @@ impl From<TextSpan> for TextContent {
                 strikethrough: false,
             },
             reading_order: Some(span.sequence),
+            // Transformation data not available from TextSpan
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         }
     }
 }
@@ -360,6 +412,9 @@ mod tests {
             font: FontSpec::new("Helvetica", 14.0),
             style: TextStyle::bold(),
             reading_order: Some(7),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let span: TextSpan = content.into();
@@ -369,5 +424,40 @@ mod tests {
         assert_eq!(span.font_size, 14.0);
         assert!(span.font_weight.is_bold());
         assert_eq!(span.sequence, 7);
+    }
+
+    #[test]
+    fn test_text_content_transformation_methods() {
+        let content = TextContent::new(
+            "Rotated",
+            Rect::new(100.0, 200.0, 50.0, 12.0),
+            FontSpec::default(),
+            TextStyle::default(),
+        )
+        .with_origin(Point::new(100.0, 200.0))
+        .with_rotation(45.0)
+        .with_matrix([0.707, 0.707, -0.707, 0.707, 100.0, 200.0]);
+
+        assert!(content.is_rotated());
+        assert_eq!(content.rotation_degrees, Some(45.0));
+        assert!(
+            content.rotation_radians().unwrap() > 0.78
+                && content.rotation_radians().unwrap() < 0.79
+        );
+        assert_eq!(content.origin, Some(Point::new(100.0, 200.0)));
+        assert!(content.get_matrix().is_some());
+    }
+
+    #[test]
+    fn test_text_content_not_rotated() {
+        let content = TextContent::new(
+            "Normal",
+            Rect::new(0.0, 0.0, 50.0, 12.0),
+            FontSpec::default(),
+            TextStyle::default(),
+        )
+        .with_rotation(0.0);
+
+        assert!(!content.is_rotated());
     }
 }

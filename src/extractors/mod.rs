@@ -1,6 +1,6 @@
 //! Text and content extraction from PDF documents.
 //!
-//! Provides high-performance extraction of text, images, and layout analysis.
+//! Provides high-performance extraction of text, images, paths, and layout analysis.
 
 pub mod ccitt_bilevel;
 pub mod forms;
@@ -9,6 +9,7 @@ pub mod geometric_spacing;
 pub mod hierarchical;
 pub mod images;
 pub mod page_labels;
+pub mod paths;
 pub mod pattern_detector;
 pub mod structured;
 pub mod synthetic_structure;
@@ -27,6 +28,7 @@ pub use geometric_spacing::{should_insert_space, SpaceInsertion, SpacingConfig};
 pub use hierarchical::HierarchicalExtractor;
 pub use images::{extract_image_from_xobject, ColorSpace, ImageData, PdfImage, PixelFormat};
 pub use page_labels::{PageLabelExtractor, PageLabelRange, PageLabelStyle};
+pub use paths::{FillRule, PathExtractor};
 pub use pattern_detector::{PatternDetector, PatternPreservationConfig};
 pub use structured::{
     BoundingBox, DocumentElement, DocumentMetadata, ExtractorConfig, ListItem, StructuredDocument,

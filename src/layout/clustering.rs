@@ -422,15 +422,21 @@ mod tests {
     use crate::layout::{Color, FontWeight};
 
     fn mock_char(c: char, x: f32, y: f32) -> TextChar {
+        let bbox = Rect::new(x, y, 10.0, 12.0);
         TextChar {
             char: c,
-            bbox: Rect::new(x, y, 10.0, 12.0),
+            bbox,
             font_name: "Times".to_string(),
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             color: Color::black(),
             mcid: None,
             is_italic: false,
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
         }
     }
 

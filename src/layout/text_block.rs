@@ -84,6 +84,16 @@ pub struct TextSpan {
 /// NOTE: This is kept for backward compatibility and special use cases.
 /// For normal text extraction, prefer TextSpan which represents complete
 /// text strings as the PDF provides them.
+///
+/// ## Transformation Properties (v0.3.1+)
+///
+/// TextChar now includes transformation information for precise text positioning:
+/// - `origin_x`, `origin_y`: Baseline position (where the character sits)
+/// - `rotation_degrees`: Text rotation angle
+/// - `advance_width`: Horizontal distance to next character
+/// - `matrix`: Full 6-element transformation matrix for advanced use cases
+///
+/// These properties match industry standards (MuPDF, iText, PDFBox, pdfium-render).
 #[derive(Debug, Clone)]
 pub struct TextChar {
     /// The character itself
@@ -105,6 +115,184 @@ pub struct TextChar {
     /// This field stores the MCID if this character was extracted within
     /// a marked content sequence in a Tagged PDF.
     pub mcid: Option<u32>,
+
+    // === Transformation properties (v0.3.1, Issue #27) ===
+    /// Baseline origin X coordinate.
+    ///
+    /// This is the X position where the character's baseline starts,
+    /// which is the standard reference point for text positioning in PDFs.
+    /// Unlike bbox.x which is the left edge of the glyph, origin_x is
+    /// the typographic origin point.
+    pub origin_x: f32,
+
+    /// Baseline origin Y coordinate.
+    ///
+    /// This is the Y position of the character's baseline. For horizontal
+    /// text, this is where the bottom of letters like 'a', 'x' sit, while
+    /// letters with descenders like 'g', 'y' extend below this line.
+    pub origin_y: f32,
+
+    /// Rotation angle in degrees (0-360, clockwise from horizontal).
+    ///
+    /// Calculated from the text transformation matrix using atan2(b, a).
+    /// - 0° = normal horizontal text (left to right)
+    /// - 90° = vertical text (top to bottom)
+    /// - 180° = upside down text
+    /// - 270° = vertical text (bottom to top)
+    pub rotation_degrees: f32,
+
+    /// Horizontal advance width (distance to next character position).
+    ///
+    /// This is the amount the text position advances after drawing this
+    /// character, accounting for character width and any spacing. Used
+    /// for precise text layout calculations.
+    pub advance_width: f32,
+
+    /// Full transformation matrix [a, b, c, d, e, f].
+    ///
+    /// The composed text matrix (CTM × Tm) that transforms this character
+    /// from text space to device space. Provides complete transformation
+    /// info for advanced use cases like re-rendering or precise positioning.
+    ///
+    /// Matrix layout:
+    /// ```text
+    /// [ a  b  0 ]
+    /// [ c  d  0 ]
+    /// [ e  f  1 ]
+    /// ```
+    /// Where (a,d) = scaling, (b,c) = rotation/skew, (e,f) = translation.
+    pub matrix: Option<[f32; 6]>,
+}
+
+impl TextChar {
+    /// Get the rotation angle in radians.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use pdf_oxide::layout::TextChar;
+    ///
+    /// let char = // ... create TextChar with rotation_degrees = 90.0
+    /// assert!((char.rotation_radians() - std::f32::consts::FRAC_PI_2).abs() < 0.01);
+    /// ```
+    pub fn rotation_radians(&self) -> f32 {
+        self.rotation_degrees.to_radians()
+    }
+
+    /// Check if this character is rotated (non-zero rotation).
+    ///
+    /// Returns true if the rotation angle is greater than 0.01 degrees,
+    /// which accounts for floating-point precision while detecting
+    /// intentional rotation.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use pdf_oxide::layout::TextChar;
+    ///
+    /// let normal_char = // ... rotation_degrees = 0.0
+    /// assert!(!normal_char.is_rotated());
+    ///
+    /// let rotated_char = // ... rotation_degrees = 45.0
+    /// assert!(rotated_char.is_rotated());
+    /// ```
+    pub fn is_rotated(&self) -> bool {
+        self.rotation_degrees.abs() > 0.01
+    }
+
+    /// Set the transformation matrix and update derived values.
+    ///
+    /// This method sets the full transformation matrix and automatically
+    /// calculates the rotation angle and origin from the matrix components.
+    ///
+    /// # Arguments
+    ///
+    /// * `matrix` - A 6-element transformation matrix [a, b, c, d, e, f]
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use pdf_oxide::layout::TextChar;
+    ///
+    /// let mut char = // ... create TextChar
+    /// // Set a 45-degree rotation matrix
+    /// let cos45 = 0.707;
+    /// let sin45 = 0.707;
+    /// char.with_matrix([cos45, sin45, -sin45, cos45, 100.0, 200.0]);
+    ///
+    /// assert!((char.rotation_degrees - 45.0).abs() < 0.5);
+    /// assert_eq!(char.origin_x, 100.0);
+    /// assert_eq!(char.origin_y, 200.0);
+    /// ```
+    pub fn with_matrix(mut self, matrix: [f32; 6]) -> Self {
+        self.matrix = Some(matrix);
+        // Extract origin from translation components
+        self.origin_x = matrix[4];
+        self.origin_y = matrix[5];
+        // Calculate rotation from matrix: atan2(b, a)
+        self.rotation_degrees = matrix[1].atan2(matrix[0]).to_degrees();
+        self
+    }
+
+    /// Get the transformation matrix, computing from basic values if not stored.
+    ///
+    /// If the matrix was stored during extraction, returns it directly.
+    /// Otherwise, reconstructs a basic matrix from origin and rotation.
+    ///
+    /// # Returns
+    ///
+    /// A 6-element transformation matrix [a, b, c, d, e, f]
+    pub fn get_matrix(&self) -> [f32; 6] {
+        if let Some(m) = self.matrix {
+            m
+        } else {
+            // Reconstruct matrix from rotation and origin
+            let rad = self.rotation_radians();
+            let cos_r = rad.cos();
+            let sin_r = rad.sin();
+            [cos_r, sin_r, -sin_r, cos_r, self.origin_x, self.origin_y]
+        }
+    }
+
+    /// Create a simple TextChar with default transformation values.
+    ///
+    /// This is a convenience constructor for creating TextChar instances
+    /// when transformation data is not available (e.g., programmatic creation).
+    /// The origin defaults to the bbox position, rotation to 0, and
+    /// advance_width to the bbox width.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use pdf_oxide::layout::{TextChar, FontWeight, Color};
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let char = TextChar::simple(
+    ///     'A',
+    ///     Rect::new(100.0, 200.0, 10.0, 12.0),
+    ///     "Helvetica".to_string(),
+    ///     12.0,
+    /// );
+    /// assert_eq!(char.origin_x, 100.0);
+    /// assert_eq!(char.rotation_degrees, 0.0);
+    /// ```
+    pub fn simple(char: char, bbox: Rect, font_name: String, font_size: f32) -> Self {
+        Self {
+            char,
+            bbox,
+            font_name,
+            font_size,
+            font_weight: FontWeight::Normal,
+            is_italic: false,
+            color: Color::black(),
+            mcid: None,
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
+        }
+    }
 }
 
 /// Font weight classification following PDF spec numeric scale.
@@ -441,15 +629,22 @@ mod tests {
     use super::*;
 
     fn mock_char(c: char, x: f32, y: f32) -> TextChar {
+        let bbox = Rect::new(x, y, 10.0, 12.0);
         TextChar {
             char: c,
-            bbox: Rect::new(x, y, 10.0, 12.0),
+            bbox,
             font_name: "Times".to_string(),
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
             color: Color::black(),
             mcid: None,
+            // Transformation fields (v0.3.1)
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
         }
     }
 
@@ -490,16 +685,22 @@ mod tests {
 
     #[test]
     fn test_text_block_bold_detection() {
+        let bbox = Rect::new(0.0, 0.0, 10.0, 12.0);
         let chars = vec![
             TextChar {
                 char: 'B',
-                bbox: Rect::new(0.0, 0.0, 10.0, 12.0),
+                bbox,
                 font_name: "Times".to_string(),
                 font_size: 12.0,
                 font_weight: FontWeight::Bold,
                 is_italic: false,
                 color: Color::black(),
                 mcid: None,
+                origin_x: bbox.x,
+                origin_y: bbox.y,
+                rotation_degrees: 0.0,
+                advance_width: bbox.width,
+                matrix: None,
             },
             mock_char('o', 10.0, 0.0),
             mock_char('l', 20.0, 0.0),
@@ -513,15 +714,21 @@ mod tests {
 
     #[test]
     fn test_text_block_center() {
+        let bbox = Rect::new(0.0, 0.0, 100.0, 50.0);
         let chars = vec![TextChar {
             char: 'A',
-            bbox: Rect::new(0.0, 0.0, 100.0, 50.0),
+            bbox,
             font_name: "Times".to_string(),
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
             color: Color::black(),
             mcid: None,
+            origin_x: bbox.x,
+            origin_y: bbox.y,
+            rotation_degrees: 0.0,
+            advance_width: bbox.width,
+            matrix: None,
         }];
 
         let block = TextBlock::from_chars(chars);

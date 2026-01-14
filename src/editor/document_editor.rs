@@ -3,13 +3,15 @@
 //! Provides the DocumentEditor type for modifying PDF documents.
 
 use crate::document::PdfDocument;
+use crate::editor::form_fields::FormFieldWrapper;
 use crate::editor::resource_manager::ResourceManager;
 use crate::elements::StructureElement;
 use crate::error::{Error, Result};
 use crate::extractors::HierarchicalExtractor;
+use crate::geometry::Rect;
 use crate::object::{Object, ObjectRef};
 use crate::writer::{ContentStreamBuilder, ObjectSerializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
@@ -481,6 +483,12 @@ pub struct DocumentEditor {
     remove_acroform: bool,
     /// Embedded files to add to the document
     embedded_files: Vec<crate::writer::EmbeddedFile>,
+    /// Modified or new form fields (field name → wrapper)
+    modified_form_fields: HashMap<String, FormFieldWrapper>,
+    /// Deleted form field names
+    deleted_form_fields: HashSet<String>,
+    /// Flag indicating AcroForm dictionary needs rebuilding on save
+    acroform_modified: bool,
 }
 
 /// Tracks modified page properties.
@@ -578,6 +586,9 @@ impl DocumentEditor {
             flatten_forms_pages: std::collections::HashSet::new(),
             remove_acroform: false,
             embedded_files: Vec::new(),
+            modified_form_fields: HashMap::new(),
+            deleted_form_fields: HashSet::new(),
+            acroform_modified: false,
         })
     }
 
@@ -1175,6 +1186,108 @@ impl DocumentEditor {
             }
         }
 
+        // Pre-allocate form field IDs and build AcroForm if we have form field changes
+        // Stores: (page_index, object_id, wrapper, is_root_field)
+        let mut all_form_field_data: Vec<(usize, u32, FormFieldWrapper, bool)> = Vec::new();
+        // Map field name -> allocated ObjectRef (for parent/child linking)
+        let mut field_name_to_ref: HashMap<String, ObjectRef> = HashMap::new();
+
+        if self.acroform_modified && !self.remove_acroform {
+            // Collect all modified form fields (new AND modified existing)
+            // FIX: Previously filtered only is_new(), missing modified existing fields
+            let mut all_wrappers: Vec<_> = self
+                .modified_form_fields
+                .values()
+                .filter(|w| w.is_new() || w.is_modified())
+                .cloned()
+                .collect();
+
+            // Sort: parent-only fields first, then terminal fields
+            // This ensures parents get IDs before children that reference them
+            all_wrappers.sort_by(|a, b| {
+                let a_parent = a.is_parent_only();
+                let b_parent = b.is_parent_only();
+                // Parents first, then by name for deterministic ordering
+                match (a_parent, b_parent) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name().cmp(b.name()),
+                }
+            });
+
+            // First pass: allocate IDs for all fields
+            for wrapper in &all_wrappers {
+                let field_id = self.allocate_object_id();
+                let field_ref = ObjectRef::new(field_id, 0);
+                field_name_to_ref.insert(wrapper.name().to_string(), field_ref);
+            }
+
+            // Second pass: build field data with parent/child references resolved
+            for mut wrapper in all_wrappers {
+                let field_id = field_name_to_ref
+                    .get(wrapper.name())
+                    .map(|r| r.id)
+                    .unwrap_or_else(|| self.allocate_object_id());
+
+                // Set parent reference if this is a child field
+                if let Some(parent_name) = wrapper.parent_name() {
+                    if let Some(&parent_ref) = field_name_to_ref.get(parent_name) {
+                        wrapper.set_parent_ref(parent_ref);
+                    }
+                }
+
+                // Determine if this is a root field (no parent, goes in AcroForm /Fields)
+                let is_root = wrapper.parent_name().is_none();
+
+                all_form_field_data.push((wrapper.page_index(), field_id, wrapper, is_root));
+            }
+
+            // Update parent wrappers with child references
+            // Build a map of parent -> children
+            let mut parent_children: HashMap<String, Vec<ObjectRef>> = HashMap::new();
+            for (_, field_id, wrapper, _) in &all_form_field_data {
+                if let Some(parent_name) = wrapper.parent_name() {
+                    parent_children
+                        .entry(parent_name.to_string())
+                        .or_default()
+                        .push(ObjectRef::new(*field_id, 0));
+                }
+            }
+
+            // Add child refs to parent wrappers
+            for (_, _, wrapper, _) in &mut all_form_field_data {
+                if let Some(children) = parent_children.get(wrapper.name()) {
+                    for &child_ref in children {
+                        wrapper.add_child_ref(child_ref);
+                    }
+                }
+            }
+
+            // Build AcroForm dictionary if we have fields
+            if !all_form_field_data.is_empty() {
+                use crate::writer::AcroFormBuilder;
+
+                let mut acroform_builder = AcroFormBuilder::new();
+
+                // Only add ROOT fields (no parent) to AcroForm's /Fields array
+                for (_, field_id, _, is_root) in &all_form_field_data {
+                    if *is_root {
+                        acroform_builder.add_field(ObjectRef::new(*field_id, 0));
+                    }
+                }
+
+                // Build AcroForm dictionary with embedded resources
+                let acroform_dict = acroform_builder.build_with_resources();
+
+                // Update catalog to include AcroForm
+                if let Some(catalog_dict) = catalog_obj.as_dict() {
+                    let mut new_catalog = catalog_dict.clone();
+                    new_catalog.insert("AcroForm".to_string(), Object::Dictionary(acroform_dict));
+                    catalog_obj = Object::Dictionary(new_catalog);
+                }
+            }
+        }
+
         // Write embedded files and update catalog if any files are pending
         let mut embedded_file_refs: Vec<(String, ObjectRef)> = Vec::new();
         let embedded_files = std::mem::take(&mut self.embedded_files);
@@ -1290,6 +1403,21 @@ impl DocumentEditor {
                                 let new_annotation_ids: Vec<u32> = (0..new_annotation_count)
                                     .map(|_| self.allocate_object_id())
                                     .collect();
+
+                                // Get pre-allocated form field data for this page
+                                // Only include terminal fields (not parent-only) that have widgets
+                                let page_form_fields: Vec<(u32, FormFieldWrapper)> =
+                                    all_form_field_data
+                                        .iter()
+                                        .filter(|(pg_idx, _, wrapper, _)| {
+                                            *pg_idx == page_index && !wrapper.is_parent_only()
+                                        })
+                                        .map(|(_, id, wrapper, _)| (*id, wrapper.clone()))
+                                        .collect();
+                                let new_form_field_ids: Vec<u32> =
+                                    page_form_fields.iter().map(|(id, _)| *id).collect();
+                                let new_form_field_wrappers: Vec<FormFieldWrapper> =
+                                    page_form_fields.iter().map(|(_, w)| w.clone()).collect();
 
                                 // Check if we need to flatten annotations for this page
                                 let should_flatten =
@@ -1638,8 +1766,9 @@ impl DocumentEditor {
                                     final_page_obj = Object::Dictionary(new_dict);
                                 }
 
-                                // Add new annotations to the page's /Annots array
-                                if !new_annotation_ids.is_empty() {
+                                // Add new annotations and form fields to the page's /Annots array
+                                if !new_annotation_ids.is_empty() || !new_form_field_ids.is_empty()
+                                {
                                     if let Some(page_dict) = final_page_obj.as_dict() {
                                         let mut new_dict = page_dict.clone();
 
@@ -1660,6 +1789,13 @@ impl DocumentEditor {
                                         for annot_id in &new_annotation_ids {
                                             annots_array.push(Object::Reference(ObjectRef::new(
                                                 *annot_id, 0,
+                                            )));
+                                        }
+
+                                        // Add references to new form fields (widget annotations)
+                                        for field_id in &new_form_field_ids {
+                                            annots_array.push(Object::Reference(ObjectRef::new(
+                                                *field_id, 0,
                                             )));
                                         }
 
@@ -2053,6 +2189,32 @@ impl DocumentEditor {
                                     }
                                 }
 
+                                // Write new form field objects
+                                if !new_form_field_ids.is_empty() {
+                                    let page_ref_for_fields = ObjectRef::new(page_ref.id, 0);
+
+                                    for (field_id, wrapper) in new_form_field_ids
+                                        .iter()
+                                        .zip(new_form_field_wrappers.iter())
+                                    {
+                                        // Build the form field dictionary
+                                        let field_dict =
+                                            wrapper.build_field_dict(page_ref_for_fields);
+
+                                        // Write the form field object
+                                        let offset = writer.stream_position()?;
+                                        let bytes = serialize_obj(
+                                            &serializer,
+                                            *field_id,
+                                            0,
+                                            &Object::Dictionary(field_dict),
+                                            &encryption_handler,
+                                        );
+                                        writer.write_all(&bytes)?;
+                                        xref_entries.push((*field_id, offset, 0, true));
+                                    }
+                                }
+
                                 // Write flatten annotation XObjects and overlay
                                 if let Some((ref appearances, overlay_id, ref xobj_ids)) =
                                     flatten_data
@@ -2268,6 +2430,27 @@ impl DocumentEditor {
                         }
                     }
                 }
+            }
+        }
+
+        // Write parent-only form fields (non-terminal fields with no widget)
+        // These don't belong to any specific page, so write them after page processing
+        for (_, field_id, wrapper, _) in &all_form_field_data {
+            if wrapper.is_parent_only() {
+                // Build parent field dictionary (no widget entries)
+                let field_dict = wrapper.build_parent_dict();
+
+                // Write the parent field object
+                let offset = writer.stream_position()?;
+                let bytes = serialize_obj(
+                    &serializer,
+                    *field_id,
+                    0,
+                    &Object::Dictionary(field_dict),
+                    &encryption_handler,
+                );
+                writer.write_all(&bytes)?;
+                xref_entries.push((*field_id, offset, 0, true));
             }
         }
 
@@ -3044,6 +3227,893 @@ impl DocumentEditor {
     /// Clear all pending embedded files.
     pub fn clear_embedded_files(&mut self) {
         self.embedded_files.clear();
+    }
+
+    // =========================================================================
+    // XFA Forms Support
+    // =========================================================================
+
+    /// Check if this document contains XFA forms.
+    ///
+    /// XFA (XML Forms Architecture) is an XML-based form specification used
+    /// in some PDFs, particularly government and financial forms.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    /// if editor.has_xfa()? {
+    ///     println!("Document contains XFA forms");
+    /// }
+    /// ```
+    pub fn has_xfa(&mut self) -> Result<bool> {
+        crate::xfa::XfaExtractor::has_xfa(&mut self.source)
+    }
+
+    /// Analyze XFA forms in this document without converting.
+    ///
+    /// Returns information about the XFA form structure including
+    /// field count, page count, and field types.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    /// let analysis = editor.analyze_xfa()?;
+    ///
+    /// if analysis.has_xfa {
+    ///     println!("Found {} fields across {} pages",
+    ///         analysis.field_count.unwrap_or(0),
+    ///         analysis.page_count.unwrap_or(0));
+    /// }
+    /// ```
+    pub fn analyze_xfa(&mut self) -> Result<crate::xfa::XfaAnalysis> {
+        crate::xfa::analyze_xfa_document(&mut self.source)
+    }
+
+    /// Convert XFA forms to AcroForm and return new PDF bytes.
+    ///
+    /// This creates a new PDF document with the XFA forms converted to
+    /// standard AcroForm fields. The original document is not modified.
+    ///
+    /// # Limitations
+    ///
+    /// This implementation supports **static conversion only**:
+    /// - Extracts field definitions and current values
+    /// - Converts fields to equivalent AcroForm types
+    /// - Uses simple vertical stacking layout
+    ///
+    /// **NOT supported:**
+    /// - Dynamic XFA features (scripts, calculations, conditional logic)
+    /// - Complex layouts (tables, grids, repeating sections)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("xfa_form.pdf")?;
+    /// if editor.has_xfa()? {
+    ///     let acroform_bytes = editor.convert_xfa_to_acroform(None)?;
+    ///     std::fs::write("converted.pdf", acroform_bytes)?;
+    /// }
+    /// ```
+    pub fn convert_xfa_to_acroform(
+        &mut self,
+        options: Option<crate::xfa::XfaConversionOptions>,
+    ) -> Result<Vec<u8>> {
+        crate::xfa::convert_xfa_document(&mut self.source, options)
+    }
+
+    // =========================================================================
+    // Form Field Editing
+    // =========================================================================
+
+    /// Get all form fields from the document.
+    ///
+    /// Returns form fields from the document's AcroForm, including any modifications
+    /// made during this editing session. Deleted fields are not included.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    /// let fields = editor.get_form_fields()?;
+    ///
+    /// for field in &fields {
+    ///     println!("{}: {:?}", field.name(), field.value());
+    /// }
+    /// ```
+    pub fn get_form_fields(&mut self) -> Result<Vec<FormFieldWrapper>> {
+        use crate::extractors::forms::FormExtractor;
+
+        // Extract fields from source document
+        let source_fields = FormExtractor::extract_fields(&mut self.source)?;
+
+        let mut result = Vec::new();
+
+        // Add original fields (wrapped), excluding deleted ones
+        for field in source_fields {
+            let full_name = field.full_name.clone();
+
+            // Skip if deleted
+            if self.deleted_form_fields.contains(&full_name) {
+                continue;
+            }
+
+            // Check if we have a modified version
+            if let Some(wrapper) = self.modified_form_fields.get(&full_name) {
+                result.push(wrapper.clone());
+            } else {
+                // Use original field wrapped
+                // Note: page_index is 0 for now since FormField doesn't track page
+                // TODO: Track page index from widget annotations
+                result.push(FormFieldWrapper::from_read(field, 0, None));
+            }
+        }
+
+        // Add new fields (not from original document)
+        for (name, wrapper) in &self.modified_form_fields {
+            if wrapper.is_new() && !self.deleted_form_fields.contains(name) {
+                result.push(wrapper.clone());
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get the value of a specific form field by name.
+    ///
+    /// Returns the current value of the field, which may be the original value
+    /// or a modified value if `set_form_field_value()` was called.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field (e.g., "form.section.field")
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    ///
+    /// if let Some(value) = editor.get_form_field_value("email")? {
+    ///     println!("Email: {:?}", value);
+    /// }
+    /// ```
+    pub fn get_form_field_value(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<crate::editor::form_fields::FormFieldValue>> {
+        use crate::editor::form_fields::FormFieldValue;
+        use crate::extractors::forms::FormExtractor;
+
+        // Check if deleted
+        if self.deleted_form_fields.contains(name) {
+            return Ok(None);
+        }
+
+        // Check modified fields first
+        if let Some(wrapper) = self.modified_form_fields.get(name) {
+            return Ok(Some(wrapper.value()));
+        }
+
+        // Look up in original document
+        let source_fields = FormExtractor::extract_fields(&mut self.source)?;
+
+        for field in source_fields {
+            if field.full_name == name {
+                return Ok(Some(FormFieldValue::from(&field.value)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check if a form field with the given name exists.
+    ///
+    /// Returns true if the field exists in the original document or was added
+    /// during this editing session, and has not been deleted.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    ///
+    /// if editor.has_form_field("email")? {
+    ///     println!("Email field exists");
+    /// }
+    /// ```
+    pub fn has_form_field(&mut self, name: &str) -> Result<bool> {
+        use crate::extractors::forms::FormExtractor;
+
+        // Check if deleted
+        if self.deleted_form_fields.contains(name) {
+            return Ok(false);
+        }
+
+        // Check modified fields (includes new fields)
+        if self.modified_form_fields.contains_key(name) {
+            return Ok(true);
+        }
+
+        // Look up in original document
+        let source_fields = FormExtractor::extract_fields(&mut self.source)?;
+
+        for field in source_fields {
+            if field.full_name == name {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Add a new form field to a page.
+    ///
+    /// Creates a new form field and widget annotation on the specified page.
+    /// The field will be added to the document's AcroForm on save.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - The page index (0-based) where the field should appear
+    /// * `widget` - A form field widget implementing `FormFieldWidget`
+    ///
+    /// # Returns
+    ///
+    /// The full qualified name of the added field, which may be modified if
+    /// a field with the same name already exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    /// use pdf_oxide::writer::form_fields::TextFieldWidget;
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let mut editor = DocumentEditor::open("document.pdf")?;
+    ///
+    /// // Add a text field to page 0
+    /// let name = editor.add_form_field(0,
+    ///     TextFieldWidget::new("email", Rect::new(100.0, 700.0, 200.0, 20.0))
+    ///         .with_value("user@example.com")
+    /// )?;
+    ///
+    /// println!("Added field: {}", name);
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn add_form_field<W: crate::writer::form_fields::FormFieldWidget>(
+        &mut self,
+        page: usize,
+        widget: W,
+    ) -> Result<String> {
+        // Validate page index
+        let page_count = self.page_count()?;
+        if page >= page_count {
+            return Err(Error::InvalidPdf(format!(
+                "Page index {} out of bounds (document has {} pages)",
+                page, page_count
+            )));
+        }
+
+        // Make name unique if it already exists
+        let mut name = widget.field_name().to_string();
+        let mut counter = 1;
+        while self.has_form_field(&name)? {
+            name = format!("{}_{}", widget.field_name(), counter);
+            counter += 1;
+        }
+
+        // Create wrapper from widget
+        let mut wrapper = FormFieldWrapper::from_widget(&widget, page);
+
+        // Override name if it was modified for uniqueness
+        if name != widget.field_name() {
+            wrapper.name = name.clone();
+        }
+
+        // Mark document as modified
+        self.is_modified = true;
+        self.acroform_modified = true;
+
+        // Store in modified fields
+        self.modified_form_fields.insert(name.clone(), wrapper);
+
+        Ok(name)
+    }
+
+    /// Add a parent container field for hierarchical form fields.
+    ///
+    /// Parent fields are non-terminal fields that don't have a widget annotation
+    /// but contain child fields via the `/Kids` array. They can be used to:
+    /// - Group related fields (e.g., `address.street`, `address.city`)
+    /// - Inherit properties to children (flags, field type, default appearance)
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration for the parent field
+    ///
+    /// # Returns
+    ///
+    /// The full qualified name of the parent field.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::{DocumentEditor, ParentFieldConfig};
+    ///
+    /// let mut editor = DocumentEditor::open("document.pdf")?;
+    ///
+    /// // Create a parent field
+    /// editor.add_parent_field(ParentFieldConfig::new("address"))?;
+    ///
+    /// // Add children under the parent
+    /// editor.add_child_field("address", 0, TextFieldWidget::new("street", rect))?;
+    /// editor.add_child_field("address", 0, TextFieldWidget::new("city", rect2))?;
+    ///
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn add_parent_field(
+        &mut self,
+        config: crate::editor::form_fields::ParentFieldConfig,
+    ) -> Result<String> {
+        let name = config.full_name();
+
+        // Check if parent already exists
+        if self.has_form_field(&name)? {
+            return Err(Error::InvalidPdf(format!("Parent field already exists: {}", name)));
+        }
+
+        // If this parent has a parent, verify it exists
+        if let Some(ref parent_name) = config.parent_name {
+            if !self.has_form_field(parent_name)? {
+                return Err(Error::InvalidPdf(format!("Parent field not found: {}", parent_name)));
+            }
+        }
+
+        // Create wrapper from config
+        let wrapper = FormFieldWrapper::from_parent_config(&config);
+
+        // Mark document as modified
+        self.is_modified = true;
+        self.acroform_modified = true;
+
+        // Store in modified fields
+        self.modified_form_fields.insert(name.clone(), wrapper);
+
+        Ok(name)
+    }
+
+    /// Add a form field as a child of an existing parent field.
+    ///
+    /// Creates a hierarchical relationship where the child field's partial name
+    /// becomes the full name: `parent_name.widget_name`.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_name` - Name of the existing parent field
+    /// * `page` - Page index where the widget appears (0-based)
+    /// * `widget` - The form field widget to add
+    ///
+    /// # Returns
+    ///
+    /// The full qualified name of the child field.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::{DocumentEditor, ParentFieldConfig};
+    /// use pdf_oxide::writer::form_fields::TextFieldWidget;
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let mut editor = DocumentEditor::open("document.pdf")?;
+    ///
+    /// // Create parent first
+    /// editor.add_parent_field(ParentFieldConfig::new("contact"))?;
+    ///
+    /// // Add children
+    /// let name = editor.add_child_field("contact", 0,
+    ///     TextFieldWidget::new("email", Rect::new(100.0, 700.0, 200.0, 20.0))
+    /// )?;
+    /// assert_eq!(name, "contact.email");
+    ///
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn add_child_field<W: crate::writer::form_fields::FormFieldWidget>(
+        &mut self,
+        parent_name: &str,
+        page: usize,
+        widget: W,
+    ) -> Result<String> {
+        // Validate page index
+        let page_count = self.page_count()?;
+        if page >= page_count {
+            return Err(Error::InvalidPdf(format!(
+                "Page index {} out of bounds (document has {} pages)",
+                page, page_count
+            )));
+        }
+
+        // Verify parent exists
+        if !self.has_form_field(parent_name)? {
+            return Err(Error::InvalidPdf(format!("Parent field not found: {}", parent_name)));
+        }
+
+        // Create wrapper with parent reference
+        let wrapper = FormFieldWrapper::from_widget_with_parent(&widget, page, parent_name);
+        let name = wrapper.name.clone();
+
+        // Check for duplicate name
+        if self.has_form_field(&name)? {
+            return Err(Error::InvalidPdf(format!("Child field already exists: {}", name)));
+        }
+
+        // Mark document as modified
+        self.is_modified = true;
+        self.acroform_modified = true;
+
+        // Store in modified fields
+        self.modified_form_fields.insert(name.clone(), wrapper);
+
+        Ok(name)
+    }
+
+    /// Add a form field with automatic hierarchical parent creation.
+    ///
+    /// If the widget name contains dots (e.g., "address.street"), this method
+    /// automatically creates any missing parent fields. This provides a convenient
+    /// way to create hierarchical forms without manually managing parents.
+    ///
+    /// # Arguments
+    ///
+    /// * `page` - Page index where the widget appears (0-based)
+    /// * `widget` - The form field widget to add
+    ///
+    /// # Returns
+    ///
+    /// The full qualified name of the added field.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    /// use pdf_oxide::writer::form_fields::TextFieldWidget;
+    /// use pdf_oxide::geometry::Rect;
+    ///
+    /// let mut editor = DocumentEditor::open("document.pdf")?;
+    ///
+    /// // Automatically creates "address" parent if needed
+    /// editor.add_form_field_hierarchical(0,
+    ///     TextFieldWidget::new("address.street", Rect::new(100.0, 700.0, 200.0, 20.0))
+    /// )?;
+    ///
+    /// // Reuses existing "address" parent
+    /// editor.add_form_field_hierarchical(0,
+    ///     TextFieldWidget::new("address.city", Rect::new(100.0, 670.0, 200.0, 20.0))
+    /// )?;
+    ///
+    /// // Creates nested hierarchy: "contact" -> "address" -> "zip"
+    /// editor.add_form_field_hierarchical(0,
+    ///     TextFieldWidget::new("contact.address.zip", Rect::new(100.0, 640.0, 100.0, 20.0))
+    /// )?;
+    ///
+    /// editor.save("output.pdf")?;
+    /// ```
+    pub fn add_form_field_hierarchical<W: crate::writer::form_fields::FormFieldWidget>(
+        &mut self,
+        page: usize,
+        widget: W,
+    ) -> Result<String> {
+        use crate::editor::form_fields::ParentFieldConfig;
+
+        let full_name = widget.field_name().to_string();
+
+        // If no dots, delegate to regular add_form_field
+        if !full_name.contains('.') {
+            return self.add_form_field(page, widget);
+        }
+
+        // Parse the hierarchy path
+        let parts: Vec<&str> = full_name.split('.').collect();
+
+        // Create parent fields as needed
+        let mut current_parent = String::new();
+        for i in 0..(parts.len() - 1) {
+            let part = parts[i];
+            let parent_name = if current_parent.is_empty() {
+                part.to_string()
+            } else {
+                format!("{}.{}", current_parent, part)
+            };
+
+            // Create parent if it doesn't exist
+            if !self.has_form_field(&parent_name)? {
+                let mut config = ParentFieldConfig::new(part);
+                if !current_parent.is_empty() {
+                    config = config.with_parent(&current_parent);
+                }
+                self.add_parent_field(config)?;
+            }
+
+            current_parent = parent_name;
+        }
+
+        // Add the terminal field as a child
+        self.add_child_field(&current_parent, page, widget)
+    }
+
+    /// Set the value of an existing form field.
+    ///
+    /// Modifies the value of a form field. The field must exist in the document
+    /// (either from the original PDF or added via `add_form_field`).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `value` - The new value for the field
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::{DocumentEditor, FormFieldValue};
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    ///
+    /// editor.set_form_field_value("name", FormFieldValue::Text("John Doe".into()))?;
+    /// editor.set_form_field_value("subscribe", FormFieldValue::Boolean(true))?;
+    ///
+    /// editor.save("updated.pdf")?;
+    /// ```
+    pub fn set_form_field_value(
+        &mut self,
+        name: &str,
+        value: crate::editor::form_fields::FormFieldValue,
+    ) -> Result<()> {
+        use crate::extractors::forms::FormExtractor;
+
+        // Check if deleted
+        if self.deleted_form_fields.contains(name) {
+            return Err(Error::InvalidPdf(format!("Cannot set value on deleted field: {}", name)));
+        }
+
+        // Check if we already have a wrapper for this field
+        if let Some(wrapper) = self.modified_form_fields.get_mut(name) {
+            wrapper.set_value(value);
+            self.is_modified = true;
+            self.acroform_modified = true;
+            return Ok(());
+        }
+
+        // Look up in original document and create wrapper
+        let source_fields = FormExtractor::extract_fields(&mut self.source)?;
+
+        for field in source_fields {
+            if field.full_name == name {
+                // Create wrapper and set value
+                let mut wrapper = FormFieldWrapper::from_read(field, 0, None);
+                wrapper.set_value(value);
+
+                self.modified_form_fields.insert(name.to_string(), wrapper);
+                self.is_modified = true;
+                self.acroform_modified = true;
+                return Ok(());
+            }
+        }
+
+        Err(Error::InvalidPdf(format!("Form field not found: {}", name)))
+    }
+
+    /// Remove a form field from the document.
+    ///
+    /// Marks a form field for removal. The field will be removed from the
+    /// document's AcroForm and its widget annotation will be removed from
+    /// the page when the document is saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field to remove
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    ///
+    /// editor.remove_form_field("obsolete_field")?;
+    ///
+    /// editor.save("cleaned.pdf")?;
+    /// ```
+    pub fn remove_form_field(&mut self, name: &str) -> Result<()> {
+        // Check if field exists
+        if !self.has_form_field(name)? {
+            return Err(Error::InvalidPdf(format!("Form field not found: {}", name)));
+        }
+
+        // Remove from modified fields if present
+        self.modified_form_fields.remove(name);
+
+        // Add to deleted set
+        self.deleted_form_fields.insert(name.to_string());
+
+        self.is_modified = true;
+        self.acroform_modified = true;
+
+        Ok(())
+    }
+
+    // ========== Form Field Property Modification APIs ==========
+
+    /// Set a form field to read-only.
+    ///
+    /// A read-only field cannot be edited by the user in a PDF viewer.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `readonly` - Whether the field should be read-only
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("form.pdf")?;
+    /// editor.set_form_field_readonly("signature_field", true)?;
+    /// editor.save("readonly.pdf")?;
+    /// ```
+    pub fn set_form_field_readonly(&mut self, name: &str, readonly: bool) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_readonly(readonly);
+        })
+    }
+
+    /// Set a form field as required.
+    ///
+    /// A required field must have a value when the form is submitted/exported.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `required` - Whether the field should be required
+    pub fn set_form_field_required(&mut self, name: &str, required: bool) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_required(required);
+        })
+    }
+
+    /// Set a form field's tooltip/description.
+    ///
+    /// The tooltip is displayed when the user hovers over the field.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `tooltip` - The tooltip text
+    pub fn set_form_field_tooltip(&mut self, name: &str, tooltip: impl Into<String>) -> Result<()> {
+        let tooltip_str = tooltip.into();
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_tooltip(tooltip_str);
+        })
+    }
+
+    /// Set a form field's bounding rectangle.
+    ///
+    /// This changes the position and size of the field on the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `rect` - The new bounding rectangle
+    pub fn set_form_field_rect(&mut self, name: &str, rect: Rect) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_rect(rect);
+        })
+    }
+
+    /// Set a form field's maximum text length.
+    ///
+    /// Only applicable to text fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `max_len` - The maximum number of characters
+    pub fn set_form_field_max_length(&mut self, name: &str, max_len: u32) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_max_length(max_len);
+        })
+    }
+
+    /// Set a form field's text alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `alignment` - 0 = left, 1 = center, 2 = right
+    pub fn set_form_field_alignment(&mut self, name: &str, alignment: u32) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_alignment(alignment);
+        })
+    }
+
+    /// Set a form field's background color.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `color` - RGB color values (0.0 to 1.0)
+    pub fn set_form_field_background_color(&mut self, name: &str, color: [f32; 3]) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_background_color(color);
+        })
+    }
+
+    /// Set a form field's border color.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `color` - RGB color values (0.0 to 1.0)
+    pub fn set_form_field_border_color(&mut self, name: &str, color: [f32; 3]) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_border_color(color);
+        })
+    }
+
+    /// Set a form field's border width.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `width` - Border width in points
+    pub fn set_form_field_border_width(&mut self, name: &str, width: f32) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_border_width(width);
+        })
+    }
+
+    /// Set a form field's default appearance string.
+    ///
+    /// The DA string specifies font, size, and color for field content.
+    /// Example: "/Helv 12 Tf 0 g" for 12pt Helvetica in black.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `da` - The default appearance string
+    pub fn set_form_field_default_appearance(
+        &mut self,
+        name: &str,
+        da: impl Into<String>,
+    ) -> Result<()> {
+        let da_str = da.into();
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_default_appearance(da_str);
+        })
+    }
+
+    /// Set form field flags directly.
+    ///
+    /// Use this for setting custom flag combinations. Common flags:
+    /// - Bit 1 (0x01): ReadOnly
+    /// - Bit 2 (0x02): Required
+    /// - Bit 3 (0x04): NoExport
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The full qualified name of the field
+    /// * `flags` - The field flag bits
+    pub fn set_form_field_flags(&mut self, name: &str, flags: u32) -> Result<()> {
+        self.modify_form_field(name, |wrapper| {
+            wrapper.set_flags(flags);
+        })
+    }
+
+    /// Internal helper to modify a form field.
+    ///
+    /// Gets or creates a wrapper for the field and applies the modification.
+    fn modify_form_field<F>(&mut self, name: &str, modify_fn: F) -> Result<()>
+    where
+        F: FnOnce(&mut FormFieldWrapper),
+    {
+        use crate::extractors::forms::FormExtractor;
+
+        // Check if deleted
+        if self.deleted_form_fields.contains(name) {
+            return Err(Error::InvalidPdf(format!("Cannot modify deleted field: {}", name)));
+        }
+
+        // Check if we already have a wrapper for this field
+        if let Some(wrapper) = self.modified_form_fields.get_mut(name) {
+            modify_fn(wrapper);
+            self.is_modified = true;
+            self.acroform_modified = true;
+            return Ok(());
+        }
+
+        // Look up in original document and create wrapper
+        let source_fields = FormExtractor::extract_fields(&mut self.source)?;
+
+        for field in source_fields {
+            if field.full_name == name {
+                // Get object ref from the field
+                let object_ref = field.object_ref;
+
+                // Create wrapper
+                let mut wrapper = FormFieldWrapper::from_read(field, 0, object_ref);
+                modify_fn(&mut wrapper);
+
+                self.modified_form_fields.insert(name.to_string(), wrapper);
+                self.is_modified = true;
+                self.acroform_modified = true;
+                return Ok(());
+            }
+        }
+
+        Err(Error::InvalidPdf(format!("Form field not found: {}", name)))
+    }
+
+    // ========== Form Data Export APIs ==========
+
+    /// Export form field data to FDF format.
+    ///
+    /// Writes all form field data (original and modified) to an FDF file.
+    /// This is useful for data extraction, backup, or batch processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path to write the FDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("filled_form.pdf")?;
+    /// editor.export_form_data_fdf("form_data.fdf")?;
+    /// ```
+    pub fn export_form_data_fdf(&mut self, output_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::extractors::forms::FormExtractor;
+        FormExtractor::export_fdf(&mut self.source, output_path)
+    }
+
+    /// Export form field data to XFDF format.
+    ///
+    /// Writes all form field data (original and modified) to an XFDF (XML) file.
+    /// XFDF is useful for web integration and human-readable data exchange.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path to write the XFDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use pdf_oxide::editor::DocumentEditor;
+    ///
+    /// let mut editor = DocumentEditor::open("filled_form.pdf")?;
+    /// editor.export_form_data_xfdf("form_data.xfdf")?;
+    /// ```
+    pub fn export_form_data_xfdf(
+        &mut self,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        use crate::extractors::forms::FormExtractor;
+        FormExtractor::export_xfdf(&mut self.source, output_path)
     }
 
     /// Get widget annotation appearances for form flattening.

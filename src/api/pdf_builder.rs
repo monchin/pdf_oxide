@@ -1454,6 +1454,59 @@ impl Pdf {
         }
     }
 
+    /// Export form data to FDF (Forms Data Format) file.
+    ///
+    /// FDF is a binary format defined in ISO 32000-1:2008 Section 12.7.7
+    /// for exchanging form field data between applications.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path to write the FDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("filled_form.pdf")?;
+    /// pdf.export_form_data_fdf("form_data.fdf")?;
+    /// ```
+    pub fn export_form_data_fdf(&mut self, output_path: impl AsRef<std::path::Path>) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.export_form_data_fdf(output_path)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
+    /// Export form data to XFDF (XML Forms Data Format) file.
+    ///
+    /// XFDF is an XML representation of FDF, useful for web integration
+    /// and human-readable data exchange.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path to write the XFDF file
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("filled_form.pdf")?;
+    /// pdf.export_form_data_xfdf("form_data.xfdf")?;
+    /// ```
+    pub fn export_form_data_xfdf(
+        &mut self,
+        output_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        if let Some(ref mut editor) = self.editor {
+            editor.export_form_data_xfdf(output_path)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
+            ))
+        }
+    }
+
     // =========================================================================
     // File Attachments (Embedded Files)
     // =========================================================================
@@ -2303,7 +2356,7 @@ impl PdfBuilder {
                 self.calculate_image_page_layout(image);
 
             // Convert writer::ImageData to elements::ImageContent
-            let image_content = ImageContent {
+            let mut image_content = ImageContent {
                 bbox: Rect::new(img_x, img_y, img_w, img_h),
                 format: match image.format {
                     crate::writer::ImageFormat::Jpeg => ElemImageFormat::Jpeg,
@@ -2321,7 +2374,10 @@ impl PdfBuilder {
                 },
                 reading_order: None,
                 alt_text: None,
+                horizontal_dpi: None,
+                vertical_dpi: None,
             };
+            image_content.calculate_dpi();
 
             // Add page with image
             let mut page = writer.add_page(page_width, page_height);

@@ -211,6 +211,9 @@ impl<'a> FluentPageBuilder<'a> {
             },
             style: Default::default(),
             reading_order: Some(page.elements.len()),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         }));
         // Move cursor down for next line
         self.cursor_y -= self.text_config.size * self.text_config.line_height;
@@ -256,6 +259,9 @@ impl<'a> FluentPageBuilder<'a> {
                 },
                 style: Default::default(),
                 reading_order: Some(page.elements.len()),
+                origin: None,
+                rotation_degrees: None,
+                matrix: None,
             }));
             self.cursor_y -= self.text_config.size * self.text_config.line_height;
         }

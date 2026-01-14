@@ -2562,6 +2562,249 @@ impl PdfDocument {
         Ok(content_data)
     }
 
+    /// Extract path (vector graphics) content from a page.
+    ///
+    /// This extracts all vector graphics operations from the page's content stream,
+    /// including lines, curves, rectangles, and shapes.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    ///
+    /// # Returns
+    ///
+    /// A vector of `PathContent` objects representing all paths on the page.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("example.pdf")?;
+    ///
+    /// // Extract paths from first page
+    /// let paths = doc.extract_paths(0)?;
+    ///
+    /// for path in paths {
+    ///     println!("Path with {} operations, bbox: {:?}",
+    ///         path.operations.len(), path.bbox);
+    ///     if path.has_stroke() {
+    ///         println!("  Stroked with width: {}", path.stroke_width);
+    ///     }
+    ///     if path.has_fill() {
+    ///         println!("  Filled");
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extract_paths(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        use crate::content::{parse_content_stream, GraphicsStateStack, Operator};
+        use crate::elements::{LineCap, LineJoin};
+        use crate::extractors::paths::{FillRule, PathExtractor};
+        use crate::layout::Color;
+
+        // Get page content stream
+        let content_data = self.get_page_content_data(page_index)?;
+
+        // Parse content stream into operators
+        let operators = parse_content_stream(&content_data)?;
+
+        // Create path extractor and graphics state stack
+        let mut extractor = PathExtractor::new();
+        let mut state_stack = GraphicsStateStack::new();
+
+        // Process each operator
+        for op in operators {
+            match op {
+                // Graphics state operators
+                Operator::SaveState => {
+                    state_stack.save();
+                },
+                Operator::RestoreState => {
+                    state_stack.restore();
+                    extractor.update_from_state(state_stack.current());
+                },
+                Operator::Cm { a, b, c, d, e, f } => {
+                    let state = state_stack.current_mut();
+                    let new_matrix = crate::content::Matrix { a, b, c, d, e, f };
+                    state.ctm = state.ctm.multiply(&new_matrix);
+                    extractor.set_ctm(state.ctm);
+                },
+
+                // Color operators (stroke)
+                Operator::SetStrokeRgb { r, g, b } => {
+                    state_stack.current_mut().stroke_color_rgb = (r, g, b);
+                    extractor.set_stroke_color(Color::new(r, g, b));
+                },
+                Operator::SetStrokeGray { gray } => {
+                    state_stack.current_mut().stroke_color_rgb = (gray, gray, gray);
+                    extractor.set_stroke_color(Color::new(gray, gray, gray));
+                },
+                Operator::SetStrokeCmyk { c, m, y, k } => {
+                    // Simple CMYK to RGB conversion
+                    let r = (1.0 - c) * (1.0 - k);
+                    let g = (1.0 - m) * (1.0 - k);
+                    let b = (1.0 - y) * (1.0 - k);
+                    state_stack.current_mut().stroke_color_rgb = (r, g, b);
+                    extractor.set_stroke_color(Color::new(r, g, b));
+                },
+
+                // Color operators (fill)
+                Operator::SetFillRgb { r, g, b } => {
+                    state_stack.current_mut().fill_color_rgb = (r, g, b);
+                    extractor.set_fill_color(Color::new(r, g, b));
+                },
+                Operator::SetFillGray { gray } => {
+                    state_stack.current_mut().fill_color_rgb = (gray, gray, gray);
+                    extractor.set_fill_color(Color::new(gray, gray, gray));
+                },
+                Operator::SetFillCmyk { c, m, y, k } => {
+                    let r = (1.0 - c) * (1.0 - k);
+                    let g = (1.0 - m) * (1.0 - k);
+                    let b = (1.0 - y) * (1.0 - k);
+                    state_stack.current_mut().fill_color_rgb = (r, g, b);
+                    extractor.set_fill_color(Color::new(r, g, b));
+                },
+
+                // Line style operators
+                Operator::SetLineWidth { width } => {
+                    state_stack.current_mut().line_width = width;
+                    extractor.set_line_width(width);
+                },
+                Operator::SetLineCap { cap_style } => {
+                    state_stack.current_mut().line_cap = cap_style;
+                    let cap = match cap_style {
+                        1 => LineCap::Round,
+                        2 => LineCap::Square,
+                        _ => LineCap::Butt,
+                    };
+                    extractor.set_line_cap(cap);
+                },
+                Operator::SetLineJoin { join_style } => {
+                    state_stack.current_mut().line_join = join_style;
+                    let join = match join_style {
+                        1 => LineJoin::Round,
+                        2 => LineJoin::Bevel,
+                        _ => LineJoin::Miter,
+                    };
+                    extractor.set_line_join(join);
+                },
+
+                // Path construction operators
+                Operator::MoveTo { x, y } => {
+                    extractor.move_to(x, y);
+                },
+                Operator::LineTo { x, y } => {
+                    extractor.line_to(x, y);
+                },
+                Operator::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => {
+                    extractor.curve_to(x1, y1, x2, y2, x3, y3);
+                },
+                Operator::CurveToV { x2, y2, x3, y3 } => {
+                    extractor.curve_to_v(x2, y2, x3, y3);
+                },
+                Operator::CurveToY { x1, y1, x3, y3 } => {
+                    extractor.curve_to_y(x1, y1, x3, y3);
+                },
+                Operator::Rectangle {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    extractor.rectangle(x, y, width, height);
+                },
+                Operator::ClosePath => {
+                    extractor.close_path();
+                },
+
+                // Path painting operators
+                Operator::Stroke => {
+                    extractor.stroke();
+                },
+                Operator::Fill => {
+                    extractor.fill(FillRule::NonZero);
+                },
+                Operator::FillEvenOdd => {
+                    extractor.fill(FillRule::EvenOdd);
+                },
+                Operator::CloseFillStroke => {
+                    extractor.close_fill_and_stroke(FillRule::NonZero);
+                },
+                Operator::EndPath => {
+                    extractor.end_path();
+                },
+
+                // Clipping operators
+                Operator::ClipNonZero => {
+                    extractor.clip_non_zero();
+                },
+                Operator::ClipEvenOdd => {
+                    extractor.clip_even_odd();
+                },
+
+                // Skip other operators (text, images, etc.)
+                _ => {},
+            }
+        }
+
+        Ok(extractor.finish())
+    }
+
+    /// Extract paths from a specific rectangular region of a page.
+    ///
+    /// Only paths whose bounding box intersects the specified region are returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_index` - Zero-based page index
+    /// * `region` - The rectangular region to extract from
+    ///
+    /// # Returns
+    ///
+    /// A vector of `PathContent` objects within the specified region.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # use pdf_oxide::geometry::Rect;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("example.pdf")?;
+    ///
+    /// // Extract paths from a specific region (e.g., header area)
+    /// let header_region = Rect::new(0.0, 700.0, 612.0, 92.0);
+    /// let paths = doc.extract_paths_in_rect(0, header_region)?;
+    ///
+    /// println!("Found {} paths in header region", paths.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extract_paths_in_rect(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::elements::PathContent>> {
+        let paths = self.extract_paths(page_index)?;
+
+        // Filter paths by region intersection
+        Ok(paths
+            .into_iter()
+            .filter(|path| path.bbox.intersects(&region))
+            .collect())
+    }
+
     /// Get information about a page, including its dimensions.
     ///
     /// This is useful for rendering and layout calculations.

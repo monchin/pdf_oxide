@@ -129,3 +129,10 @@ pub use crate::compliance::{
     validate_pdf_a, ComplianceError, ComplianceWarning, ErrorCode, PdfALevel, PdfAPart,
     PdfAValidator, ValidationResult, ValidationStats, WarningCode,
 };
+
+// Re-export XFA form types
+pub use crate::xfa::{
+    add_converted_field, add_converted_page, analyze_xfa_document, convert_xfa_document,
+    ConvertedField, ConvertedPage, XfaAnalysis, XfaConversionOptions, XfaConversionResult,
+    XfaConverter, XfaExtractor, XfaField, XfaFieldType, XfaForm, XfaOption, XfaPage, XfaParser,
+};

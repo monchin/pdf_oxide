@@ -26,13 +26,18 @@
 
 use super::freetext::FreeTextAnnotation;
 use super::ink::InkAnnotation;
+use super::movie::MovieAnnotation;
+use super::richmedia::RichMediaAnnotation;
+use super::screen::ScreenAnnotation;
 use super::shape_annotations::{LineAnnotation, PolygonAnnotation, ShapeAnnotation};
+use super::sound::SoundAnnotation;
 use super::special_annotations::{
     CaretAnnotation, FileAttachmentAnnotation, PopupAnnotation, RedactAnnotation,
 };
 use super::stamp::StampAnnotation;
 use super::text_annotations::TextAnnotation;
 use super::text_markup::TextMarkupAnnotation;
+use super::threed::ThreeDAnnotation;
 use super::watermark::WatermarkAnnotation;
 use crate::geometry::Rect;
 use crate::object::{Object, ObjectRef};
@@ -432,6 +437,16 @@ pub enum Annotation {
     Redact(RedactAnnotation),
     /// Watermark annotation (transparent text overlay)
     Watermark(WatermarkAnnotation),
+    /// Sound annotation (embedded audio)
+    Sound(SoundAnnotation),
+    /// Movie annotation (embedded video, legacy)
+    Movie(MovieAnnotation),
+    /// Screen annotation (modern multimedia with renditions)
+    Screen(ScreenAnnotation),
+    /// 3D annotation (embedded 3D models)
+    ThreeD(ThreeDAnnotation),
+    /// RichMedia annotation (Flash, video players)
+    RichMedia(RichMediaAnnotation),
 }
 
 impl Annotation {
@@ -456,6 +471,11 @@ impl Annotation {
                 let page_ref = page_refs.first().copied().unwrap_or(ObjectRef::new(0, 0));
                 watermark.build(page_ref)
             },
+            Annotation::Sound(sound) => sound.build(page_refs),
+            Annotation::Movie(movie) => movie.build(page_refs),
+            Annotation::Screen(screen) => screen.build(page_refs),
+            Annotation::ThreeD(threed) => threed.build(page_refs),
+            Annotation::RichMedia(richmedia) => richmedia.build(page_refs),
         }
     }
 
@@ -476,6 +496,11 @@ impl Annotation {
             Annotation::FileAttachment(file) => file.rect(),
             Annotation::Redact(redact) => redact.rect(),
             Annotation::Watermark(watermark) => watermark.rect(),
+            Annotation::Sound(sound) => sound.rect,
+            Annotation::Movie(movie) => movie.rect,
+            Annotation::Screen(screen) => screen.rect,
+            Annotation::ThreeD(threed) => threed.rect,
+            Annotation::RichMedia(richmedia) => richmedia.rect,
         }
     }
 }
@@ -561,6 +586,36 @@ impl From<RedactAnnotation> for Annotation {
 impl From<WatermarkAnnotation> for Annotation {
     fn from(watermark: WatermarkAnnotation) -> Self {
         Annotation::Watermark(watermark)
+    }
+}
+
+impl From<SoundAnnotation> for Annotation {
+    fn from(sound: SoundAnnotation) -> Self {
+        Annotation::Sound(sound)
+    }
+}
+
+impl From<MovieAnnotation> for Annotation {
+    fn from(movie: MovieAnnotation) -> Self {
+        Annotation::Movie(movie)
+    }
+}
+
+impl From<ScreenAnnotation> for Annotation {
+    fn from(screen: ScreenAnnotation) -> Self {
+        Annotation::Screen(screen)
+    }
+}
+
+impl From<ThreeDAnnotation> for Annotation {
+    fn from(threed: ThreeDAnnotation) -> Self {
+        Annotation::ThreeD(threed)
+    }
+}
+
+impl From<RichMediaAnnotation> for Annotation {
+    fn from(richmedia: RichMediaAnnotation) -> Self {
+        Annotation::RichMedia(richmedia)
     }
 }
 

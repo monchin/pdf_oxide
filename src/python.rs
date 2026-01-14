@@ -2085,6 +2085,9 @@ impl PyPdfPage {
             },
             style: TextStyle::default(),
             reading_order: None,
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let id = self.inner.add_text(content);

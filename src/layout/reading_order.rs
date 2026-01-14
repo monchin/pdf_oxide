@@ -165,15 +165,23 @@ mod tests {
         let chars: Vec<TextChar> = text
             .chars()
             .enumerate()
-            .map(|(i, c)| TextChar {
-                char: c,
-                bbox: Rect::new(x + i as f32 * 10.0, y, 10.0, 12.0),
-                font_name: "Times".to_string(),
-                font_size: 12.0,
-                font_weight: FontWeight::Normal,
-                is_italic: false,
-                color: Color::black(),
-                mcid: None,
+            .map(|(i, c)| {
+                let bbox = Rect::new(x + i as f32 * 10.0, y, 10.0, 12.0);
+                TextChar {
+                    char: c,
+                    bbox,
+                    font_name: "Times".to_string(),
+                    font_size: 12.0,
+                    font_weight: FontWeight::Normal,
+                    is_italic: false,
+                    color: Color::black(),
+                    mcid: None,
+                    origin_x: bbox.x,
+                    origin_y: bbox.y,
+                    rotation_degrees: 0.0,
+                    advance_width: bbox.width,
+                    matrix: None,
+                }
             })
             .collect();
 

@@ -14,6 +14,9 @@ mod dom_api_tests {
             font: FontSpec::default(),
             style: TextStyle::default(),
             reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let text2 = TextContent {
@@ -22,6 +25,9 @@ mod dom_api_tests {
             font: FontSpec::default(),
             style: TextStyle::default(),
             reading_order: Some(1),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
         };
 
         let children = vec![ContentElement::Text(text1), ContentElement::Text(text2)];
@@ -496,6 +502,9 @@ mod dom_api_tests {
                 font: pdf_oxide::elements::FontSpec::default(),
                 style: pdf_oxide::elements::TextStyle::default(),
                 reading_order: None,
+                origin: None,
+                rotation_degrees: None,
+                matrix: None,
             };
             let text_id = page.add_text(text_content);
 
