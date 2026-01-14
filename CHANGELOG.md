@@ -2,6 +2,91 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.1] - 2026-01-14
+
+### Added - Form Field Coverage (95% across Read/Create/Modify)
+
+#### Hierarchical Field Creation
+- **Parent/Child Field Structures** - Create complex form hierarchies like `address.street`, `address.city`
+  - `add_parent_field()` - Create container fields without widgets
+  - `add_child_field()` - Add child fields to existing parents
+  - `add_form_field_hierarchical()` - Auto-create parent hierarchy from dotted names
+  - `ParentFieldConfig` for configuring container fields
+  - Property inheritance between parent and child fields (FT, V, DV, Ff, DA, Q)
+
+#### Field Property Modification
+- **Edit All Field Properties** - Beyond just values
+  - `set_form_field_readonly()` / `set_form_field_required()` - Flag manipulation
+  - `set_form_field_rect()` - Reposition/resize fields
+  - `set_form_field_tooltip()` - Set hover text (TU)
+  - `set_form_field_max_length()` - Text field length limits
+  - `set_form_field_alignment()` - Text alignment (left/center/right)
+  - `set_form_field_default_value()` - Default values (DV)
+  - `BorderStyle` and `AppearanceCharacteristics` support
+- **Critical Bug Fix** - Modified existing fields now persist on save (was only saving new fields)
+
+#### FDF/XFDF Export
+- **Forms Data Format Export** - ISO 32000-1:2008 Section 12.7.7
+  - `FdfWriter` - Binary FDF export for form data exchange
+  - `XfdfWriter` - XML XFDF export for web integration
+  - `export_form_data_fdf()` / `export_form_data_xfdf()` on FormExtractor, DocumentEditor, Pdf
+  - Hierarchical field representation in exports
+
+### Added - Text Extraction Enhancements
+- **TextChar Transformation** - Per-character positioning metadata (#27)
+  - `origin` - Font baseline coordinates (x, y)
+  - `rotation_degrees` - Character rotation angle
+  - `matrix` - Full transformation matrix
+  - Essential for pdfium-render migration
+
+### Added - Image Metadata
+- **DPI Calculation** - Resolution metadata for images
+  - `horizontal_dpi` / `vertical_dpi` fields on `ImageContent`
+  - `resolution()` - Get (h_dpi, v_dpi) tuple
+  - `is_high_resolution()` / `is_low_resolution()` / `is_medium_resolution()` helpers
+  - `calculate_dpi()` - Compute from pixel dimensions and bbox
+
+### Added - Bounded Text Extraction
+- **Spatial Filtering** - Extract text from rectangular regions
+  - `RectFilterMode::Intersects` - Any overlap (default)
+  - `RectFilterMode::FullyContained` - Completely within bounds
+  - `RectFilterMode::MinOverlap(f32)` - Minimum overlap fraction
+  - `TextSpanSpatial` trait - `intersects_rect()`, `contained_in_rect()`, `overlap_with_rect()`
+  - `TextSpanFiltering` trait - `filter_by_rect()`, `extract_text_in_rect()`
+
+### Added - Multimedia Annotations
+- **MovieAnnotation** - Embedded video content
+- **SoundAnnotation** - Audio content with playback controls
+- **ScreenAnnotation** - Media renditions (video/audio players)
+- **RichMediaAnnotation** - Flash/video rich media content
+
+### Added - 3D Annotations
+- **ThreeDAnnotation** - 3D model embedding
+  - U3D and PRC format support
+  - `ThreeDView` - Camera angles and lighting
+  - `ThreeDAnimation` - Playback controls
+
+### Added - Path Extraction
+- **PathExtractor** - Vector graphics extraction
+  - Lines, curves, rectangles, complex paths
+  - Path transformation and bounding box calculation
+
+### Added - XFA Form Support
+- **XfaExtractor** - Extract XFA form data
+- **XfaParser** - Parse XFA XML templates
+- **XfaConverter** - Convert XFA forms to AcroForm
+
+### Changed - Python Bindings
+- **True Python 3.8-3.14 Support** - Fixed via `abi3-py38` (was only working on 3.11)
+- **Modern Tooling** - uv, pdm, ruff integration
+- **Code Quality** - All Python code formatted with ruff
+
+### 🏆 Community Contributors
+
+🥇 **@monchin** - Massive thanks for revolutionizing our Python ecosystem! Your PR #29 fixed a critical compatibility issue where PDFOxide only worked on Python 3.11 despite claiming 3.8+ support. By switching to `abi3-py38`, you enabled true cross-version compatibility (Python 3.8-3.14). The introduction of modern tooling (uv, pdm, ruff) brings PDFOxide's Python development to 2026 standards. This work directly enables thousands more Python developers to use PDFOxide. 💪🐍
+
+🥈 **@bikallem** - Thanks for the thoughtful feature request (#27) comparing PDFOxide to pdfium-render. Your detailed analysis of missing origin coordinates and rotation angles led directly to our TextChar transformation feature. This makes PDFOxide a viable migration path for pdfium-render users. 🎯
+
 ## [0.3.0] - 2026-01-10
 
 ### Added - Unified `Pdf` API
@@ -178,6 +263,12 @@ All notable changes to PDFOxide are documented here.
 ### Fixed
 - **Outline action handling** - correctly dereference actions indirectly referenced by outline items
 
+### 🏆 Community Contributors
+
+🥇 **@jvantuyl** - Thanks for the thorough PR #16 fixing outline action dereferencing! Your investigation uncovered that some PDFs embed actions directly while others use indirect references - a subtle PDF spec detail that was breaking bookmark navigation. Your fix included comprehensive tests ensuring this won't regress. 🔍✨
+
+🙏 **@mert-kurttutan** - Thanks for the honest feedback in issue #15 about README clutter. Your perspective as a new user helped us realize we were overwhelming people with information. The resulting documentation cleanup makes PDFOxide more approachable. 📚
+
 ## [0.2.6] - 2026-01-09
 
 ### Added
@@ -237,6 +328,10 @@ All notable changes to PDFOxide are documented here.
 - `ConversionOptions`: new fields `render_formulas`, `page_images`, `page_dimensions` for formula image embedding
 - Regression tests for CTM transformation
 
+### 🏆 Community Contributors
+
+🐛➡️✅ **@mert-kurttutan** - Thanks for the detailed bug report (#11) with reproducible sample PDF! Your report exposed a fundamental CTM transformation bug affecting text positioning across the entire library. This fix was critical for production use. 🎉
+
 ## [0.2.3] - 2026-01-07
 
 ### Fixed
@@ -251,6 +346,14 @@ All notable changes to PDFOxide are documented here.
 ### Changed
 - Removed unused tesseract-rs dependency
 
+### 🏆 Community Contributors
+
+🥇 **@drahnr** - Huge thanks for PR #10 fixing the BT/ET matrix reset issue! This was a subtle PDF spec compliance bug (Section 9.4.1) where text matrices weren't being reset between text blocks, causing positions to accumulate and become unusable. Your fix restored correct text positioning for all PDFs. 💪📐
+
+🔬 **@JanIvarMoldekleiv** - Thanks for the detailed bug report (#5) about missing spaces and lost table structure! Your analysis even identified the root cause in the code - the markdown converter wasn't using geometric spacing analysis. This level of investigation made the fix straightforward. 🕵️‍♂️
+
+🎯 **@Borderliner** - Thanks for two important catches! Issue #6 revealed that `apply_intelligent_text_processing()` was documented but not actually available (oops! 😅), and #7 caught our overly verbose INFO-level logging flooding terminals. Both fixed immediately! 🔧
+
 ## [0.2.2] - 2025-12-15
 
 ### Changed
@@ -261,6 +364,10 @@ All notable changes to PDFOxide are documented here.
 ### Fixed
 - Encrypted stream decoding improvements (#3)
 - CI/CD pipeline fixes
+
+### 🏆 Community Contributors
+
+🥇 **@threebeanbags** - Huge thanks for PRs #2 and #3 fixing encrypted PDF support! 🔐 Your first PR identified that decryption needed to happen before decompression - a critical ordering issue. Your follow-up PR #3 went deeper, fixing encryption handler initialization timing and adding Form XObject encryption support. These fixes made PDFOxide actually work with password-protected PDFs in production. 💪🎉
 
 ## [0.1.4] - 2025-12-12
 
@@ -294,3 +401,7 @@ All notable changes to PDFOxide are documented here.
 - Support for encrypted PDFs
 - Form field extraction
 - Image extraction
+
+### 🌟 Early Adopters
+
+💖 **@magnus-trent** - Thanks for issue #1, our first community feedback! Your message that PDFOxide "unlocked an entire pipeline" you'd been working on for a month validated that we were solving real problems. Early encouragement like this keeps open source projects going. 🚀
