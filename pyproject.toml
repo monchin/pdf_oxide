@@ -38,6 +38,17 @@ Repository = "https://github.com/yfedoseev/pdf_oxide"
 "Bug Tracker" = "https://github.com/yfedoseev/pdf_oxide/issues"
 
 [dependency-groups]
+dev = [
+    # Linter and formatter (fast, all-in-one tool written in Rust)
+    "ruff>=0.1.0",
+    # Testing
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    # Type checking (optional)
+    "mypy>=1.0",
+    # Build tool for Python bindings
+    "maturin>=1.0,<2.0",
+]
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
