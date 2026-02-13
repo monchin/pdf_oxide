@@ -20,6 +20,7 @@ use crate::parser::parse_object;
 use nom::bytes::complete::take_while1;
 use nom::character::complete::multispace0;
 use nom::IResult;
+use nom::Parser;
 use std::collections::HashMap;
 
 /// Parse a content stream into a sequence of operators.
@@ -58,7 +59,7 @@ pub fn parse_content_stream(data: &[u8]) -> Result<Vec<Operator>> {
     // Parse until we consume all input
     while !input.is_empty() {
         // Skip whitespace
-        if let Ok((rest, _)) = multispace0::<&[u8], nom::error::Error<&[u8]>>(input) {
+        if let Ok((rest, _)) = multispace0::<&[u8], nom::error::Error<&[u8]>>.parse(input) {
             input = rest;
         }
 
@@ -98,7 +99,7 @@ fn parse_operator_with_operands(input: &[u8]) -> IResult<&[u8], Operator> {
 
     loop {
         // Skip whitespace
-        let (inp, _) = multispace0(remaining)?;
+        let (inp, _) = multispace0.parse(remaining)?;
         remaining = inp;
 
         if remaining.is_empty() {
@@ -145,9 +146,8 @@ fn is_operator_start(byte: u8) -> bool {
 /// - Star (*) for T* operator
 fn parse_operator_name(input: &[u8]) -> IResult<&[u8], &str> {
     let (input, name_bytes) =
-        take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'\'' || c == b'"' || c == b'*')(
-            input,
-        )?;
+        take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'\'' || c == b'"' || c == b'*')
+            .parse(input)?;
 
     let name = std::str::from_utf8(name_bytes)
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))?;
@@ -599,7 +599,7 @@ fn parse_inline_image(input: &[u8]) -> IResult<&[u8], Operator> {
     // Step 1: Parse the inline image dictionary (key-value pairs)
     loop {
         // Skip whitespace
-        let (inp, _) = multispace0(remaining)?;
+        let (inp, _) = multispace0.parse(remaining)?;
         remaining = inp;
 
         if remaining.is_empty() {
@@ -623,7 +623,7 @@ fn parse_inline_image(input: &[u8]) -> IResult<&[u8], Operator> {
         remaining = inp;
 
         // Skip whitespace after key
-        let (inp, _) = multispace0(remaining)?;
+        let (inp, _) = multispace0.parse(remaining)?;
         remaining = inp;
 
         // Parse the corresponding value
@@ -637,7 +637,7 @@ fn parse_inline_image(input: &[u8]) -> IResult<&[u8], Operator> {
     }
 
     // Step 2: Skip whitespace after ID
-    let (inp, _) = multispace0(remaining)?;
+    let (inp, _) = multispace0.parse(remaining)?;
     remaining = inp;
 
     // Step 3: Read binary image data until we find EI

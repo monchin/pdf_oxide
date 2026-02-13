@@ -23,7 +23,7 @@ use nom::{
     combinator::{map, opt, value},
     multi::many0,
     sequence::{delimited, preceded},
-    IResult,
+    IResult, Parser,
 };
 
 /// Token types recognized by the PDF lexer.
@@ -95,7 +95,7 @@ pub enum Token<'a> {
 /// Returns an error if no whitespace is found (requires at least one whitespace char).
 fn whitespace(input: &[u8]) -> IResult<&[u8], ()> {
     let (remaining, ws) =
-        take_while(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x00 | 0x0C))(input)?;
+        take_while(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x00 | 0x0C)).parse(input)?;
 
     // Require at least one whitespace character
     if ws.is_empty() {
@@ -109,7 +109,7 @@ fn whitespace(input: &[u8]) -> IResult<&[u8], ()> {
 ///
 /// Comments start with % and continue until CR or LF (PDF Ref 1.7, Section 3.1.2).
 fn comment(input: &[u8]) -> IResult<&[u8], ()> {
-    value((), preceded(char('%'), take_till(|c| c == b'\r' || c == b'\n')))(input)
+    value((), preceded(char('%'), take_till(|c| c == b'\r' || c == b'\n'))).parse(input)
 }
 
 /// Skip all whitespace and comments.
@@ -152,13 +152,13 @@ fn skip_ws(input: &[u8]) -> IResult<&[u8], &[u8]> {
 /// Note: PDF allows leading +/- signs and numbers starting with decimal point.
 fn parse_number(input: &[u8]) -> IResult<&[u8], Token<'_>> {
     // Parse optional sign
-    let (input, sign) = opt(one_of("+-"))(input)?;
+    let (input, sign) = opt(one_of("+-")).parse(input)?;
 
     // Parse digits before decimal point (optional if starts with .)
-    let (input, int_part) = opt(digit1)(input)?;
+    let (input, int_part) = opt(digit1).parse(input)?;
 
     // Parse optional decimal point and fractional part
-    let (input, frac_part) = opt(preceded(char('.'), opt(digit1)))(input)?;
+    let (input, frac_part) = opt(preceded(char('.'), opt(digit1))).parse(input)?;
 
     // Must have either integer part or fractional part
     if int_part.is_none() && frac_part.is_none() {
@@ -296,7 +296,8 @@ fn parse_hex_string(input: &[u8]) -> IResult<&[u8], Token<'_>> {
             Token::HexString,
         ),
         char('>'),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Decode #XX escape sequences in PDF names.
@@ -393,7 +394,8 @@ fn parse_name(input: &[u8]) -> IResult<&[u8], Token<'_>> {
                 Token::Name(decode_name_escapes(name_str))
             },
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse PDF keywords and delimiters.
@@ -410,22 +412,23 @@ fn parse_name(input: &[u8]) -> IResult<&[u8], Token<'_>> {
 fn parse_keyword(input: &[u8]) -> IResult<&[u8], Token<'_>> {
     alt((
         // Multi-character keywords (check first)
-        value(Token::False, tag(b"false")),
-        value(Token::True, tag(b"true")),
-        value(Token::Null, tag(b"null")),
-        value(Token::ObjStart, tag(b"obj")),
-        value(Token::ObjEnd, tag(b"endobj")),
-        value(Token::StreamEnd, tag(b"endstream")), // Check before "stream"
-        value(Token::StreamStart, tag(b"stream")),
+        value(Token::False, tag(&b"false"[..])),
+        value(Token::True, tag(&b"true"[..])),
+        value(Token::Null, tag(&b"null"[..])),
+        value(Token::ObjStart, tag(&b"obj"[..])),
+        value(Token::ObjEnd, tag(&b"endobj"[..])),
+        value(Token::StreamEnd, tag(&b"endstream"[..])), // Check before "stream"
+        value(Token::StreamStart, tag(&b"stream"[..])),
         // Multi-character delimiters
-        value(Token::DictStart, tag(b"<<")),
-        value(Token::DictEnd, tag(b">>")),
+        value(Token::DictStart, tag(&b"<<"[..])),
+        value(Token::DictEnd, tag(&b">>"[..])),
         // Single-character delimiters
-        value(Token::ArrayStart, tag(b"[")),
-        value(Token::ArrayEnd, tag(b"]")),
+        value(Token::ArrayStart, tag(&b"["[..])),
+        value(Token::ArrayEnd, tag(&b"]"[..])),
         // Reference marker
-        value(Token::R, tag(b"R")),
-    ))(input)
+        value(Token::R, tag(&b"R"[..])),
+    ))
+    .parse(input)
 }
 
 /// Parse a single PDF token.
@@ -456,7 +459,8 @@ pub fn token(input: &[u8]) -> IResult<&[u8], Token<'_>> {
         parse_number,         // Then numbers (42, 3.14)
         parse_literal_string, // Then literal strings
         parse_hex_string,     // Then hex strings
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse multiple tokens from input.
@@ -466,7 +470,7 @@ pub fn token(input: &[u8]) -> IResult<&[u8], Token<'_>> {
 ///
 /// Returns a vector of all successfully parsed tokens.
 pub fn tokens(input: &[u8]) -> IResult<&[u8], Vec<Token<'_>>> {
-    many0(token)(input)
+    many0(token).parse(input)
 }
 
 #[cfg(test)]

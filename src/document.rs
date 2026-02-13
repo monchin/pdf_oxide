@@ -1546,7 +1546,10 @@ impl PdfDocument {
 
         // Iterate through all objects looking for Page objects
         for obj_num in obj_nums {
-            if let Ok(obj) = self.load_object(ObjectRef { id: obj_num, gen: 0 }) {
+            if let Ok(obj) = self.load_object(ObjectRef {
+                id: obj_num,
+                gen: 0,
+            }) {
                 if let Some(dict) = obj.as_dict() {
                     if let Some(type_obj) = dict.get("Type") {
                         if let Some(type_name) = type_obj.as_name() {
