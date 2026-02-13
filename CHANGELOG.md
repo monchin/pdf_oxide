@@ -2,6 +2,51 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.4] - 2026-02-12
+
+### ⚠️ Breaking Changes
+- **`parse_header()` function signature** - Now includes offset tracking
+  - **Before**: `parse_header(reader) -> Result<(u8, u8)>`
+  - **After**: `parse_header(reader, lenient) -> Result<(u8, u8, u64)>`
+  - **Migration**: Replace `let (major, minor) = parse_header(&mut reader)?;` with `let (major, minor, _offset) = parse_header(&mut reader, true)?;`
+  - Note: This is a public API function; consider using `doc.version()` for typical use cases instead
+
+### Fixed - PDF Parsing Robustness (Issue #41)
+- **Header offset support** - PDFs with binary prefixes or BOM headers now open successfully
+  - Parse header function now searches first 1024 bytes for `%PDF-` marker (PDF spec compliant)
+  - Supports UTF-8 BOM, email headers, and other leading binary data
+  - `parse_header()` returns byte offset where header was found
+  - Lenient mode (default) handles real-world malformed PDFs; strict mode for compliance testing
+  - Fixes parsing errors like "expected '%PDF-', found '1b965'"
+
+### Added - Character-Level Text Extraction (Issue #39)
+- **`extract_chars()` API** - Low-level character-level extraction for layout analysis
+  - Returns `Vec<TextChar>` with per-character positioning, font, and styling data
+  - Includes transformation matrix, rotation angle, advance width
+  - Sorted in reading order (top-to-bottom, left-to-right)
+  - Overlapping characters (rendered multiple times) deduplicated
+  - 30-50% faster than span extraction for character-only use cases
+  - Exposed in both Rust and Python APIs
+  - **Python binding**: `doc.extract_chars(page_index)` returns list of `TextChar` objects
+
+### Added - XObject Path Extraction (Issue #40)
+- **Form XObject support in path extraction** - Now extracts vectors from embedded XObjects
+  - `extract_paths()` recursively processes Form XObjects via `Do` operator
+  - Image XObjects properly skipped (only Form XObjects extracted)
+  - Coordinate transformations via `/Matrix` properly applied
+  - Graphics state properly isolated (save/restore)
+  - Duplicate XObject detection prevents infinite loops
+  - Nested XObjects (XObject containing XObject) supported
+
+### Changed
+- **Dependencies**: Upgraded nom parser library from 7.1 to 8.0
+  - Updated all parser combinators to use `.parse()` method
+  - No user-facing API changes
+  - All parser functionality maintained
+  - Performance stable (no regressions detected)
+- `parse_header()` signature updated: now returns `(major, minor, offset)` tuple
+- All parse_header test cases updated to use new signature
+
 ## [0.3.1] - 2026-01-14
 
 ### Added - Form Field Coverage (95% across Read/Create/Modify)

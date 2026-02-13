@@ -57,6 +57,18 @@ pub enum FillRule {
 /// This struct maintains state during content stream processing and accumulates
 /// path operations. When a painting operator is encountered, the current path
 /// is finalized and added to the extracted paths list.
+///
+/// # XObject Support (Issue #40)
+///
+/// The extractor can recursively process Form XObjects by maintaining a reference
+/// to page resources and the document. When encountering a `Do` operator with a
+/// Form XObject name, it will:
+/// 1. Resolve the XObject from resources
+/// 2. Check if it's a Form (not Image)
+/// 3. Apply coordinate transformations
+/// 4. Recursively extract paths from the XObject stream
+///
+/// XObjects are tracked to prevent infinite loops from circular references.
 #[derive(Debug)]
 pub struct PathExtractor {
     /// Accumulated complete paths
@@ -75,6 +87,14 @@ pub struct PathExtractor {
     current_line_join: LineJoin,
     /// Current transformation matrix for coordinate transformation
     ctm: Matrix,
+    /// Page resources for XObject resolution (Issue #40)
+    resources: Option<crate::object::Object>,
+    /// Stack of XObjects being processed to detect cycles (Issue #40)
+    /// Uses a call stack approach instead of global "processed" set to allow
+    /// the same XObject to be extracted at different transformations
+    xobject_processing_stack: Vec<crate::object::ObjectRef>,
+    /// Maximum XObject nesting depth (prevent stack overflow)
+    max_xobject_depth: usize,
 }
 
 impl PathExtractor {
@@ -91,7 +111,44 @@ impl PathExtractor {
             current_line_cap: LineCap::Butt,
             current_line_join: LineJoin::Miter,
             ctm: Matrix::identity(),
+            resources: None,
+            xobject_processing_stack: Vec::new(),
+            max_xobject_depth: 100, // Prevent infinite recursion
         }
+    }
+
+    /// Set the page resources for XObject resolution (Issue #40).
+    pub fn set_resources(&mut self, resources: crate::object::Object) {
+        self.resources = Some(resources);
+    }
+
+    /// Get the page resources if available.
+    pub(crate) fn get_resources(&self) -> Option<&crate::object::Object> {
+        self.resources.as_ref()
+    }
+
+    /// Check if an XObject is already in the processing stack (cycle detection)
+    /// and if we haven't exceeded maximum nesting depth (Issue #40).
+    pub(crate) fn can_process_xobject(&self, xobject_ref: crate::object::ObjectRef) -> bool {
+        // Check if already in processing stack (would cause infinite recursion)
+        if self.xobject_processing_stack.contains(&xobject_ref) {
+            return false;
+        }
+        // Check if we've exceeded maximum nesting depth
+        if self.xobject_processing_stack.len() >= self.max_xobject_depth {
+            return false;
+        }
+        true
+    }
+
+    /// Push an XObject onto the processing stack (called before processing).
+    pub(crate) fn push_xobject(&mut self, xobject_ref: crate::object::ObjectRef) {
+        self.xobject_processing_stack.push(xobject_ref);
+    }
+
+    /// Pop an XObject from the processing stack (called after processing).
+    pub(crate) fn pop_xobject(&mut self) {
+        self.xobject_processing_stack.pop();
     }
 
     /// Update the current transformation matrix.
