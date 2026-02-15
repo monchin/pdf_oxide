@@ -1572,8 +1572,8 @@ impl PdfDocument {
         let mut obj_nums: Vec<u32> = self.xref.all_object_numbers().collect();
         obj_nums.sort_unstable();
 
-        // Iterate through all objects looking for Page objects
-        for obj_num in obj_nums {
+        // First pass: look for objects with /Type /Page
+        for &obj_num in &obj_nums {
             if let Ok(obj) = self.load_object(ObjectRef {
                 id: obj_num,
                 gen: 0,
@@ -1587,6 +1587,33 @@ impl PdfDocument {
                                 }
                                 current_index += 1;
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second pass: heuristic detection for pages without /Type entry
+        // Look for dicts with /MediaBox or /Contents but no /Type
+        if current_index == 0 {
+            let mut heuristic_index = 0;
+            for &obj_num in &obj_nums {
+                if let Ok(obj) = self.load_object(ObjectRef {
+                    id: obj_num,
+                    gen: 0,
+                }) {
+                    if let Some(dict) = obj.as_dict() {
+                        if dict.get("Type").is_none()
+                            && (dict.contains_key("MediaBox") || dict.contains_key("Contents"))
+                        {
+                            log::debug!(
+                                "Heuristic page candidate: object {} (has MediaBox/Contents but no /Type)",
+                                obj_num
+                            );
+                            if heuristic_index == target_index {
+                                return Ok(obj);
+                            }
+                            heuristic_index += 1;
                         }
                     }
                 }
