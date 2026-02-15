@@ -665,8 +665,7 @@ impl PdfDocument {
                     "Object {} is a low-numbered object (likely critical), attempting fallback lookup",
                     obj_ref.id
                 );
-                // TODO: Implement file scanning fallback
-                // For now, try loading anyway if offset looks reasonable
+                // File scanning fallback implemented via get_page_by_scanning() (Issues #54, #57)
                 if entry.offset > 0 && entry.offset < 100_000_000 {
                     log::info!(
                         "Attempting to load object {} from offset {} despite free status",
