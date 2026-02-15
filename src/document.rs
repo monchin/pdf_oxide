@@ -4769,7 +4769,7 @@ pub enum ImageFormat {
 /// # Arguments
 ///
 /// * `reader` - A readable and seekable source (e.g., File, Cursor)
-/// * `lenient` - If false, fail if header not at byte 0; if true, search first 1024 bytes
+/// * `lenient` - If false, fail if header not at byte 0; if true, search first 8192 bytes
 ///
 /// # Returns
 ///
@@ -4825,11 +4825,11 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
         )));
     }
 
-    // Lenient mode: search first 1024 bytes
+    // Lenient mode: search first 8192 bytes
     reader.seek(SeekFrom::Start(start_pos))?;
 
-    // Read up to 1024 bytes
-    let mut buffer = vec![0u8; 1024];
+    // Read up to 8192 bytes
+    let mut buffer = vec![0u8; 8192];
     let bytes_read = match reader.read(&mut buffer) {
         Ok(0) => return Err(Error::InvalidHeader("File is empty (0 bytes read)".to_string())),
         Ok(n) => n,
@@ -4868,7 +4868,7 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
             Ok((major, minor, header_start))
         },
         None => Err(Error::InvalidHeader(
-            "No PDF header found in first 1024 bytes of file".to_string(),
+            "No PDF header found in first 8192 bytes of file".to_string(),
         )),
     }
 }

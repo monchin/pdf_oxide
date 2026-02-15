@@ -1,7 +1,7 @@
 //! Tests for PDF header parsing with binary prefixes and resilience handling.
 //!
 //! Verifies that PDFs with binary data before the PDF header can be parsed.
-//! Tests lenient mode which searches first 1024 bytes for %PDF- marker.
+//! Tests lenient mode which searches first 8192 bytes for %PDF- marker.
 
 #[test]
 fn test_pdf_header_parsing_basic() {
@@ -68,4 +68,33 @@ fn test_pdf_header_parsing_multiple_pages() {
     for i in 0..page_count {
         let _ = doc.extract_spans(i);
     }
+}
+
+#[test]
+fn test_header_beyond_1024_bytes() {
+    use pdf_oxide::document::parse_header;
+    use std::io::Cursor;
+
+    // 2000 bytes of junk followed by a valid PDF header
+    let mut data = vec![b'X'; 2000];
+    data.extend_from_slice(b"%PDF-1.4\n");
+
+    let mut cursor = Cursor::new(data);
+    let (major, minor, offset) = parse_header(&mut cursor, true).unwrap();
+    assert_eq!(major, 1);
+    assert_eq!(minor, 4);
+    assert_eq!(offset, 2000);
+}
+
+#[test]
+fn test_header_beyond_8192_bytes_fails() {
+    use pdf_oxide::document::parse_header;
+    use std::io::Cursor;
+
+    // 9000 bytes of junk — beyond the 8192-byte search window
+    let mut data = vec![b'X'; 9000];
+    data.extend_from_slice(b"%PDF-1.4\n");
+
+    let mut cursor = Cursor::new(data);
+    assert!(parse_header(&mut cursor, true).is_err());
 }
