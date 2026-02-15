@@ -98,3 +98,36 @@ fn test_header_beyond_8192_bytes_fails() {
     let mut cursor = Cursor::new(data);
     assert!(parse_header(&mut cursor, true).is_err());
 }
+
+#[test]
+fn test_header_with_newline_in_version() {
+    use pdf_oxide::document::parse_header;
+    use std::io::Cursor;
+
+    // %PDF-1.\n — newline where minor version digit should be
+    let data = b"%PDF-1.\n";
+    let mut cursor = Cursor::new(&data[..]);
+    // Strict mode should fail
+    assert!(parse_header(&mut cursor, false).is_err());
+
+    // Lenient mode (via search path): put junk before to force lenient parsing path
+    let mut lenient_data = vec![b'X'; 1];
+    lenient_data.extend_from_slice(b"%PDF-1.\n");
+    let mut cursor = Cursor::new(lenient_data);
+    let (major, minor, _offset) = parse_header(&mut cursor, true).unwrap();
+    assert_eq!((major, minor), (1, 4)); // defaults to 1.4
+}
+
+#[test]
+fn test_header_with_letter_version() {
+    use pdf_oxide::document::parse_header;
+    use std::io::Cursor;
+
+    // %PDF-a.4 — letter where major version digit should be
+    let mut data = vec![b'X'; 1];
+    data.extend_from_slice(b"%PDF-a.4");
+    data.push(b'\n');
+    let mut cursor = Cursor::new(data);
+    let (major, minor, _offset) = parse_header(&mut cursor, true).unwrap();
+    assert_eq!((major, minor), (1, 4)); // defaults to 1.4
+}

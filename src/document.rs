@@ -4798,7 +4798,8 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
         Ok(_) => {
             // Check if header is at position 0
             if &header[0..5] == b"%PDF-" {
-                return parse_version_from_header(&header).map(|(major, minor)| (major, minor, 0));
+                return parse_version_from_header(&header, false)
+                    .map(|(major, minor)| (major, minor, 0));
             }
             true
         },
@@ -4857,7 +4858,7 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
             let mut header_arr = [0u8; 8];
             header_arr.copy_from_slice(header_bytes);
 
-            let (major, minor) = parse_version_from_header(&header_arr)?;
+            let (major, minor) = parse_version_from_header(&header_arr, true)?;
 
             // Standardize reader position to just after the header
             // (consistent with strict mode behavior at line 4378)
@@ -4875,7 +4876,10 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
 
 /// Parse version information from a header buffer.
 /// Assumes buffer starts with "%PDF-" and has at least 8 bytes.
-fn parse_version_from_header(header: &[u8; 8]) -> Result<(u8, u8)> {
+///
+/// When `lenient` is true, malformed version strings (e.g., `%PDF-1.\n`, `%PDF-a.4`)
+/// default to version (1, 4) instead of returning an error.
+fn parse_version_from_header(header: &[u8; 8], lenient: bool) -> Result<(u8, u8)> {
     // Check magic bytes "%PDF-"
     if &header[0..5] != b"%PDF-" {
         return Err(Error::InvalidHeader(format!(
@@ -4887,6 +4891,13 @@ fn parse_version_from_header(header: &[u8; 8]) -> Result<(u8, u8)> {
     // Parse version (e.g., "1.7")
     // Format: %PDF-M.m where M is major version (1 digit), m is minor version (1 digit)
     if header[6] != b'.' {
+        if lenient {
+            log::warn!(
+                "Malformed PDF version format (expected '.', found '{}'), defaulting to 1.4",
+                header[6] as char
+            );
+            return Ok((1, 4));
+        }
         return Err(Error::InvalidHeader(format!(
             "Invalid version format: expected '.', found '{}'",
             header[6] as char
@@ -4898,6 +4909,14 @@ fn parse_version_from_header(header: &[u8; 8]) -> Result<(u8, u8)> {
 
     // Validate digits
     if !major.is_ascii_digit() || !minor.is_ascii_digit() {
+        if lenient {
+            log::warn!(
+                "Malformed PDF version '{}.{}' (non-digit characters), defaulting to 1.4",
+                major as char,
+                minor as char
+            );
+            return Ok((1, 4));
+        }
         return Err(Error::InvalidHeader(format!(
             "Invalid version: {}.{} (not digits)",
             major as char, minor as char
@@ -4909,6 +4928,10 @@ fn parse_version_from_header(header: &[u8; 8]) -> Result<(u8, u8)> {
 
     // Validate version range (PDF 1.0 - 2.0)
     if major > 2 || (major == 0 && minor == 0) {
+        if lenient {
+            log::warn!("Unsupported PDF version {}.{}, defaulting to 1.4", major, minor);
+            return Ok((1, 4));
+        }
         return Err(Error::UnsupportedVersion(format!("{}.{}", major, minor)));
     }
 
