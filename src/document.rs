@@ -300,6 +300,25 @@ impl PdfDocument {
             },
         };
 
+        // Resolve any indirect references within the encrypt dictionary.
+        // Some PDFs store /O, /U, /V, /R, /P as indirect references (e.g., `7 0 R`).
+        let encrypt_obj = if let Some(dict) = encrypt_obj.as_dict() {
+            let mut resolved_dict = dict.clone();
+            for (_key, value) in resolved_dict.iter_mut() {
+                if let Object::Reference(obj_ref) = value {
+                    match self.load_object(*obj_ref) {
+                        Ok(resolved) => *value = resolved,
+                        Err(e) => {
+                            log::warn!("Failed to resolve indirect ref in /Encrypt dict: {}", e);
+                        },
+                    }
+                }
+            }
+            Object::Dictionary(resolved_dict)
+        } else {
+            encrypt_obj
+        };
+
         // Create encryption handler with the file_id we extracted above
         let mut handler = EncryptionHandler::new(&encrypt_obj, file_id)?;
 
