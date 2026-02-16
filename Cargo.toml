@@ -9,8 +9,8 @@ repository = "https://github.com/yfedoseev/pdf_oxide"
 homepage = "https://github.com/yfedoseev/pdf_oxide"
 documentation = "https://docs.rs/pdf_oxide"
 readme = "README.md"
-keywords = ["pdf", "text-extraction", "pdf-creation", "pdf-editing", "parser"]
-categories = ["parsing", "text-processing"]
+keywords = ["pdf", "text-extraction", "pdf-parser", "markdown", "document"]
+categories = ["parsing", "text-processing", "multimedia::images"]
 
 [lib]
 name = "pdf_oxide"
