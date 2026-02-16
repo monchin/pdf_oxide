@@ -3,6 +3,7 @@
 All notable changes to PDFOxide are documented here.
 
 ## [0.3.5] - 2026-02-15
+> Performance, 3,830-PDF Stability & Error Recovery
 
 ### Performance
 
@@ -125,6 +126,7 @@ All notable changes to PDFOxide are documented here.
 🥇 **@SeanPedersen** — Huge thanks to Sean for reporting multiple issues (#41, #44, #45, #46) that drove the entire stability focus of this release. His real-world testing uncovered a parser bug with Google-generated PDFs, image extraction failures on content stream references, and performance problems — each report triggering deep investigation and significant fixes. The parser robustness, image extraction, and testing infrastructure improvements in v0.3.5 all trace back to Sean's thorough bug reports. 🙏🔍
 
 ## [0.3.4] - 2026-02-12
+> Parsing Robustness, Character Extraction & XObject Paths
 
 ### ⚠️ Breaking Changes
 - **`parse_header()` function signature** - Now includes offset tracking
@@ -170,6 +172,7 @@ All notable changes to PDFOxide are documented here.
 - All parse_header test cases updated to use new signature
 
 ## [0.3.1] - 2026-01-14
+> Form Fields, Multimedia & Python 3.8-3.14
 
 ### Added - Form Field Coverage (95% across Read/Create/Modify)
 
@@ -255,6 +258,7 @@ All notable changes to PDFOxide are documented here.
 🥈 **@bikallem** - Thanks for the thoughtful feature request (#27) comparing PDFOxide to pdfium-render. Your detailed analysis of missing origin coordinates and rotation angles led directly to our TextChar transformation feature. This makes PDFOxide a viable migration path for pdfium-render users. 🎯
 
 ## [0.3.0] - 2026-01-10
+> Unified API, PDF Creation & Editing
 
 ### Added - Unified `Pdf` API
 - **One API for Extract, Create, and Edit** - The new `Pdf` class unifies all PDF operations
@@ -437,6 +441,7 @@ All notable changes to PDFOxide are documented here.
 🙏 **@mert-kurttutan** - Thanks for the honest feedback in issue #15 about README clutter. Your perspective as a new user helped us realize we were overwhelming people with information. The resulting documentation cleanup makes PDFOxide more approachable. 📚
 
 ## [0.2.6] - 2026-01-09
+> CJK Support & Structure Tree Enhancements
 
 ### Added
 - **TagSuspect/MarkInfo support** (ISO 32000-1 Section 14.7.1)
@@ -472,6 +477,7 @@ All notable changes to PDFOxide are documented here.
 - `OrderedContent.mcid` changed to `Option<u32>` to support word break markers
 
 ## [0.2.5] - 2026-01-09
+> Image Embedding & Export
 
 ### Added
 - **Image embedding**: Both HTML and Markdown now support embedded base64 images when `embed_images=true` (default)
@@ -484,6 +490,7 @@ All notable changes to PDFOxide are documented here.
 - Python bindings: new `embed_images` parameter for `to_html`, `to_markdown`, and `*_all` methods
 
 ## [0.2.4] - 2026-01-09
+> CTM Fix & Formula Rendering
 
 ### Fixed
 - CTM (Current Transformation Matrix) now correctly applied to text positions per PDF Spec ISO 32000-1:2008 Section 9.4.4 (#11)
@@ -500,6 +507,7 @@ All notable changes to PDFOxide are documented here.
 🐛➡️✅ **@mert-kurttutan** - Thanks for the detailed bug report (#11) with reproducible sample PDF! Your report exposed a fundamental CTM transformation bug affecting text positioning across the entire library. This fix was critical for production use. 🎉
 
 ## [0.2.3] - 2026-01-07
+> BT/ET Matrix Reset & Text Processing
 
 ### Fixed
 - BT/ET matrix reset per PDF spec Section 9.4.1 (PR #10 by @drahnr)
@@ -522,11 +530,13 @@ All notable changes to PDFOxide are documented here.
 🎯 **@Borderliner** - Thanks for two important catches! Issue #6 revealed that `apply_intelligent_text_processing()` was documented but not actually available (oops! 😅), and #7 caught our overly verbose INFO-level logging flooding terminals. Both fixed immediately! 🔧
 
 ## [0.2.2] - 2025-12-15
+> Discoverability Improvements
 
 ### Changed
 - Optimized crate keywords for better discoverability
 
 ## [0.2.1] - 2025-12-15
+> Encrypted PDF Fixes
 
 ### Fixed
 - Encrypted stream decoding improvements (#3)
