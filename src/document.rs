@@ -1761,7 +1761,8 @@ impl PdfDocument {
                         }
                     }
                 }
-                self.page_cache.insert(*page_index, Object::Dictionary(page_dict));
+                self.page_cache
+                    .insert(*page_index, Object::Dictionary(page_dict));
                 *page_index += 1;
             },
             "Pages" => {
@@ -1779,8 +1780,13 @@ impl PdfDocument {
                 if let Some(kids) = node_dict.get("Kids").and_then(|obj| obj.as_array()) {
                     for kid in kids {
                         if let Some(kid_ref) = kid.as_reference() {
-                            if let Err(e) = self.collect_all_pages(kid_ref, page_index, inherited, visited) {
-                                log::warn!("Error collecting page from tree: {}, skipping branch", e);
+                            if let Err(e) =
+                                self.collect_all_pages(kid_ref, page_index, inherited, visited)
+                            {
+                                log::warn!(
+                                    "Error collecting page from tree: {}, skipping branch",
+                                    e
+                                );
                             }
                         }
                     }

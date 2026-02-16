@@ -56,13 +56,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t2 = Instant::now();
         let text = doc.extract_text(page_idx)?;
         let extract_time = t2.elapsed();
-        eprintln!("  extract_text: {:.1}ms ({} chars)", extract_time.as_secs_f64() * 1000.0, text.len());
+        eprintln!(
+            "  extract_text: {:.1}ms ({} chars)",
+            extract_time.as_secs_f64() * 1000.0,
+            text.len()
+        );
 
         // Time extract_text again (cached fonts)
         let t3 = Instant::now();
         let text2 = doc.extract_text(page_idx)?;
         let extract_time2 = t3.elapsed();
-        eprintln!("  extract_text (2nd): {:.1}ms ({} chars)", extract_time2.as_secs_f64() * 1000.0, text2.len());
+        eprintln!(
+            "  extract_text (2nd): {:.1}ms ({} chars)",
+            extract_time2.as_secs_f64() * 1000.0,
+            text2.len()
+        );
 
         return Ok(());
     }
@@ -82,21 +90,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if elapsed.as_millis() > 100 {
             eprintln!(
                 "  Page {}/{}: {:.1}ms ({} chars) *** SLOW ***",
-                page_idx, page_count,
-                elapsed.as_secs_f64() * 1000.0, chars
+                page_idx,
+                page_count,
+                elapsed.as_secs_f64() * 1000.0,
+                chars
             );
         } else {
             eprintln!(
                 "  Page {}/{}: {:.1}ms ({} chars)",
-                page_idx, page_count,
-                elapsed.as_secs_f64() * 1000.0, chars
+                page_idx,
+                page_count,
+                elapsed.as_secs_f64() * 1000.0,
+                chars
             );
         }
     }
 
     eprintln!(
         "\nTotal: {:.1}ms for {} pages, {} chars",
-        total_time.as_secs_f64() * 1000.0, page_count, total_chars
+        total_time.as_secs_f64() * 1000.0,
+        page_count,
+        total_chars
     );
 
     Ok(())

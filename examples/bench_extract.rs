@@ -25,23 +25,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Phase 1: extract_text (includes structure tree parse + spans + assembly)
         let t1 = Instant::now();
         let text = doc.extract_text(pg)?;
-        eprintln!("  extract_text: {:.0}ms ({} chars)", t1.elapsed().as_secs_f64() * 1000.0, text.len());
+        eprintln!(
+            "  extract_text: {:.0}ms ({} chars)",
+            t1.elapsed().as_secs_f64() * 1000.0,
+            text.len()
+        );
 
         // Phase 2: extract_text again (cached structure tree + cached fonts)
         let t2 = Instant::now();
         let text2 = doc.extract_text(pg)?;
-        eprintln!("  extract_text (2nd): {:.0}ms ({} chars)", t2.elapsed().as_secs_f64() * 1000.0, text2.len());
+        eprintln!(
+            "  extract_text (2nd): {:.0}ms ({} chars)",
+            t2.elapsed().as_secs_f64() * 1000.0,
+            text2.len()
+        );
 
         // Phase 3: extract_spans only
         let t3 = Instant::now();
         let spans = doc.extract_spans(pg)?;
         let span_chars: usize = spans.iter().map(|s| s.text.len()).sum();
-        eprintln!("  extract_spans: {:.0}ms ({} spans, {} chars)", t3.elapsed().as_secs_f64() * 1000.0, spans.len(), span_chars);
+        eprintln!(
+            "  extract_spans: {:.0}ms ({} spans, {} chars)",
+            t3.elapsed().as_secs_f64() * 1000.0,
+            spans.len(),
+            span_chars
+        );
 
         // Phase 4: extract_chars (different code path)
         let t4 = Instant::now();
         let chars = doc.extract_chars(pg)?;
-        eprintln!("  extract_chars: {:.0}ms ({} chars)", t4.elapsed().as_secs_f64() * 1000.0, chars.len());
+        eprintln!(
+            "  extract_chars: {:.0}ms ({} chars)",
+            t4.elapsed().as_secs_f64() * 1000.0,
+            chars.len()
+        );
 
         return Ok(());
     }
