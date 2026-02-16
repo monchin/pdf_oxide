@@ -5024,31 +5024,42 @@ impl PdfDocument {
     }
 
     /// Transform a bounding box using CTM.
+    ///
+    /// Transforms all four corners and computes the axis-aligned bounding box,
+    /// which correctly handles rotation, shear, and negative scaling.
     fn transform_bbox_with_ctm(
         &self,
         rect: &crate::geometry::Rect,
         ctm: crate::content::Matrix,
     ) -> crate::geometry::Rect {
-        // Transform the corners of the bbox using the CTM
-        // Bottom-left corner
-        let x1 = ctm.a * rect.x + ctm.c * rect.y + ctm.e;
-        let y1 = ctm.b * rect.x + ctm.d * rect.y + ctm.f;
+        let x0 = rect.x;
+        let y0 = rect.y;
+        let x1 = rect.x + rect.width;
+        let y1 = rect.y + rect.height;
 
-        // Top-right corner
-        let x2 = ctm.a * (rect.x + rect.width) + ctm.c * (rect.y + rect.height) + ctm.e;
-        let y2 = ctm.b * (rect.x + rect.width) + ctm.d * (rect.y + rect.height) + ctm.f;
+        // Transform all four corners
+        let tx0 = ctm.a * x0 + ctm.c * y0 + ctm.e;
+        let ty0 = ctm.b * x0 + ctm.d * y0 + ctm.f;
 
-        // Create new bbox from transformed corners
-        let x = x1.min(x2);
-        let y = y1.min(y2);
-        let width = (x1 - x2).abs();
-        let height = (y1 - y2).abs();
+        let tx1 = ctm.a * x1 + ctm.c * y0 + ctm.e;
+        let ty1 = ctm.b * x1 + ctm.d * y0 + ctm.f;
+
+        let tx2 = ctm.a * x0 + ctm.c * y1 + ctm.e;
+        let ty2 = ctm.b * x0 + ctm.d * y1 + ctm.f;
+
+        let tx3 = ctm.a * x1 + ctm.c * y1 + ctm.e;
+        let ty3 = ctm.b * x1 + ctm.d * y1 + ctm.f;
+
+        let min_x = tx0.min(tx1).min(tx2).min(tx3);
+        let max_x = tx0.max(tx1).max(tx2).max(tx3);
+        let min_y = ty0.min(ty1).min(ty2).min(ty3);
+        let max_y = ty0.max(ty1).max(ty2).max(ty3);
 
         crate::geometry::Rect {
-            x,
-            y,
-            width,
-            height,
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
         }
     }
 

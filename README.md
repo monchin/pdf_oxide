@@ -79,7 +79,7 @@ for ch in chars:
 
 # Password-protected PDFs
 doc = PdfDocument("encrypted.pdf")
-doc.authenticate(b"password")
+doc.authenticate("password")
 text = doc.extract_text(0)
 ```
 
