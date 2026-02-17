@@ -1,6 +1,6 @@
 # PDF Oxide — Fast Python & Rust PDF Library
 
-The fastest Python PDF library for text extraction, image extraction, and markdown conversion. Built on a Rust core for reliability and speed — mean 2.1ms per page, 99.8% pass rate on 3,830 real-world PDFs.
+The fastest Python PDF library for text extraction, image extraction, and markdown conversion. Built on a Rust core for reliability and speed — mean 2.1ms per document, 99.8% pass rate on 3,830 real-world PDFs.
 
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![PyPI](https://img.shields.io/pypi/v/pdf_oxide.svg)](https://pypi.org/project/pdf_oxide/)
@@ -42,7 +42,7 @@ pdf_oxide = "0.3"
 
 ## Why pdf_oxide?
 
-- **Fast** — Rust core, mean 2.1ms per PDF page, p99 = 18ms, 98.4% under 10ms
+- **Fast** — Rust core, mean 2.1ms per document, p99 = 18ms, 98.4% under 10ms
 - **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics, zero slow (>5s) PDFs
 - **Complete** — Text extraction, image extraction, PDF creation, and editing in one library
 - **Dual-language** — First-class Rust API and Python bindings via PyO3
@@ -204,4 +204,4 @@ cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 
 ---
 
-**Rust** + **Python** | MIT/Apache-2.0 | 99.8% pass rate on 3,830 PDFs | mean 2.1ms | v0.3.6
+**Rust** + **Python** | MIT/Apache-2.0 | 99.8% pass rate on 3,830 PDFs | mean 2.1ms/doc | v0.3.6
