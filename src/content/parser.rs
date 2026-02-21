@@ -163,117 +163,42 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
                 },
             }
         } else {
-            // Outside BT/ET: selective scan — skip operands cheaply, only
-            // fully parse operators that affect text extraction.
-            let operand_start = input;
-
-            loop {
-                if let Ok((rest, _)) =
-                    multispace0::<&[u8], nom::error::Error<&[u8]>>.parse(input)
-                {
+            // Outside BT/ET: byte-level scan — skip operands and graphics
+            // operators using raw index arithmetic (no nom IResult overhead).
+            match scan_graphics_region(input, &mut consecutive_errors) {
+                ScanResult::EndOfData => break,
+                ScanResult::FoundBT { rest } => {
+                    operators.push(Operator::BeginText);
                     input = rest;
-                }
-                if input.is_empty() {
+                    inside_text = true;
+                },
+                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
+                    Ok((rest2, _)) => input = rest2,
+                    Err(_) => input = rest,
+                },
+                ScanResult::NeedFullParse {
+                    operand_start,
+                    after_op,
+                } => match parse_operator_with_operands(operand_start) {
+                    Ok((rest2, op)) => {
+                        operators.push(op);
+                        input = rest2;
+                    },
+                    Err(_) => input = after_op,
+                },
+                ScanResult::TooManyErrors { remaining } => {
+                    log::warn!(
+                        "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
+                        MAX_CONSECUTIVE_ERRORS,
+                        remaining.len()
+                    );
                     break;
-                }
-
-                if is_operator_start(input[0]) {
-                    match parse_operator_name(input) {
-                        Ok((rest, op_name)) => {
-                            // true/false/null are keyword operands, not operators
-                            if matches!(op_name, "true" | "false" | "null") {
-                                input = rest;
-                                continue;
-                            }
-
-                            if op_name == "BT" {
-                                operators.push(Operator::BeginText);
-                                input = rest;
-                                inside_text = true;
-                            } else if op_name == "BI" {
-                                // Skip inline image binary data
-                                match parse_inline_image(rest) {
-                                    Ok((rest2, _)) => input = rest2,
-                                    Err(_) => input = rest,
-                                }
-                            } else if is_skippable_graphics_op(op_name) {
-                                input = rest;
-                            } else {
-                                // Text-relevant or unknown: backtrack and full-parse
-                                input = operand_start;
-                                match parse_operator_with_operands(input) {
-                                    Ok((rest2, op)) => {
-                                        operators.push(op);
-                                        input = rest2;
-                                    },
-                                    Err(_) => {
-                                        input = rest;
-                                    },
-                                }
-                            }
-                            consecutive_errors = 0;
-                            break;
-                        },
-                        Err(_) => {
-                            consecutive_errors += 1;
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                break;
-                            }
-                            if input.len() > 1 {
-                                input = &input[1..];
-                            } else {
-                                break;
-                            }
-                            continue;
-                        },
-                    }
-                } else {
-                    // Operand token — skip without constructing an Object
-                    match skip_operand_token(input) {
-                        Ok((rest, ())) => {
-                            input = rest;
-                            consecutive_errors = 0;
-                        },
-                        Err(_) => {
-                            consecutive_errors += 1;
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                break;
-                            }
-                            if input.len() > 1 {
-                                input = &input[1..];
-                            } else {
-                                break;
-                            }
-                        },
-                    }
-                }
-            }
-
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                log::warn!(
-                    "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
-                    MAX_CONSECUTIVE_ERRORS,
-                    input.len()
-                );
-                break;
+                },
             }
         }
     }
 
     Ok(operators)
-}
-
-/// Returns true for pure graphics operators that can be safely skipped
-/// during text-only extraction.
-fn is_skippable_graphics_op(name: &str) -> bool {
-    matches!(
-        name,
-        "m" | "l" | "c" | "v" | "y" | "h" | "re"         // Path construction
-        | "S" | "s" | "f" | "F" | "f*"                     // Path painting
-        | "B" | "B*" | "b" | "b*" | "n"                    // Path painting
-        | "W" | "W*"                                        // Clipping
-        | "w" | "J" | "j" | "M" | "d" | "i" | "ri" | "sh" // Non-text graphics state
-    )
 }
 
 /// Parse a single operator with its operands.
@@ -875,19 +800,12 @@ fn is_whitespace_or_delimiter(byte: u8) -> bool {
         || matches!(byte, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
 }
 
-// ── Byte-level operand skippers for text-only parsing ──────────────────────
+// ── Nom-based operand skippers (test-only, superseded by raw variants) ─────
 
-/// Skip one PDF operand token without constructing an Object.
-///
-/// This is the key performance optimization: numbers are scanned as byte
-/// patterns (no `f64::parse`), strings skip to their closing delimiter,
-/// and no heap allocation occurs.
+#[cfg(test)]
 fn skip_operand_token(input: &[u8]) -> IResult<&[u8], ()> {
     if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)));
     }
 
     match input[0] {
@@ -897,14 +815,11 @@ fn skip_operand_token(input: &[u8]) -> IResult<&[u8], ()> {
         b'<' => skip_hex_string(input),
         b'/' => skip_name(input),
         b'[' => skip_array(input),
-        _ => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Char,
-        ))),
+        _ => Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char))),
     }
 }
 
-/// Skip a number token: `[+-]?[0-9]*\.?[0-9]*` (must consume at least one digit or dot).
+#[cfg(test)]
 fn skip_number(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 0;
     if i < input.len() && (input[i] == b'+' || input[i] == b'-') {
@@ -923,15 +838,12 @@ fn skip_number(input: &[u8]) -> IResult<&[u8], ()> {
         }
     }
     if i == start {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Digit,
-        )));
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
     }
     Ok((&input[i..], ()))
 }
 
-/// Skip a literal string `(...)`, tracking parenthesis depth and backslash escapes.
+#[cfg(test)]
 fn skip_literal_string(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 1; // past opening '('
     let mut depth: u32 = 1;
@@ -950,15 +862,12 @@ fn skip_literal_string(input: &[u8]) -> IResult<&[u8], ()> {
         }
     }
     if depth != 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Char,
-        )));
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
     }
     Ok((&input[i..], ()))
 }
 
-/// Skip a hex string `<...>`.
+#[cfg(test)]
 fn skip_hex_string(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 1; // past opening '<'
     while i < input.len() {
@@ -967,13 +876,10 @@ fn skip_hex_string(input: &[u8]) -> IResult<&[u8], ()> {
         }
         i += 1;
     }
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Char,
-    )))
+    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
 }
 
-/// Skip a name token `/...` up to the next delimiter or whitespace.
+#[cfg(test)]
 fn skip_name(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 1; // past '/'
     while i < input.len() && !is_whitespace_or_delimiter(input[i]) {
@@ -982,7 +888,7 @@ fn skip_name(input: &[u8]) -> IResult<&[u8], ()> {
     Ok((&input[i..], ()))
 }
 
-/// Skip an array `[...]`, properly handling nested strings, dicts, and arrays.
+#[cfg(test)]
 fn skip_array(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 1; // past opening '['
     let mut depth: u32 = 1;
@@ -1045,15 +951,12 @@ fn skip_array(input: &[u8]) -> IResult<&[u8], ()> {
         }
     }
     if depth != 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Char,
-        )));
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
     }
     Ok((&input[i..], ()))
 }
 
-/// Skip a dictionary `<<...>>`, properly handling nested strings and hex strings.
+#[cfg(test)]
 fn skip_dict(input: &[u8]) -> IResult<&[u8], ()> {
     let mut i = 2; // past opening '<<'
     let mut depth: u32 = 1;
@@ -1096,12 +999,383 @@ fn skip_dict(input: &[u8]) -> IResult<&[u8], ()> {
         }
     }
     if depth != 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Char,
-        )));
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
     }
     Ok((&input[i..], ()))
+}
+
+// ── Byte-level graphics region scanner ─────────────────────────────────────
+//
+// Replaces the nom-based operand loop in parse_content_stream_text_only with
+// raw index arithmetic. >80% of bytes in graphics-heavy streams are digits,
+// dots, and whitespace for path coordinates — a tight match loop processes
+// these at near-memcpy speed vs per-operand nom IResult dispatch.
+
+/// Result of scanning a graphics region (outside BT/ET).
+enum ScanResult<'a> {
+    /// All data consumed, no more operators.
+    EndOfData,
+    /// Found a BT operator; `rest` points past "BT".
+    FoundBT { rest: &'a [u8] },
+    /// Found an inline image (BI); `rest` points past "BI".
+    InlineImage { rest: &'a [u8] },
+    /// Found a non-skippable operator; caller should backtrack to
+    /// `operand_start` for full parsing. `after_op` points past the operator
+    /// name (used as fallback if full parse fails).
+    NeedFullParse {
+        operand_start: &'a [u8],
+        after_op: &'a [u8],
+    },
+    /// Too many consecutive errors; remaining data is likely junk.
+    TooManyErrors { remaining: &'a [u8] },
+}
+
+/// Byte-level check for pure graphics operators that can be skipped during
+/// text-only extraction. Equivalent to [`is_skippable_graphics_op`] but
+/// operates on raw `&[u8]` without UTF-8 conversion.
+fn is_skippable_graphics_op_bytes(op: &[u8]) -> bool {
+    matches!(
+        op,
+        b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re"       // path construction
+        | b"S" | b"s" | b"f" | b"F" | b"f*"                     // path painting
+        | b"B" | b"B*" | b"b" | b"b*" | b"n"                    // path painting
+        | b"W" | b"W*"                                           // clipping
+        | b"w" | b"J" | b"j" | b"M" | b"d" | b"i" | b"ri" | b"sh" // non-text graphics state
+    )
+}
+
+// ── Raw index-returning skip functions ─────────────────────────────────────
+//
+// Same logic as the nom-based skip_*() functions above, but return a new
+// index position instead of IResult. On malformed input, Option variants
+// return None so the caller can skip one byte (matching current error
+// recovery).
+
+#[inline]
+fn skip_whitespace_raw(data: &[u8], mut pos: usize) -> usize {
+    while pos < data.len() && is_whitespace(data[pos]) {
+        pos += 1;
+    }
+    pos
+}
+
+#[inline]
+fn skip_number_raw(data: &[u8], mut i: usize) -> Option<usize> {
+    if i < data.len() && (data[i] == b'+' || data[i] == b'-') {
+        i += 1;
+    }
+    let start = i;
+    let mut has_dot = false;
+    while i < data.len() {
+        if data[i].is_ascii_digit() {
+            i += 1;
+        } else if data[i] == b'.' && !has_dot {
+            has_dot = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if i == start {
+        None
+    } else {
+        Some(i)
+    }
+}
+
+fn skip_literal_string_raw(data: &[u8], mut i: usize) -> Option<usize> {
+    i += 1; // past opening '('
+    let mut depth: u32 = 1;
+    while i < data.len() && depth > 0 {
+        match data[i] {
+            b'\\' if i + 1 < data.len() => i += 2,
+            b'(' => {
+                depth += 1;
+                i += 1;
+            },
+            b')' => {
+                depth -= 1;
+                i += 1;
+            },
+            _ => i += 1,
+        }
+    }
+    if depth == 0 {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+fn skip_hex_string_raw(data: &[u8], mut i: usize) -> Option<usize> {
+    i += 1; // past opening '<'
+    while i < data.len() {
+        if data[i] == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+#[inline]
+fn skip_name_raw(data: &[u8], mut i: usize) -> usize {
+    i += 1; // past '/'
+    while i < data.len() && !is_whitespace_or_delimiter(data[i]) {
+        i += 1;
+    }
+    i
+}
+
+fn skip_array_raw(data: &[u8], i: usize) -> Option<usize> {
+    let mut pos = i + 1; // past opening '['
+    let mut depth: u32 = 1;
+    while pos < data.len() && depth > 0 {
+        match data[pos] {
+            b'[' => {
+                depth += 1;
+                pos += 1;
+            },
+            b']' => {
+                depth -= 1;
+                pos += 1;
+            },
+            b'(' => {
+                pos += 1;
+                let mut str_depth: u32 = 1;
+                while pos < data.len() && str_depth > 0 {
+                    match data[pos] {
+                        b'\\' if pos + 1 < data.len() => pos += 2,
+                        b'(' => {
+                            str_depth += 1;
+                            pos += 1;
+                        },
+                        b')' => {
+                            str_depth -= 1;
+                            pos += 1;
+                        },
+                        _ => pos += 1,
+                    }
+                }
+            },
+            b'<' if pos + 1 < data.len() && data[pos + 1] == b'<' => {
+                pos += 2;
+                let mut dict_depth: u32 = 1;
+                while pos + 1 < data.len() && dict_depth > 0 {
+                    if data[pos] == b'<' && data[pos + 1] == b'<' {
+                        dict_depth += 1;
+                        pos += 2;
+                    } else if data[pos] == b'>' && data[pos + 1] == b'>' {
+                        dict_depth -= 1;
+                        pos += 2;
+                    } else {
+                        pos += 1;
+                    }
+                }
+            },
+            b'<' => {
+                pos += 1;
+                while pos < data.len() && data[pos] != b'>' {
+                    pos += 1;
+                }
+                if pos < data.len() {
+                    pos += 1;
+                }
+            },
+            _ => pos += 1,
+        }
+    }
+    if depth == 0 {
+        Some(pos)
+    } else {
+        None
+    }
+}
+
+fn skip_dict_raw(data: &[u8], i: usize) -> Option<usize> {
+    let mut pos = i + 2; // past opening '<<'
+    let mut depth: u32 = 1;
+    while pos < data.len() && depth > 0 {
+        if pos + 1 < data.len() && data[pos] == b'<' && data[pos + 1] == b'<' {
+            depth += 1;
+            pos += 2;
+        } else if pos + 1 < data.len() && data[pos] == b'>' && data[pos + 1] == b'>' {
+            depth -= 1;
+            pos += 2;
+        } else if data[pos] == b'(' {
+            pos += 1;
+            let mut str_depth: u32 = 1;
+            while pos < data.len() && str_depth > 0 {
+                match data[pos] {
+                    b'\\' if pos + 1 < data.len() => pos += 2,
+                    b'(' => {
+                        str_depth += 1;
+                        pos += 1;
+                    },
+                    b')' => {
+                        str_depth -= 1;
+                        pos += 1;
+                    },
+                    _ => pos += 1,
+                }
+            }
+        } else if data[pos] == b'<' {
+            pos += 1;
+            while pos < data.len() && data[pos] != b'>' {
+                pos += 1;
+            }
+            if pos < data.len() {
+                pos += 1;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+    if depth == 0 {
+        Some(pos)
+    } else {
+        None
+    }
+}
+
+/// Scan a graphics region using raw byte arithmetic, skipping path/clipping
+/// operators and their operands without constructing any Objects.
+///
+/// Returns on: end of data, BT, BI, non-skippable operator, or too many
+/// consecutive errors. The caller dispatches on the result to resume text
+/// parsing, handle inline images, or backtrack for full operator parsing.
+fn scan_graphics_region<'a>(data: &'a [u8], consecutive_errors: &mut usize) -> ScanResult<'a> {
+    let mut i: usize = 0;
+    let mut operand_start: usize = 0;
+
+    loop {
+        i = skip_whitespace_raw(data, i);
+        if i >= data.len() {
+            return ScanResult::EndOfData;
+        }
+
+        match data[i] {
+            // Numbers: digits, dot, sign
+            b'0'..=b'9' | b'.' | b'+' | b'-' => match skip_number_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            // Literal string
+            b'(' => match skip_literal_string_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            // Dict or hex string
+            b'<' if i + 1 < data.len() && data[i + 1] == b'<' => match skip_dict_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+            b'<' => match skip_hex_string_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            // Array
+            b'[' => match skip_array_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            // Name
+            b'/' => {
+                i = skip_name_raw(data, i);
+                *consecutive_errors = 0;
+            },
+
+            // Comment — skip to end of line
+            b'%' => {
+                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+                *consecutive_errors = 0;
+            },
+
+            // Operator or keyword operand
+            c if c.is_ascii_alphabetic() || c == b'\'' || c == b'"' || c == b'*' => {
+                let op_start = i;
+                while i < data.len()
+                    && (data[i].is_ascii_alphanumeric()
+                        || data[i] == b'\''
+                        || data[i] == b'"'
+                        || data[i] == b'*')
+                {
+                    i += 1;
+                }
+                let op = &data[op_start..i];
+
+                // Keyword operands — not operators
+                if op == b"true" || op == b"false" || op == b"null" {
+                    *consecutive_errors = 0;
+                    continue;
+                }
+
+                *consecutive_errors = 0;
+
+                if op == b"BT" {
+                    return ScanResult::FoundBT { rest: &data[i..] };
+                } else if op == b"BI" {
+                    return ScanResult::InlineImage { rest: &data[i..] };
+                } else if is_skippable_graphics_op_bytes(op) {
+                    operand_start = i;
+                    continue;
+                } else {
+                    return ScanResult::NeedFullParse {
+                        operand_start: &data[operand_start..],
+                        after_op: &data[i..],
+                    };
+                }
+            },
+
+            // Unknown byte
+            _ => {
+                i += 1;
+                *consecutive_errors += 1;
+            },
+        }
+
+        if *consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            return ScanResult::TooManyErrors {
+                remaining: &data[i..],
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1334,8 +1608,7 @@ mod tests {
 
     #[test]
     fn test_text_only_skips_complex_paths() {
-        let stream =
-            b"0 0 m 100 0 l 100 100 l 0 100 l h f 50 50 m 60 50 70 60 80 70 c S \
+        let stream = b"0 0 m 100 0 l 100 100 l 0 100 l h f 50 50 m 60 50 70 60 80 70 c S \
               BT /F1 10 Tf 72 700 Td (Text after paths) Tj ET \
               200 200 m 300 300 l S";
         let ops = parse_content_stream_text_only(stream).unwrap();
@@ -1362,10 +1635,7 @@ mod tests {
     #[test]
     fn test_text_only_empty_and_whitespace() {
         assert_eq!(parse_content_stream_text_only(b"").unwrap().len(), 0);
-        assert_eq!(
-            parse_content_stream_text_only(b"   \n\t  ").unwrap().len(),
-            0
-        );
+        assert_eq!(parse_content_stream_text_only(b"   \n\t  ").unwrap().len(), 0);
     }
 
     #[test]
