@@ -3263,12 +3263,12 @@ impl PdfDocument {
         }
 
         // Step 3: Get pre-computed ordered content for this page (O(1) lookup)
+        let empty_content = Vec::new();
         let ordered_content = self
             .structure_content_cache
             .as_ref()
             .and_then(|cache| cache.get(&(page_index as u32)))
-            .cloned()
-            .unwrap_or_default();
+            .unwrap_or(&empty_content);
 
         log::debug!(
             "Cached structure content: {} items for page {}, {} MCIDs with spans",
@@ -3282,7 +3282,7 @@ impl PdfDocument {
         let mut prev_span: Option<&TextSpan> = None;
         let mut consumed_mcids: HashSet<u32> = HashSet::new();
 
-        for content in &ordered_content {
+        for content in ordered_content {
             if content.is_word_break {
                 if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
                     text.push(' ');
