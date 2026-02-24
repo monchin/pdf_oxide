@@ -1908,19 +1908,36 @@ impl FontInfo {
                             }
                         }
 
-                        // For non-Identity ordering (e.g., Adobe-Japan1, Adobe-GB1),
-                        // or when TrueType cmap lookup fails: CID == Unicode
-                        if let Some(unicode_char) = char::from_u32(char_code) {
-                            if !unicode_char.is_control() || unicode_char == ' ' {
-                                return Some(unicode_char.to_string());
+                        // For UCS2/UTF16 encodings, char codes ARE Unicode values directly.
+                        // For Identity-H/V with non-Identity ordering (e.g., Adobe-GB1),
+                        // char codes are CIDs that need CID-to-Unicode lookup.
+                        let is_ucs2_or_utf16 = encoding_name.contains("UCS2")
+                            || encoding_name.contains("UTF16");
+                        let is_non_identity_ordering = self
+                            .cid_system_info
+                            .as_ref()
+                            .map(|info| info.ordering != "Identity")
+                            .unwrap_or(false);
+
+                        if !is_ucs2_or_utf16 && is_non_identity_ordering {
+                            // Identity-H/V with CJK collection: CIDs are NOT Unicode!
+                            if let Some(unicode_codepoint) = lookup_predefined_cmap(
+                                encoding_name,
+                                &self.cid_system_info,
+                                char_code as u16,
+                            ) {
+                                if let Some(unicode_char) = char::from_u32(unicode_codepoint) {
+                                    return Some(unicode_char.to_string());
+                                }
                             }
-                            // Control char — fall through to later fallbacks
+                            // CID lookup failed — fall through to Priority 2b and beyond
                         } else {
-                            log::warn!(
-                                "CID 0x{:04X} in font '{}' is not a valid Unicode code point (surrogate pair?)",
-                                char_code,
-                                self.base_font
-                            );
+                            // UCS2/UTF16 or Adobe-Identity: char code == Unicode
+                            if let Some(unicode_char) = char::from_u32(char_code) {
+                                if !unicode_char.is_control() || unicode_char == ' ' {
+                                    return Some(unicode_char.to_string());
+                                }
+                            }
                         }
                     } else {
                         // No CIDSystemInfo — use CID-as-Unicode as last resort.

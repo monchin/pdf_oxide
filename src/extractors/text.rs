@@ -1518,9 +1518,19 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                     } else if name.contains("RKSJ") {
                         // 90ms-RKSJ-H, 90ms-RKSJ-V — Shift-JIS variable-width
                         ByteMode::ShiftJIS
+                    } else if name.contains("EUC")
+                        || name.contains("GBK")
+                        || name.contains("GBpc")
+                        || name.contains("GB-")
+                        || name.contains("CNS")
+                        || name.contains("B5")
+                        || name.contains("KSC")
+                        || name.contains("KSCms")
+                    {
+                        // CJK multi-byte CMaps — treat as 2-byte since CIDs are 2-byte values
+                        ByteMode::TwoByte
                     } else {
-                        // Other predefined CMaps (EUC, etc.) — treat as 1-byte
-                        // and let char_to_unicode handle the mapping
+                        // Other predefined CMaps — treat as 1-byte
                         ByteMode::OneByte
                     }
                 },
