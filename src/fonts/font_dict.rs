@@ -2112,6 +2112,20 @@ impl FontInfo {
                     }
                 }
 
+                // For TrueType subset fonts with no /Encoding, character codes are often
+                // GIDs (glyph indices), not standard encoding values. Per PDF Spec 9.6.5.4,
+                // when no /Encoding exists and the font has a (3,1) cmap, character codes
+                // map through the cmap. Try TrueType cmap first for these fonts.
+                if (self.subtype == "TrueType" || self.subtype == "Type1")
+                    && name == "StandardEncoding"
+                {
+                    if let Some(ref tt_cmap) = self.truetype_cmap {
+                        if let Some(unicode_char) = tt_cmap.get_unicode(char_code as u16) {
+                            return Some(unicode_char.to_string());
+                        }
+                    }
+                }
+
                 // Predefined encodings: StandardEncoding, WinAnsiEncoding, MacRomanEncoding, etc.
                 if let Some(unicode) = standard_encoding_lookup(name, char_code as u8) {
                     log::debug!(
