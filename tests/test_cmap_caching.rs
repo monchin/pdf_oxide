@@ -81,6 +81,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     let font2 = FontInfo {
@@ -103,6 +105,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // First font: triggers cache population (parse CMap)
@@ -196,6 +200,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     let font_b = FontInfo {
@@ -218,6 +224,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Font A should map 0x0001 to 'a'
@@ -297,6 +305,8 @@ end
             last_char: None,
             default_width: 500.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
         .collect();
 
@@ -377,6 +387,8 @@ end
             last_char: None,
             default_width: 500.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
         .collect();
 
@@ -446,6 +458,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Font should work correctly (cache metrics are internal)
@@ -517,6 +531,8 @@ end
         last_char: None,
         default_width: 500.0,
         multi_char_map: HashMap::new(),
+        byte_to_char_table: std::sync::OnceLock::new(),
+        byte_to_width_table: std::sync::OnceLock::new(),
     });
 
     let mut handles = vec![];

@@ -213,6 +213,10 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
                     input = trigger_start;
                     consecutive_errors = 0;
                 },
+                ScanResult::SimpleOp { op, rest } => {
+                    operators.push(op);
+                    input = rest;
+                },
                 ScanResult::TooManyErrors { remaining } => {
                     log::warn!(
                         "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
@@ -226,6 +230,285 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
     }
 
     Ok(operators)
+}
+
+/// Streaming text-only parser: parse operators and call handler immediately.
+///
+/// Same logic as `parse_content_stream_text_only` but avoids allocating a Vec<Operator>.
+/// Each operator is passed to `handler` as soon as it's parsed, improving cache locality
+/// and eliminating the intermediate operator vector (which can be 16MB+ for graphics-heavy pages).
+pub fn parse_and_execute_text_only<F>(data: &[u8], mut handler: F) -> Result<()>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    let mut input = data;
+    let mut consecutive_errors: usize = 0;
+    let mut inside_text = false;
+    let mut op_count: usize = 0;
+
+    while !input.is_empty() {
+        // Skip leading whitespace (inline — both fast parser and scan_graphics
+        // also handle whitespace, but this covers the initial entry and error
+        // recovery paths without nom overhead).
+        while !input.is_empty() && input[0].is_ascii_whitespace() {
+            input = &input[1..];
+        }
+        if input.is_empty() {
+            break;
+        }
+
+        if op_count >= MAX_OPERATORS {
+            log::warn!("Content stream exceeded {} operators, truncating", MAX_OPERATORS);
+            break;
+        }
+
+        if inside_text {
+            // Try fast path first (3-5x faster for common text operators)
+            if let Some((rest, op)) = parse_text_operator_fast(input) {
+                if matches!(op, Operator::EndText) {
+                    inside_text = false;
+                }
+                handler(op)?;
+                op_count += 1;
+                input = rest;
+                consecutive_errors = 0;
+            } else {
+                // Fall back to generic nom-based parser
+                match parse_operator_with_operands(input) {
+                    Ok((rest, op)) => {
+                        if matches!(op, Operator::EndText) {
+                            inside_text = false;
+                        }
+                        handler(op)?;
+                        op_count += 1;
+                        input = rest;
+                        consecutive_errors = 0;
+                    },
+                    Err(_) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            log::warn!(
+                                "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
+                                MAX_CONSECUTIVE_ERRORS,
+                                input.len()
+                            );
+                            break;
+                        }
+                        if input.len() > 1 {
+                            input = &input[1..];
+                        } else {
+                            break;
+                        }
+                    },
+                }
+            }
+        } else {
+            match scan_graphics_region(input, &mut consecutive_errors) {
+                ScanResult::EndOfData => break,
+                ScanResult::FoundBT { rest } => {
+                    handler(Operator::BeginText)?;
+                    op_count += 1;
+                    input = rest;
+                    inside_text = true;
+                },
+                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
+                    Ok((rest2, _)) => input = rest2,
+                    Err(_) => input = rest,
+                },
+                ScanResult::NeedFullParse {
+                    operand_start,
+                    after_op,
+                } => match parse_operator_with_operands(operand_start) {
+                    Ok((rest2, op)) => {
+                        handler(op)?;
+                        op_count += 1;
+                        input = rest2;
+                    },
+                    Err(_) => input = after_op,
+                },
+                ScanResult::DeferredThenText {
+                    deferred_start,
+                    trigger_start,
+                } => {
+                    let mut remaining = deferred_start;
+                    while remaining.len() > trigger_start.len() {
+                        match parse_operator_with_operands(remaining) {
+                            Ok((rest2, op)) => {
+                                handler(op)?;
+                                op_count += 1;
+                                remaining = rest2;
+                            },
+                            Err(_) => {
+                                if remaining.len() > 1 {
+                                    remaining = &remaining[1..];
+                                } else {
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    input = trigger_start;
+                    consecutive_errors = 0;
+                },
+                ScanResult::SimpleOp { op, rest } => {
+                    handler(op)?;
+                    op_count += 1;
+                    input = rest;
+                },
+                ScanResult::TooManyErrors { remaining } => {
+                    log::warn!(
+                        "Content stream had {} consecutive parse errors, bailing out ({} bytes remaining)",
+                        MAX_CONSECUTIVE_ERRORS,
+                        remaining.len()
+                    );
+                    break;
+                },
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Image-only content stream parser: skips BT/ET text blocks entirely.
+///
+/// Only fully parses operators relevant to image extraction:
+/// `cm`, `q`, `Q`, `Do`, `BI`/`ID`/`EI` (inline images).
+/// All text and graphics drawing operators are skipped.
+pub fn parse_content_stream_images_only(data: &[u8]) -> Result<Vec<Operator>> {
+    let mut operators = Vec::with_capacity(256);
+    let mut input = data;
+    let mut consecutive_errors: usize = 0;
+    let mut inside_text = false;
+
+    while !input.is_empty() {
+        if let Ok((rest, _)) = multispace0::<&[u8], nom::error::Error<&[u8]>>.parse(input) {
+            input = rest;
+        }
+        if input.is_empty() {
+            break;
+        }
+
+        if operators.len() >= MAX_OPERATORS {
+            break;
+        }
+
+        if inside_text {
+            // Inside BT/ET: skip everything until ET
+            match scan_to_et(input) {
+                Some(rest) => {
+                    input = rest;
+                    inside_text = false;
+                    consecutive_errors = 0;
+                },
+                None => break, // No ET found, end of stream
+            }
+        } else {
+            // Outside BT/ET: use scan_graphics_region but handle differently
+            match scan_graphics_region(input, &mut consecutive_errors) {
+                ScanResult::EndOfData => break,
+                ScanResult::FoundBT { rest } => {
+                    // Skip the text block instead of parsing it
+                    input = rest;
+                    inside_text = true;
+                },
+                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
+                    Ok((rest2, op)) => {
+                        operators.push(op);
+                        input = rest2;
+                    },
+                    Err(_) => input = rest,
+                },
+                ScanResult::NeedFullParse {
+                    operand_start,
+                    after_op,
+                } => match parse_operator_with_operands(operand_start) {
+                    Ok((rest2, op)) => {
+                        operators.push(op);
+                        input = rest2;
+                    },
+                    Err(_) => input = after_op,
+                },
+                ScanResult::DeferredThenText {
+                    deferred_start,
+                    trigger_start,
+                } => {
+                    let mut remaining = deferred_start;
+                    while remaining.len() > trigger_start.len() {
+                        match parse_operator_with_operands(remaining) {
+                            Ok((rest2, op)) => {
+                                operators.push(op);
+                                remaining = rest2;
+                            },
+                            Err(_) => {
+                                if remaining.len() > 1 {
+                                    remaining = &remaining[1..];
+                                } else {
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    input = trigger_start;
+                    consecutive_errors = 0;
+                },
+                ScanResult::SimpleOp { op, rest } => {
+                    operators.push(op);
+                    input = rest;
+                },
+                ScanResult::TooManyErrors { .. } => break,
+            }
+        }
+    }
+
+    Ok(operators)
+}
+
+/// Skip forward until we find the ET operator (end text).
+/// Returns the remaining input after ET, or None if not found.
+fn scan_to_et(data: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] == b'E' && data[i + 1] == b'T' {
+            // Verify it's a real ET operator (not part of a string)
+            let before_ok = i == 0
+                || data[i - 1].is_ascii_whitespace()
+                || data[i - 1] == b')'
+                || data[i - 1] == b'>';
+            let after_ok =
+                i + 2 >= data.len() || data[i + 2].is_ascii_whitespace() || data[i + 2] == b'%';
+            if before_ok && after_ok {
+                return Some(&data[i + 2..]);
+            }
+        }
+        // Skip strings to avoid false matches inside text
+        if data[i] == b'(' {
+            i += 1;
+            let mut depth = 1;
+            while i < data.len() && depth > 0 {
+                match data[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    b'\\' => i += 1, // skip escaped char
+                    _ => {},
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if data[i] == b'<' && (i + 1 >= data.len() || data[i + 1] != b'<') {
+            i += 1;
+            while i < data.len() && data[i] != b'>' {
+                i += 1;
+            }
+            if i < data.len() {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parse a single operator with its operands.
@@ -493,7 +776,10 @@ fn build_operator(name: &str, operands: Vec<Object>) -> Operator {
                     _ => None,
                 })
                 .collect();
-            Operator::SetFillColorN { components, name }
+            Operator::SetFillColorN {
+                components,
+                name: name.map(Box::new),
+            }
         },
         "SCN" => {
             // Set stroke color with pattern support: c1 c2 ... cn [name] SCN
@@ -511,7 +797,10 @@ fn build_operator(name: &str, operands: Vec<Object>) -> Operator {
                     _ => None,
                 })
                 .collect();
-            Operator::SetStrokeColorN { components, name }
+            Operator::SetStrokeColorN {
+                components,
+                name: name.map(Box::new),
+            }
         },
 
         // Text object
@@ -667,7 +956,7 @@ fn build_operator(name: &str, operands: Vec<Object>) -> Operator {
             // Begin marked content with properties: tag properties BDC
             // properties can be a dictionary or a name (reference to /Properties resource)
             let tag = get_name(&operands, 0).unwrap_or("").to_string();
-            let properties = operands.get(1).cloned().unwrap_or(Object::Null);
+            let properties = Box::new(operands.get(1).cloned().unwrap_or(Object::Null));
             Operator::BeginMarkedContentDict { tag, properties }
         },
         "EMC" => {
@@ -678,7 +967,7 @@ fn build_operator(name: &str, operands: Vec<Object>) -> Operator {
         // Unknown operator
         _ => Operator::Other {
             name: name.to_string(),
-            operands,
+            operands: Box::new(operands),
         },
     }
 }
@@ -791,7 +1080,13 @@ fn parse_inline_image(input: &[u8]) -> IResult<&[u8], Operator> {
     remaining = &remaining[ei_pos + 2..]; // Skip past whitespace and "EI"
 
     // Step 5: Return the InlineImage operator
-    Ok((remaining, Operator::InlineImage { dict, data }))
+    Ok((
+        remaining,
+        Operator::InlineImage {
+            dict: Box::new(dict),
+            data,
+        },
+    ))
 }
 
 /// Find the EI operator in the input, which must be preceded by whitespace.
@@ -1063,8 +1358,27 @@ enum ScanResult<'a> {
         deferred_start: &'a [u8],
         trigger_start: &'a [u8],
     },
+    /// A simple no-operand operator that can be emitted directly without
+    /// nom parsing. Used for unmatched Q (RestoreGraphicsState) to avoid
+    /// expensive full-parse fallback.
+    SimpleOp { op: Operator, rest: &'a [u8] },
     /// Too many consecutive errors; remaining data is likely junk.
     TooManyErrors { remaining: &'a [u8] },
+}
+
+/// Parse 6 float operands from a raw byte slice (for inline `cm` parsing).
+/// Returns None if the slice doesn't contain exactly 6 parseable numbers.
+#[inline]
+fn parse_six_floats(data: &[u8]) -> Option<(f32, f32, f32, f32, f32, f32)> {
+    let s = std::str::from_utf8(data).ok()?;
+    let mut iter = s.split_ascii_whitespace();
+    let a = iter.next()?.parse::<f32>().ok()?;
+    let b = iter.next()?.parse::<f32>().ok()?;
+    let c = iter.next()?.parse::<f32>().ok()?;
+    let d = iter.next()?.parse::<f32>().ok()?;
+    let e = iter.next()?.parse::<f32>().ok()?;
+    let f = iter.next()?.parse::<f32>().ok()?;
+    Some((a, b, c, d, e, f))
 }
 
 /// Byte-level check for pure graphics operators that can be skipped during
@@ -1089,38 +1403,6 @@ fn is_skippable_graphics_op_bytes(op: &[u8]) -> bool {
 // index position instead of IResult. On malformed input, Option variants
 // return None so the caller can skip one byte (matching current error
 // recovery).
-
-#[inline]
-fn skip_whitespace_raw(data: &[u8], mut pos: usize) -> usize {
-    while pos < data.len() && is_whitespace(data[pos]) {
-        pos += 1;
-    }
-    pos
-}
-
-#[inline]
-fn skip_number_raw(data: &[u8], mut i: usize) -> Option<usize> {
-    if i < data.len() && (data[i] == b'+' || data[i] == b'-') {
-        i += 1;
-    }
-    let start = i;
-    let mut has_dot = false;
-    while i < data.len() {
-        if data[i].is_ascii_digit() {
-            i += 1;
-        } else if data[i] == b'.' && !has_dot {
-            has_dot = true;
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if i == start {
-        None
-    } else {
-        Some(i)
-    }
-}
 
 fn skip_literal_string_raw(data: &[u8], mut i: usize) -> Option<usize> {
     i += 1; // past opening '('
@@ -1277,101 +1559,856 @@ fn skip_dict_raw(data: &[u8], i: usize) -> Option<usize> {
     }
 }
 
-/// Scan a graphics region using raw byte arithmetic, skipping path/clipping
-/// operators and their operands without constructing any Objects.
+// ── Fast BT/ET block parser ────────────────────────────────────────────
+//
+// Hand-written byte-level parser for operators inside text blocks.
+// Avoids the nom tokenizer overhead (~3-5x faster than parse_operator_with_operands)
+// by parsing numbers inline, skipping indirect-reference lookahead, and matching
+// operator names as raw bytes.
+
+/// Operand type for the fast parser's operand stack.
+/// Uses `f32` for numbers and `Vec<u8>` for strings to avoid full Object creation.
+enum FastOperand {
+    Number(f32),
+    /// Raw string bytes (already decoded from literal or hex encoding)
+    StringBytes(Vec<u8>),
+    /// Name string (without leading `/`)
+    Name(String),
+    /// Array of TextElements (for TJ operator)
+    TextArray(Vec<TextElement>),
+}
+
+/// Parse a float directly from bytes. Returns (value, bytes_consumed).
+#[inline]
+fn parse_float_fast(data: &[u8]) -> Option<(f32, usize)> {
+    let mut i = 0;
+    let negative = if i < data.len() && (data[i] == b'-' || data[i] == b'+') {
+        let neg = data[i] == b'-';
+        i += 1;
+        neg
+    } else {
+        false
+    };
+
+    let start = i;
+    let mut int_part: f64 = 0.0;
+    while i < data.len() && data[i].is_ascii_digit() {
+        int_part = int_part * 10.0 + (data[i] - b'0') as f64;
+        i += 1;
+    }
+
+    let mut frac_part: f64 = 0.0;
+    let mut frac_scale: f64 = 1.0;
+    if i < data.len() && data[i] == b'.' {
+        i += 1;
+        while i < data.len() && data[i].is_ascii_digit() {
+            frac_part = frac_part * 10.0 + (data[i] - b'0') as f64;
+            frac_scale *= 10.0;
+            i += 1;
+        }
+    }
+
+    if i == start {
+        return None; // no digits consumed
+    }
+
+    let value = int_part + frac_part / frac_scale;
+    let value = if negative { -value } else { value };
+    Some((value as f32, i))
+}
+
+/// Parse a literal string `(...)` from bytes. Returns (decoded_bytes, position_after_close_paren).
+#[inline]
+fn parse_literal_string_fast(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    let mut i = start + 1; // past opening '('
+    let mut depth: u32 = 1;
+
+    // Fast path: scan for simple strings without escapes or nested parens.
+    // Most PDF strings are simple ASCII text like "(Hello)" or single chars like "(A)".
+    let scan_start = i;
+    while i < data.len() {
+        match data[i] {
+            b')' => {
+                // Simple string — no escapes, no nesting
+                return Some((data[scan_start..i].to_vec(), i + 1));
+            },
+            b'\\' | b'(' => break, // needs complex handling
+            _ => i += 1,
+        }
+    }
+
+    // Slow path: string has escapes or nested parens
+    i = scan_start;
+    let mut result = Vec::new();
+    while i < data.len() && depth > 0 {
+        match data[i] {
+            b'\\' if i + 1 < data.len() => {
+                match data[i + 1] {
+                    b'n' => {
+                        result.push(b'\n');
+                        i += 2;
+                    },
+                    b'r' => {
+                        result.push(b'\r');
+                        i += 2;
+                    },
+                    b't' => {
+                        result.push(b'\t');
+                        i += 2;
+                    },
+                    b'b' => {
+                        result.push(0x08);
+                        i += 2;
+                    },
+                    b'f' => {
+                        result.push(0x0C);
+                        i += 2;
+                    },
+                    b'(' => {
+                        result.push(b'(');
+                        i += 2;
+                    },
+                    b')' => {
+                        result.push(b')');
+                        i += 2;
+                    },
+                    b'\\' => {
+                        result.push(b'\\');
+                        i += 2;
+                    },
+                    b'0'..=b'7' => {
+                        // Octal escape
+                        let mut octal: u32 = (data[i + 1] - b'0') as u32;
+                        let mut j = i + 2;
+                        for _ in 0..2 {
+                            if j < data.len() && (b'0'..=b'7').contains(&data[j]) {
+                                octal = octal * 8 + (data[j] - b'0') as u32;
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        result.push((octal & 0xFF) as u8);
+                        i = j;
+                    },
+                    b'\r' => {
+                        i += 2;
+                        if i < data.len() && data[i] == b'\n' {
+                            i += 1;
+                        }
+                    },
+                    b'\n' => {
+                        i += 2;
+                    },
+                    _ => {
+                        result.push(data[i + 1]);
+                        i += 2;
+                    },
+                }
+            },
+            b'(' => {
+                depth += 1;
+                result.push(b'(');
+                i += 1;
+            },
+            b')' => {
+                depth -= 1;
+                if depth > 0 {
+                    result.push(b')');
+                }
+                i += 1;
+            },
+            _ => {
+                result.push(data[i]);
+                i += 1;
+            },
+        }
+    }
+    if depth == 0 {
+        Some((result, i))
+    } else {
+        None
+    }
+}
+
+/// Parse a hex string `<...>` from bytes. Returns (decoded_bytes, position_after_close_angle).
+#[inline]
+fn parse_hex_string_fast(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    let mut i = start + 1; // past opening '<'
+    let mut result = Vec::new();
+    let mut high_nibble: Option<u8> = None;
+    while i < data.len() {
+        let b = data[i];
+        if b == b'>' {
+            // If odd number of hex digits, append 0 to make final byte
+            if let Some(h) = high_nibble {
+                result.push(h << 4);
+            }
+            return Some((result, i + 1));
+        }
+        if let Some(nibble) = hex_nibble(b) {
+            match high_nibble {
+                None => high_nibble = Some(nibble),
+                Some(h) => {
+                    result.push((h << 4) | nibble);
+                    high_nibble = None;
+                },
+            }
+        }
+        // Skip whitespace and other non-hex chars
+        i += 1;
+    }
+    None
+}
+
+#[inline]
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse a TJ array `[...]` from bytes. Returns (elements, position_after_close_bracket).
+fn parse_tj_array_fast(data: &[u8], start: usize) -> Option<(Vec<TextElement>, usize)> {
+    let mut i = start + 1; // past opening '['
+    let mut elements = Vec::new();
+    loop {
+        // Skip whitespace
+        while i < data.len() && is_whitespace(data[i]) {
+            i += 1;
+        }
+        if i >= data.len() {
+            return None;
+        }
+
+        match data[i] {
+            b']' => return Some((elements, i + 1)),
+            b'(' => {
+                if let Some((bytes, end)) = parse_literal_string_fast(data, i) {
+                    elements.push(TextElement::String(bytes));
+                    i = end;
+                } else {
+                    return None;
+                }
+            },
+            b'<' => {
+                if let Some((bytes, end)) = parse_hex_string_fast(data, i) {
+                    elements.push(TextElement::String(bytes));
+                    i = end;
+                } else {
+                    return None;
+                }
+            },
+            b'0'..=b'9' | b'.' | b'+' | b'-' => {
+                if let Some((num, consumed)) = parse_float_fast(&data[i..]) {
+                    elements.push(TextElement::Offset(num));
+                    i += consumed;
+                } else {
+                    return None;
+                }
+            },
+            _ => {
+                // Skip unknown token
+                i += 1;
+            },
+        }
+    }
+}
+
+/// Parse a name `/Name` from bytes. Returns (name_string, position_after_name).
+#[inline]
+fn parse_name_fast(data: &[u8], start: usize) -> (String, usize) {
+    let mut i = start + 1; // past '/'
+    let name_start = i;
+    while i < data.len() && !is_whitespace_or_delimiter(data[i]) {
+        i += 1;
+    }
+    let name = String::from_utf8_lossy(&data[name_start..i]).to_string();
+    (name, i)
+}
+
+/// Fast parser for a single operator inside a BT/ET text block.
 ///
-/// Returns on: end of data, BT, BI, non-skippable operator, or too many
-/// consecutive errors. The caller dispatches on the result to resume text
-/// parsing, handle inline images, or backtrack for full operator parsing.
+/// Returns `Some((remaining_input, operator))` on success, `None` on failure
+/// (caller should fall back to the generic `parse_operator_with_operands`).
+fn parse_text_operator_fast(input: &[u8]) -> Option<(&[u8], Operator)> {
+    let mut pos = 0;
+    // Small inline operand stack (max 8 operands for any PDF operator)
+    let mut operands: [Option<FastOperand>; 8] = [None, None, None, None, None, None, None, None];
+    let mut op_count: usize = 0;
+
+    loop {
+        // Skip whitespace
+        while pos < input.len() && is_whitespace(input[pos]) {
+            pos += 1;
+        }
+        if pos >= input.len() {
+            return None;
+        }
+
+        let b = input[pos];
+        match b {
+            // Number operand
+            b'0'..=b'9' | b'.' | b'+' | b'-' => {
+                // Quick check: a lone '-' or '+' followed by non-digit is not a number
+                if (b == b'-' || b == b'+')
+                    && (pos + 1 >= input.len()
+                        || (!input[pos + 1].is_ascii_digit() && input[pos + 1] != b'.'))
+                {
+                    return None; // fallback
+                }
+                if let Some((num, consumed)) = parse_float_fast(&input[pos..]) {
+                    if op_count < 8 {
+                        operands[op_count] = Some(FastOperand::Number(num));
+                        op_count += 1;
+                    }
+                    pos += consumed;
+                } else {
+                    return None;
+                }
+            },
+            // Literal string
+            b'(' => {
+                if let Some((bytes, end)) = parse_literal_string_fast(input, pos) {
+                    if op_count < 8 {
+                        operands[op_count] = Some(FastOperand::StringBytes(bytes));
+                        op_count += 1;
+                    }
+                    pos = end;
+                } else {
+                    return None;
+                }
+            },
+            // Hex string
+            b'<' => {
+                // Check it's not a dict <<
+                if pos + 1 < input.len() && input[pos + 1] == b'<' {
+                    return None; // dict — fall back to generic parser
+                }
+                if let Some((bytes, end)) = parse_hex_string_fast(input, pos) {
+                    if op_count < 8 {
+                        operands[op_count] = Some(FastOperand::StringBytes(bytes));
+                        op_count += 1;
+                    }
+                    pos = end;
+                } else {
+                    return None;
+                }
+            },
+            // Name
+            b'/' => {
+                let (name, end) = parse_name_fast(input, pos);
+                if op_count < 8 {
+                    operands[op_count] = Some(FastOperand::Name(name));
+                    op_count += 1;
+                }
+                pos = end;
+            },
+            // Array (for TJ)
+            b'[' => {
+                if let Some((elements, end)) = parse_tj_array_fast(input, pos) {
+                    if op_count < 8 {
+                        operands[op_count] = Some(FastOperand::TextArray(elements));
+                        op_count += 1;
+                    }
+                    pos = end;
+                } else {
+                    return None;
+                }
+            },
+            // Operator name
+            c if c.is_ascii_alphabetic() || c == b'\'' || c == b'"' || c == b'*' => {
+                let op_start = pos;
+                while pos < input.len()
+                    && (input[pos].is_ascii_alphanumeric()
+                        || input[pos] == b'\''
+                        || input[pos] == b'"'
+                        || input[pos] == b'*')
+                {
+                    pos += 1;
+                }
+                let op_bytes = &input[op_start..pos];
+                let rest = &input[pos..];
+
+                // Keywords that are operands, not operators
+                if op_bytes == b"true" || op_bytes == b"false" || op_bytes == b"null" {
+                    // These are operand values — skip them (rare in text blocks)
+                    continue;
+                }
+
+                // Match operator and build typed variant
+                let operator = match op_bytes {
+                    b"ET" => Operator::EndText,
+                    b"BT" => Operator::BeginText,
+                    b"Tf" => {
+                        let font = match &operands[0] {
+                            Some(FastOperand::Name(n)) => n.clone(),
+                            _ => String::new(),
+                        };
+                        let size = match &operands[1] {
+                            Some(FastOperand::Number(n)) => *n,
+                            // Font name might be in slot 0 and size in slot 1,
+                            // but if only one operand, try it as the font name
+                            _ => 12.0,
+                        };
+                        Operator::Tf { font, size }
+                    },
+                    b"Td" => {
+                        let tx = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        let ty = match &operands[1] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::Td { tx, ty }
+                    },
+                    b"TD" => {
+                        let tx = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        let ty = match &operands[1] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::TD { tx, ty }
+                    },
+                    b"Tm" => {
+                        let get_n = |i: usize, def: f32| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => def,
+                        };
+                        Operator::Tm {
+                            a: get_n(0, 1.0),
+                            b: get_n(1, 0.0),
+                            c: get_n(2, 0.0),
+                            d: get_n(3, 1.0),
+                            e: get_n(4, 0.0),
+                            f: get_n(5, 0.0),
+                        }
+                    },
+                    b"T*" => Operator::TStar,
+                    b"Tj" => {
+                        let text = match operands[0].take() {
+                            Some(FastOperand::StringBytes(b)) => b,
+                            _ => Vec::new(),
+                        };
+                        Operator::Tj { text }
+                    },
+                    b"TJ" => {
+                        let array = match operands[0].take() {
+                            Some(FastOperand::TextArray(a)) => a,
+                            _ => Vec::new(),
+                        };
+                        Operator::TJ { array }
+                    },
+                    b"'" => {
+                        let text = match operands[0].take() {
+                            Some(FastOperand::StringBytes(b)) => b,
+                            _ => Vec::new(),
+                        };
+                        Operator::Quote { text }
+                    },
+                    b"\"" => {
+                        let word_space = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        let char_space = match &operands[1] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        let text = match operands[2].take() {
+                            Some(FastOperand::StringBytes(b)) => b,
+                            _ => Vec::new(),
+                        };
+                        Operator::DoubleQuote {
+                            word_space,
+                            char_space,
+                            text,
+                        }
+                    },
+                    b"Tc" => {
+                        let char_space = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::Tc { char_space }
+                    },
+                    b"Tw" => {
+                        let word_space = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::Tw { word_space }
+                    },
+                    b"Tz" => {
+                        let scale = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 100.0,
+                        };
+                        Operator::Tz { scale }
+                    },
+                    b"TL" => {
+                        let leading = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::TL { leading }
+                    },
+                    b"Tr" => {
+                        let render = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n as u8,
+                            _ => 0,
+                        };
+                        Operator::Tr { render }
+                    },
+                    b"Ts" => {
+                        let rise = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::Ts { rise }
+                    },
+                    b"q" => Operator::SaveState,
+                    b"Q" => Operator::RestoreState,
+                    b"cm" => {
+                        let get_n = |i: usize, def: f32| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => def,
+                        };
+                        Operator::Cm {
+                            a: get_n(0, 1.0),
+                            b: get_n(1, 0.0),
+                            c: get_n(2, 0.0),
+                            d: get_n(3, 1.0),
+                            e: get_n(4, 0.0),
+                            f: get_n(5, 0.0),
+                        }
+                    },
+                    b"rg" => {
+                        let get_n = |i: usize| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetFillRgb {
+                            r: get_n(0),
+                            g: get_n(1),
+                            b: get_n(2),
+                        }
+                    },
+                    b"RG" => {
+                        let get_n = |i: usize| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetStrokeRgb {
+                            r: get_n(0),
+                            g: get_n(1),
+                            b: get_n(2),
+                        }
+                    },
+                    b"g" => {
+                        let gray = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetFillGray { gray }
+                    },
+                    b"G" => {
+                        let gray = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetStrokeGray { gray }
+                    },
+                    b"k" => {
+                        let get_n = |i: usize| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetFillCmyk {
+                            c: get_n(0),
+                            m: get_n(1),
+                            y: get_n(2),
+                            k: get_n(3),
+                        }
+                    },
+                    b"K" => {
+                        let get_n = |i: usize| match &operands[i] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetStrokeCmyk {
+                            c: get_n(0),
+                            m: get_n(1),
+                            y: get_n(2),
+                            k: get_n(3),
+                        }
+                    },
+                    b"cs" => {
+                        let name = match &operands[0] {
+                            Some(FastOperand::Name(n)) => n.clone(),
+                            _ => "DeviceGray".to_string(),
+                        };
+                        Operator::SetFillColorSpace { name }
+                    },
+                    b"CS" => {
+                        let name = match &operands[0] {
+                            Some(FastOperand::Name(n)) => n.clone(),
+                            _ => "DeviceGray".to_string(),
+                        };
+                        Operator::SetStrokeColorSpace { name }
+                    },
+                    b"sc" => {
+                        let components: Vec<f32> = operands[..op_count]
+                            .iter()
+                            .filter_map(|o| match o {
+                                Some(FastOperand::Number(n)) => Some(*n),
+                                _ => None,
+                            })
+                            .collect();
+                        Operator::SetFillColor { components }
+                    },
+                    b"SC" => {
+                        let components: Vec<f32> = operands[..op_count]
+                            .iter()
+                            .filter_map(|o| match o {
+                                Some(FastOperand::Number(n)) => Some(*n),
+                                _ => None,
+                            })
+                            .collect();
+                        Operator::SetStrokeColor { components }
+                    },
+                    b"scn" => {
+                        let name = match &operands[op_count.saturating_sub(1)] {
+                            Some(FastOperand::Name(n)) => Some(n.clone()),
+                            _ => None,
+                        };
+                        let components: Vec<f32> = operands[..op_count]
+                            .iter()
+                            .filter_map(|o| match o {
+                                Some(FastOperand::Number(n)) => Some(*n),
+                                _ => None,
+                            })
+                            .collect();
+                        Operator::SetFillColorN {
+                            components,
+                            name: name.map(Box::new),
+                        }
+                    },
+                    b"SCN" => {
+                        let name = match &operands[op_count.saturating_sub(1)] {
+                            Some(FastOperand::Name(n)) => Some(n.clone()),
+                            _ => None,
+                        };
+                        let components: Vec<f32> = operands[..op_count]
+                            .iter()
+                            .filter_map(|o| match o {
+                                Some(FastOperand::Number(n)) => Some(*n),
+                                _ => None,
+                            })
+                            .collect();
+                        Operator::SetStrokeColorN {
+                            components,
+                            name: name.map(Box::new),
+                        }
+                    },
+                    b"gs" => {
+                        let dict_name = match &operands[0] {
+                            Some(FastOperand::Name(n)) => n.clone(),
+                            _ => String::new(),
+                        };
+                        Operator::SetExtGState { dict_name }
+                    },
+                    b"Do" => {
+                        let name = match &operands[0] {
+                            Some(FastOperand::Name(n)) => n.clone(),
+                            _ => String::new(),
+                        };
+                        Operator::Do { name }
+                    },
+                    b"w" => {
+                        let width = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 1.0,
+                        };
+                        Operator::SetLineWidth { width }
+                    },
+                    b"J" => {
+                        let cap_style = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n as u8,
+                            _ => 0,
+                        };
+                        Operator::SetLineCap { cap_style }
+                    },
+                    b"j" => {
+                        let join_style = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n as u8,
+                            _ => 0,
+                        };
+                        Operator::SetLineJoin { join_style }
+                    },
+                    b"i" => {
+                        let tolerance = match &operands[0] {
+                            Some(FastOperand::Number(n)) => *n,
+                            _ => 0.0,
+                        };
+                        Operator::SetFlatness { tolerance }
+                    },
+                    _ => {
+                        // Unknown operator inside BT/ET — fall back to generic parser
+                        return None;
+                    },
+                };
+
+                return Some((rest, operator));
+            },
+            _ => {
+                // Unknown byte — fall back to generic parser
+                return None;
+            },
+        }
+    }
+}
+
+// Byte classification for fast graphics scanning.
+// 0 = skip (whitespace, digits, dot, sign) — bulk-skippable
+// 1 = alpha/quote/star — operator start
+// 2 = '(' — literal string start
+// 3 = '<' — hex string or dict start
+// 4 = '[' — array start
+// 5 = '/' — name start
+// 6 = '%' — comment start
+// 7 = other (unknown byte)
+const SCAN_SKIP: u8 = 0;
+const SCAN_ALPHA: u8 = 1;
+const SCAN_PAREN: u8 = 2;
+const SCAN_ANGLE: u8 = 3;
+const SCAN_BRACKET: u8 = 4;
+const SCAN_SLASH: u8 = 5;
+const SCAN_PERCENT: u8 = 6;
+const SCAN_OTHER: u8 = 7;
+
+static BYTE_CLASS: [u8; 256] = {
+    let mut t = [SCAN_OTHER; 256];
+    // Whitespace
+    t[b' ' as usize] = SCAN_SKIP;
+    t[b'\t' as usize] = SCAN_SKIP;
+    t[b'\n' as usize] = SCAN_SKIP;
+    t[b'\r' as usize] = SCAN_SKIP;
+    t[0x00] = SCAN_SKIP; // null
+    t[0x0C] = SCAN_SKIP; // form feed
+                         // Digits
+    t[b'0' as usize] = SCAN_SKIP;
+    t[b'1' as usize] = SCAN_SKIP;
+    t[b'2' as usize] = SCAN_SKIP;
+    t[b'3' as usize] = SCAN_SKIP;
+    t[b'4' as usize] = SCAN_SKIP;
+    t[b'5' as usize] = SCAN_SKIP;
+    t[b'6' as usize] = SCAN_SKIP;
+    t[b'7' as usize] = SCAN_SKIP;
+    t[b'8' as usize] = SCAN_SKIP;
+    t[b'9' as usize] = SCAN_SKIP;
+    // Number punctuation
+    t[b'.' as usize] = SCAN_SKIP;
+    t[b'+' as usize] = SCAN_SKIP;
+    t[b'-' as usize] = SCAN_SKIP;
+    // Alpha (uppercase)
+    let mut c = b'A';
+    while c <= b'Z' {
+        t[c as usize] = SCAN_ALPHA;
+        c += 1;
+    }
+    // Alpha (lowercase)
+    c = b'a';
+    while c <= b'z' {
+        t[c as usize] = SCAN_ALPHA;
+        c += 1;
+    }
+    // Quote/star operators
+    t[b'\'' as usize] = SCAN_ALPHA;
+    t[b'"' as usize] = SCAN_ALPHA;
+    t[b'*' as usize] = SCAN_ALPHA;
+    // Delimiters
+    t[b'(' as usize] = SCAN_PAREN;
+    t[b'<' as usize] = SCAN_ANGLE;
+    t[b'[' as usize] = SCAN_BRACKET;
+    t[b'/' as usize] = SCAN_SLASH;
+    t[b'%' as usize] = SCAN_PERCENT;
+    t
+};
+
 fn scan_graphics_region<'a>(data: &'a [u8], consecutive_errors: &mut usize) -> ScanResult<'a> {
     let mut i: usize = 0;
     let mut operand_start: usize = 0;
     let mut deferred_depth: u32 = 0;
     let mut deferred_start: usize = 0;
+    let len = data.len();
 
     loop {
-        i = skip_whitespace_raw(data, i);
-        if i >= data.len() {
+        // Bulk-skip whitespace, digits, dots, signs — the most common bytes in graphics streams
+        while i < len && BYTE_CLASS[data[i] as usize] == SCAN_SKIP {
+            i += 1;
+        }
+        if i >= len {
             return ScanResult::EndOfData;
         }
 
-        match data[i] {
-            // Numbers: digits, dot, sign
-            b'0'..=b'9' | b'.' | b'+' | b'-' => match skip_number_raw(data, i) {
-                Some(end) => {
-                    i = end;
-                    *consecutive_errors = 0;
-                },
-                None => {
-                    i += 1;
-                    *consecutive_errors += 1;
-                },
-            },
+        match BYTE_CLASS[data[i] as usize] {
+            SCAN_ALPHA => {
+                let first_byte = data[i];
+                let second_is_non_alpha =
+                    i + 1 >= len || BYTE_CLASS[data[i + 1] as usize] != SCAN_ALPHA;
 
-            // Literal string
-            b'(' => match skip_literal_string_raw(data, i) {
-                Some(end) => {
-                    i = end;
+                // Fast path for common single-char skippable operators.
+                // Avoids reading the full operator name and is_skippable check.
+                // Path: m(moveto), l(lineto), c(curveto), v/y(curves), h(close)
+                // Paint: f/F(fill), B/b(fill+stroke), S/s(stroke), n(endpath), W(clip)
+                // Color: g/G(gray), k/K(cmyk)
+                // State: w(linewidth), d(dash), i(flatness), J/j(cap/join), M(miter)
+                // Note: q/Q excluded (need deferred depth tracking)
+                if second_is_non_alpha
+                    && matches!(
+                        first_byte,
+                        b'm' | b'l'
+                            | b'c'
+                            | b'v'
+                            | b'y'
+                            | b'h'
+                            | b'f'
+                            | b'F'
+                            | b'B'
+                            | b'b'
+                            | b'S'
+                            | b's'
+                            | b'n'
+                            | b'W'
+                            | b'g'
+                            | b'G'
+                            | b'k'
+                            | b'K'
+                            | b'w'
+                            | b'd'
+                            | b'i'
+                            | b'J'
+                            | b'j'
+                            | b'M'
+                    )
+                {
+                    i += 1;
                     *consecutive_errors = 0;
-                },
-                None => {
-                    i += 1;
-                    *consecutive_errors += 1;
-                },
-            },
-
-            // Dict or hex string
-            b'<' if i + 1 < data.len() && data[i + 1] == b'<' => match skip_dict_raw(data, i) {
-                Some(end) => {
-                    i = end;
-                    *consecutive_errors = 0;
-                },
-                None => {
-                    i += 1;
-                    *consecutive_errors += 1;
-                },
-            },
-            b'<' => match skip_hex_string_raw(data, i) {
-                Some(end) => {
-                    i = end;
-                    *consecutive_errors = 0;
-                },
-                None => {
-                    i += 1;
-                    *consecutive_errors += 1;
-                },
-            },
-
-            // Array
-            b'[' => match skip_array_raw(data, i) {
-                Some(end) => {
-                    i = end;
-                    *consecutive_errors = 0;
-                },
-                None => {
-                    i += 1;
-                    *consecutive_errors += 1;
-                },
-            },
-
-            // Name
-            b'/' => {
-                i = skip_name_raw(data, i);
-                *consecutive_errors = 0;
-            },
-
-            // Comment — skip to end of line
-            b'%' => {
-                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
-                    i += 1;
+                    operand_start = i;
+                    continue;
                 }
-                *consecutive_errors = 0;
-            },
 
-            // Operator or keyword operand
-            c if c.is_ascii_alphabetic() || c == b'\'' || c == b'"' || c == b'*' => {
                 let op_start = i;
-                while i < data.len()
+                while i < len
                     && (data[i].is_ascii_alphanumeric()
                         || data[i] == b'\''
                         || data[i] == b'"'
@@ -1402,20 +2439,19 @@ fn scan_graphics_region<'a>(data: &'a [u8], consecutive_errors: &mut usize) -> S
                         operand_start = i;
                         continue;
                     }
-                    // Unmatched Q outside deferred — emit normally
-                    return ScanResult::NeedFullParse {
-                        operand_start: &data[operand_start..],
-                        after_op: &data[i..],
+                    // Unmatched Q outside deferred — emit directly.
+                    // Q has no operands; NeedFullParse invokes full nom parser
+                    // for a trivial no-operand op (116K triggers for Penrose).
+                    return ScanResult::SimpleOp {
+                        op: Operator::RestoreState,
+                        rest: &data[i..],
                     };
                 } else if deferred_depth > 0 {
                     // Inside a deferred q block — check if this op needs flushing
-                    if op == b"cm" || is_skippable_graphics_op_bytes(op) {
+                    if op == b"cm" || op == b"gs" || is_skippable_graphics_op_bytes(op) {
                         operand_start = i;
                         continue;
                     }
-                    // Non-skippable op (BT, BI, Do, gs, etc.) — flush deferred state.
-                    // Return operand_start so caller resumes at the trigger's operands;
-                    // the next scan_graphics_region call handles the trigger itself.
                     return ScanResult::DeferredThenText {
                         deferred_start: &data[deferred_start..],
                         trigger_start: &data[operand_start..],
@@ -1424,6 +2460,22 @@ fn scan_graphics_region<'a>(data: &'a [u8], consecutive_errors: &mut usize) -> S
                     return ScanResult::FoundBT { rest: &data[i..] };
                 } else if op == b"BI" {
                     return ScanResult::InlineImage { rest: &data[i..] };
+                } else if op == b"cm" {
+                    // ConcatMatrix: parse 6 floats inline to avoid nom overhead
+                    // (171K triggers/PDF for Murphy). Falls back to NeedFullParse
+                    // on malformed operands.
+                    if let Some((a, b, c, d, e, f)) =
+                        parse_six_floats(&data[operand_start..op_start])
+                    {
+                        return ScanResult::SimpleOp {
+                            op: Operator::Cm { a, b, c, d, e, f },
+                            rest: &data[i..],
+                        };
+                    }
+                    return ScanResult::NeedFullParse {
+                        operand_start: &data[operand_start..],
+                        after_op: &data[i..],
+                    };
                 } else if is_skippable_graphics_op_bytes(op) {
                     operand_start = i;
                     continue;
@@ -1435,7 +2487,66 @@ fn scan_graphics_region<'a>(data: &'a [u8], consecutive_errors: &mut usize) -> S
                 }
             },
 
-            // Unknown byte
+            SCAN_PAREN => match skip_literal_string_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            SCAN_ANGLE => {
+                if i + 1 < len && data[i + 1] == b'<' {
+                    match skip_dict_raw(data, i) {
+                        Some(end) => {
+                            i = end;
+                            *consecutive_errors = 0;
+                        },
+                        None => {
+                            i += 1;
+                            *consecutive_errors += 1;
+                        },
+                    }
+                } else {
+                    match skip_hex_string_raw(data, i) {
+                        Some(end) => {
+                            i = end;
+                            *consecutive_errors = 0;
+                        },
+                        None => {
+                            i += 1;
+                            *consecutive_errors += 1;
+                        },
+                    }
+                }
+            },
+
+            SCAN_BRACKET => match skip_array_raw(data, i) {
+                Some(end) => {
+                    i = end;
+                    *consecutive_errors = 0;
+                },
+                None => {
+                    i += 1;
+                    *consecutive_errors += 1;
+                },
+            },
+
+            SCAN_SLASH => {
+                i = skip_name_raw(data, i);
+                *consecutive_errors = 0;
+            },
+
+            SCAN_PERCENT => {
+                while i < len && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+                *consecutive_errors = 0;
+            },
+
             _ => {
                 i += 1;
                 *consecutive_errors += 1;

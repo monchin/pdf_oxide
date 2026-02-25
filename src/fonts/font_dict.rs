@@ -76,6 +76,14 @@ pub struct FontInfo {
     /// Multi-character encoding map for compound glyph names (e.g. f_f → "ff")
     /// Stores mappings from character code to multi-char strings
     pub multi_char_map: HashMap<u8, String>,
+    /// Pre-computed byte→char lookup for simple (non-Type0) fonts.
+    /// Index by byte value (0-255). '\0' means "use full char_to_unicode fallback".
+    /// Built lazily on first text decode. Avoids per-byte HashMap lookups.
+    pub byte_to_char_table: std::sync::OnceLock<[char; 256]>,
+    /// Pre-computed byte→width lookup for simple (non-Type0) fonts.
+    /// Index by byte value (0-255). Built lazily on first advance_position call.
+    /// Eliminates per-byte bounds check and subtraction in get_glyph_width.
+    pub byte_to_width_table: std::sync::OnceLock<[f32; 256]>,
 }
 
 /// Font encoding types.
@@ -401,6 +409,18 @@ impl FontInfo {
         // Symbolic flag on non-symbolic fonts. When an explicit /Encoding entry exists,
         // we always parse it — real-world PDF viewers (MuPDF, poppler, pdf.js) do the same.
         // The Symbolic flag only controls behavior when NO /Encoding is present.
+        // Pre-parse font program encoding (needed for /Differences base encoding per PDF spec)
+        let font_program_enc_cache: Option<HashMap<u8, char>> =
+            if let Some(font_data) = &embedded_font_data {
+                if subtype == "Type1" || subtype == "MMType1" {
+                    super::type1_encoding::parse_type1_encoding(font_data)
+                } else {
+                    super::cff_encoding::parse_cff_encoding(font_data)
+                }
+            } else {
+                None
+            };
+
         let (encoding, diff_multi_char_map) = if let Some(enc_obj) = font_dict.get("Encoding") {
             let resolved_enc_obj = if let Some(obj_ref) = enc_obj.as_reference() {
                 doc.load_object(obj_ref)?
@@ -417,52 +437,69 @@ impl FontInfo {
             } else {
                 log::debug!("Font '{}' using /Encoding entry", base_font);
             }
-            Self::parse_encoding(&resolved_enc_obj, doc)?
-        } else {
-            // Try font program's built-in encoding before any default
-            let mut font_program_result = None;
-            if let Some(font_data) = &embedded_font_data {
-                // Try Type1 encoding (FontFile)
-                if subtype == "Type1" || subtype == "MMType1" {
-                    if let Some(enc) = super::type1_encoding::parse_type1_encoding(font_data) {
-                        log::info!(
-                            "Font '{}' using Type 1 built-in encoding ({} mappings)",
-                            base_font,
-                            enc.len()
-                        );
-                        let mut multi_map: HashMap<u8, String> = HashMap::new();
-                        for (&code, &ch) in &enc {
-                            if is_ligature_char(ch) {
-                                if let Some(expanded) = expand_ligature_char(ch) {
-                                    multi_map.insert(code, expanded.to_string());
-                                }
+            let (mut parsed_enc, mut multi_map) =
+                Self::parse_encoding(&resolved_enc_obj, doc, font_program_enc_cache.as_ref())?;
+
+            // When /Encoding is a named encoding (e.g., /WinAnsiEncoding) AND the font
+            // has an embedded program, merge the font program's encoding. This handles
+            // fonts where the program maps glyphs to non-standard code positions
+            // (e.g., space at 0xCA) that the named encoding maps differently.
+            // The font program's mappings override the standard encoding.
+            if matches!(parsed_enc, Encoding::Standard(_)) {
+                if let Some(prog_enc) = &font_program_enc_cache {
+                    log::info!(
+                        "Font '{}': merging {} font program encoding entries with {}",
+                        base_font,
+                        prog_enc.len(),
+                        match &parsed_enc {
+                            Encoding::Standard(n) => n.as_str(),
+                            _ => "custom",
+                        }
+                    );
+                    // Build Custom map: start with standard encoding, overlay font program
+                    let std_name = match &parsed_enc {
+                        Encoding::Standard(n) => n.clone(),
+                        _ => "StandardEncoding".to_string(),
+                    };
+                    let mut custom_map: HashMap<u8, char> = HashMap::new();
+                    for code in 0u8..=255 {
+                        if let Some(unicode_str) = standard_encoding_lookup(&std_name, code) {
+                            if let Some(ch) = unicode_str.chars().next() {
+                                custom_map.insert(code, ch);
                             }
                         }
-                        font_program_result = Some((Encoding::Custom(enc), multi_map));
                     }
-                }
-                // Try CFF encoding (FontFile3)
-                if font_program_result.is_none() {
-                    if let Some(enc) = super::cff_encoding::parse_cff_encoding(font_data) {
-                        log::info!(
-                            "Font '{}' using CFF built-in encoding ({} mappings)",
-                            base_font,
-                            enc.len()
-                        );
-                        let mut multi_map: HashMap<u8, String> = HashMap::new();
-                        for (&code, &ch) in &enc {
-                            if is_ligature_char(ch) {
-                                if let Some(expanded) = expand_ligature_char(ch) {
-                                    multi_map.insert(code, expanded.to_string());
-                                }
+                    // Font program overrides
+                    for (&code, &ch) in prog_enc {
+                        custom_map.insert(code, ch);
+                        if is_ligature_char(ch) {
+                            if let Some(expanded) = expand_ligature_char(ch) {
+                                multi_map.insert(code, expanded.to_string());
                             }
                         }
-                        font_program_result = Some((Encoding::Custom(enc), multi_map));
                     }
+                    parsed_enc = Encoding::Custom(custom_map);
                 }
             }
-            if let Some(result) = font_program_result {
-                result
+
+            (parsed_enc, multi_map)
+        } else {
+            // No /Encoding entry — use font program's built-in encoding if available
+            if let Some(prog_enc) = font_program_enc_cache {
+                log::info!(
+                    "Font '{}' using built-in font program encoding ({} mappings)",
+                    base_font,
+                    prog_enc.len()
+                );
+                let mut multi_map: HashMap<u8, String> = HashMap::new();
+                for (&code, &ch) in &prog_enc {
+                    if is_ligature_char(ch) {
+                        if let Some(expanded) = expand_ligature_char(ch) {
+                            multi_map.insert(code, expanded.to_string());
+                        }
+                    }
+                }
+                (Encoding::Custom(prog_enc), multi_map)
             } else if is_symbolic_font(flags) {
                 log::debug!(
                     "Font '{}' is symbolic with no /Encoding - will use built-in encoding (Symbol/ZapfDingbats)",
@@ -642,6 +679,8 @@ impl FontInfo {
             cid_widths,
             cid_default_width,
             multi_char_map: diff_multi_char_map,
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
     }
 
@@ -1120,7 +1159,8 @@ impl FontInfo {
     /// Where integers specify starting codes, and names specify glyphs for consecutive codes.
     fn parse_encoding(
         enc_obj: &Object,
-        _doc: &mut PdfDocument,
+        doc: &mut PdfDocument,
+        font_program_encoding: Option<&HashMap<u8, char>>,
     ) -> Result<(Encoding, HashMap<u8, String>)> {
         let empty_map = HashMap::new();
         // Encoding can be either a name or a dictionary
@@ -1183,7 +1223,15 @@ impl FontInfo {
             let mut encoding_map: HashMap<u8, char> = if let Some(base_enc_obj) =
                 dict.get("BaseEncoding")
             {
-                if let Some(base_name) = base_enc_obj.as_name() {
+                // Resolve indirect reference for /BaseEncoding
+                let resolved_base = if let Some(obj_ref) = base_enc_obj.as_reference() {
+                    doc.load_object(obj_ref).ok()
+                } else {
+                    None
+                };
+                let base_obj = resolved_base.as_ref().unwrap_or(base_enc_obj);
+
+                if let Some(base_name) = base_obj.as_name() {
                     // Build initial encoding from base encoding
                     let mut map = HashMap::new();
                     for code in 0u8..=255 {
@@ -1198,8 +1246,13 @@ impl FontInfo {
                 } else {
                     HashMap::new()
                 }
+            } else if let Some(prog_enc) = font_program_encoding {
+                // PDF Spec ISO 32000-1:2008, Section 9.6.6.1:
+                // "If BaseEncoding is absent and the font has a built-in encoding,
+                // the built-in encoding shall be used as the base encoding."
+                prog_enc.clone()
             } else {
-                // No base encoding specified - start with StandardEncoding as default
+                // No base encoding specified and no font program - use StandardEncoding as default
                 let mut map = HashMap::new();
                 for code in 0u8..=255 {
                     if let Some(unicode_str) = standard_encoding_lookup("StandardEncoding", code) {
@@ -1214,30 +1267,39 @@ impl FontInfo {
             // Step 2: Apply /Differences array if present
             if let Some(differences_obj) = dict.get("Differences") {
                 log::info!("Found /Differences array in encoding dictionary");
-                if let Some(diff_array) = differences_obj.as_array() {
+
+                // Resolve indirect reference for /Differences itself
+                let resolved_diff = if let Some(obj_ref) = differences_obj.as_reference() {
+                    doc.load_object(obj_ref).ok()
+                } else {
+                    None
+                };
+                let diff_obj = resolved_diff.as_ref().unwrap_or(differences_obj);
+
+                if let Some(diff_array) = diff_obj.as_array() {
                     log::info!("/Differences array has {} items", diff_array.len());
                     let mut current_code: u32 = 0;
 
                     for item in diff_array {
-                        match item {
+                        // Resolve indirect references within the array
+                        let resolved_item = if let Some(obj_ref) = item.as_reference() {
+                            doc.load_object(obj_ref).ok()
+                        } else {
+                            None
+                        };
+                        let actual_item = resolved_item.as_ref().unwrap_or(item);
+
+                        match actual_item {
                             Object::Integer(code) => {
                                 // New starting code
                                 current_code = *code as u32;
                             },
                             Object::Name(glyph_name) => {
-                                // Log ALL glyphs for code 0x64 (even if lookup fails)
-                                if current_code == 0x64 {
-                                    log::info!(
-                                        "/Differences: code 0x64 has glyph name /{}",
-                                        glyph_name
-                                    );
-                                }
-
                                 // Map glyph name to Unicode character(s)
                                 if let Some(unicode_char) = glyph_name_to_unicode(glyph_name) {
                                     if current_code <= 255 {
                                         encoding_map.insert(current_code as u8, unicode_char);
-                                        if is_ligature_char(unicode_char) || current_code == 0x64 {
+                                        if is_ligature_char(unicode_char) {
                                             log::info!(
                                                 "/Differences: code {} → /{} → '{}' (U+{:04X})",
                                                 current_code,
@@ -1272,7 +1334,10 @@ impl FontInfo {
                             },
                             _ => {
                                 // Invalid item in /Differences array - skip
-                                log::warn!("Unexpected item in /Differences array: {:?}", item);
+                                log::warn!(
+                                    "Unexpected item in /Differences array: {:?}",
+                                    actual_item
+                                );
                             },
                         }
                     }
@@ -1282,7 +1347,7 @@ impl FontInfo {
                         encoding_map.len()
                     );
                 } else {
-                    log::warn!("/Differences is not an array");
+                    log::warn!("/Differences is not an array: {:?}", diff_obj);
                 }
             }
 
@@ -1692,6 +1757,52 @@ impl FontInfo {
         }
     }
 
+    /// Get the pre-computed byte→char lookup table for OneByte (simple) fonts.
+    /// Built lazily on first call by running `char_to_unicode` for all 256 byte values.
+    /// Returns a 256-element array: non-'\0' = single printable char, '\0' = needs fallback.
+    /// Control chars (except tab/newline/cr), multi-char, and \u{FFFD} are stored as '\0'.
+    pub fn get_byte_to_char_table(&self) -> &[char; 256] {
+        self.byte_to_char_table.get_or_init(|| {
+            let mut tbl = ['\0'; 256];
+            for i in 0..=255u8 {
+                if let Some(s) = self.char_to_unicode(i as u32) {
+                    let mut chars = s.chars();
+                    if let Some(c) = chars.next() {
+                        if chars.next().is_none()
+                            && c != '\u{FFFD}'
+                            && (c >= '\x20' || c == '\t' || c == '\n' || c == '\r')
+                        {
+                            tbl[i as usize] = c;
+                        }
+                        // Multi-char, replacement, or control char: leave as '\0'
+                    }
+                }
+            }
+            tbl
+        })
+    }
+
+    /// Pre-computed byte→width lookup for simple (non-Type0) fonts.
+    /// Returns a 256-entry array where index i = glyph width for byte i.
+    /// Eliminates per-byte bounds check and subtraction in advance_position.
+    #[inline]
+    pub fn get_byte_to_width_table(&self) -> &[f32; 256] {
+        self.byte_to_width_table.get_or_init(|| {
+            let mut tbl = [self.default_width; 256];
+            if let Some(widths) = &self.widths {
+                if let Some(first_char) = self.first_char {
+                    for (idx, &w) in widths.iter().enumerate() {
+                        let code = first_char as usize + idx;
+                        if code < 256 {
+                            tbl[code] = w;
+                        }
+                    }
+                }
+            }
+            tbl
+        })
+    }
+
     /// Convert a character code to Unicode string.
     ///
     /// This method looks up the character code in the font's encoding tables
@@ -1839,19 +1950,36 @@ impl FontInfo {
                             }
                         }
 
-                        // For non-Identity ordering (e.g., Adobe-Japan1, Adobe-GB1),
-                        // or when TrueType cmap lookup fails: CID == Unicode
-                        if let Some(unicode_char) = char::from_u32(char_code) {
-                            if !unicode_char.is_control() || unicode_char == ' ' {
-                                return Some(unicode_char.to_string());
+                        // For UCS2/UTF16 encodings, char codes ARE Unicode values directly.
+                        // For Identity-H/V with non-Identity ordering (e.g., Adobe-GB1),
+                        // char codes are CIDs that need CID-to-Unicode lookup.
+                        let is_ucs2_or_utf16 =
+                            encoding_name.contains("UCS2") || encoding_name.contains("UTF16");
+                        let is_non_identity_ordering = self
+                            .cid_system_info
+                            .as_ref()
+                            .map(|info| info.ordering != "Identity")
+                            .unwrap_or(false);
+
+                        if !is_ucs2_or_utf16 && is_non_identity_ordering {
+                            // Identity-H/V with CJK collection: CIDs are NOT Unicode!
+                            if let Some(unicode_codepoint) = lookup_predefined_cmap(
+                                encoding_name,
+                                &self.cid_system_info,
+                                char_code as u16,
+                            ) {
+                                if let Some(unicode_char) = char::from_u32(unicode_codepoint) {
+                                    return Some(unicode_char.to_string());
+                                }
                             }
-                            // Control char — fall through to later fallbacks
+                            // CID lookup failed — fall through to Priority 2b and beyond
                         } else {
-                            log::warn!(
-                                "CID 0x{:04X} in font '{}' is not a valid Unicode code point (surrogate pair?)",
-                                char_code,
-                                self.base_font
-                            );
+                            // UCS2/UTF16 or Adobe-Identity: char code == Unicode
+                            if let Some(unicode_char) = char::from_u32(char_code) {
+                                if !unicode_char.is_control() || unicode_char == ' ' {
+                                    return Some(unicode_char.to_string());
+                                }
+                            }
                         }
                     } else {
                         // No CIDSystemInfo — use CID-as-Unicode as last resort.
@@ -2043,6 +2171,20 @@ impl FontInfo {
                     }
                 }
 
+                // For TrueType subset fonts with no /Encoding, character codes are often
+                // GIDs (glyph indices), not standard encoding values. Per PDF Spec 9.6.5.4,
+                // when no /Encoding exists and the font has a (3,1) cmap, character codes
+                // map through the cmap. Try TrueType cmap first for these fonts.
+                if (self.subtype == "TrueType" || self.subtype == "Type1")
+                    && name == "StandardEncoding"
+                {
+                    if let Some(ref tt_cmap) = self.truetype_cmap {
+                        if let Some(unicode_char) = tt_cmap.get_unicode(char_code as u16) {
+                            return Some(unicode_char.to_string());
+                        }
+                    }
+                }
+
                 // Predefined encodings: StandardEncoding, WinAnsiEncoding, MacRomanEncoding, etc.
                 if let Some(unicode) = standard_encoding_lookup(name, char_code as u8) {
                     log::debug!(
@@ -2230,7 +2372,21 @@ impl FontInfo {
         }
 
         // ==================================================================================
-        // PRIORITY 4: Fallback - No Mapping Found
+        // PRIORITY 4: TrueType cmap fallback for simple fonts
+        // ==================================================================================
+        // When all encoding-based lookups fail, try the embedded TrueType cmap as a last
+        // resort. For subset fonts, character codes may be GIDs that the encoding table
+        // doesn't cover. The cmap provides GID → Unicode mapping.
+        if self.subtype != "Type0" {
+            if let Some(ref tt_cmap) = self.truetype_cmap {
+                if let Some(unicode_char) = tt_cmap.get_unicode(char_code as u16) {
+                    return Some(unicode_char.to_string());
+                }
+            }
+        }
+
+        // ==================================================================================
+        // PRIORITY 5: Fallback - No Mapping Found
         // ==================================================================================
         // If we reach here, the character is either:
         // - A control character (0x00-0x1F, 0x7F-0x9F) - intentionally omitted
@@ -2710,11 +2866,13 @@ fn _old_glyph_name_to_unicode_removed() {
 fn is_ligature_char(c: char) -> bool {
     matches!(
         c,
-        'ﬁ' |  // fi - U+FB01
-        'ﬂ' |  // fl - U+FB02
-        'ﬀ' |  // ff - U+FB00
+        'ﬀ' |  // ff  - U+FB00
+        'ﬁ' |  // fi  - U+FB01
+        'ﬂ' |  // fl  - U+FB02
         'ﬃ' |  // ffi - U+FB03
-        'ﬄ' // ffl - U+FB04
+        'ﬄ' |  // ffl - U+FB04
+        'ﬅ' |  // st (long s + t) - U+FB05
+        'ﬆ' // st - U+FB06
     )
 }
 
@@ -2741,11 +2899,13 @@ fn is_ligature_char(c: char) -> bool {
 /// ```ignore
 fn expand_ligature_char(c: char) -> Option<&'static str> {
     match c {
+        'ﬀ' => Some("ff"),  // U+FB00
         'ﬁ' => Some("fi"),  // U+FB01
         'ﬂ' => Some("fl"),  // U+FB02
-        'ﬀ' => Some("ff"),  // U+FB00
         'ﬃ' => Some("ffi"), // U+FB03
         'ﬄ' => Some("ffl"), // U+FB04
+        'ﬅ' => Some("st"),  // U+FB05 (long s + t)
+        'ﬆ' => Some("st"),  // U+FB06
         _ => None,
     }
 }
@@ -2780,6 +2940,8 @@ fn expand_ligature_char_code(char_code: u16) -> Option<&'static str> {
         0xFB02 => Some("fl"),  // LATIN SMALL LIGATURE FL
         0xFB03 => Some("ffi"), // LATIN SMALL LIGATURE FFI
         0xFB04 => Some("ffl"), // LATIN SMALL LIGATURE FFL
+        0xFB05 => Some("st"),  // LATIN SMALL LIGATURE LONG S T
+        0xFB06 => Some("st"),  // LATIN SMALL LIGATURE ST
         _ => None,
     }
 }
@@ -3216,14 +3378,77 @@ fn standard_encoding_lookup(encoding: &str, code: u8) -> Option<String> {
             Some(unicode.to_string())
         },
         "StandardEncoding" => {
-            // StandardEncoding is mostly like WinAnsi for the ASCII range
+            // PostScript StandardEncoding per PDF Spec ISO 32000-1:2008, Annex D, Table D.1
+            // NOTE: StandardEncoding differs significantly from ISO-8859-1 in the 0xA0-0xFF range.
+            // Using ISO-8859-1 fallback here would produce wrong characters for ligatures,
+            // smart quotes, accents, and other typographic characters.
             if (32..=126).contains(&code) {
                 Some((code as char).to_string())
-            } else if code >= 0xA0 {
-                // Extended range uses ISO Latin-1 for most characters
-                char::from_u32(code as u32).map(|c| c.to_string())
             } else {
-                None
+                let unicode = match code {
+                    // 0xA0-0xAF
+                    0xA1 => '\u{00A1}', // exclamdown
+                    0xA2 => '\u{00A2}', // cent
+                    0xA3 => '\u{00A3}', // sterling
+                    0xA4 => '\u{2044}', // fraction (NOT currency ¤)
+                    0xA5 => '\u{00A5}', // yen
+                    0xA6 => '\u{0192}', // florin (NOT broken bar)
+                    0xA7 => '\u{00A7}', // section
+                    0xA8 => '\u{00A4}', // currency (NOT dieresis)
+                    0xA9 => '\u{0027}', // quotesingle (NOT copyright)
+                    0xAA => '\u{201C}', // quotedblleft (NOT ordfeminine)
+                    0xAB => '\u{00AB}', // guillemotleft
+                    0xAC => '\u{2039}', // guilsinglleft (NOT not-sign)
+                    0xAD => '\u{203A}', // guilsinglright (NOT soft-hyphen)
+                    0xAE => '\u{FB01}', // fi ligature (NOT registered)
+                    0xAF => '\u{FB02}', // fl ligature (NOT macron)
+                    // 0xB0-0xBF
+                    0xB1 => '\u{2013}', // endash (NOT plus-minus)
+                    0xB2 => '\u{2020}', // dagger (NOT superscript 2)
+                    0xB3 => '\u{2021}', // daggerdbl (NOT superscript 3)
+                    0xB4 => '\u{00B7}', // periodcentered (NOT acute accent)
+                    0xB6 => '\u{00B6}', // paragraph
+                    0xB7 => '\u{2022}', // bullet (NOT middle dot)
+                    0xB8 => '\u{201A}', // quotesinglbase (NOT cedilla)
+                    0xB9 => '\u{201E}', // quotedblbase (NOT superscript 1)
+                    0xBA => '\u{201D}', // quotedblright (NOT ordmasculine)
+                    0xBB => '\u{00BB}', // guillemotright
+                    0xBC => '\u{2026}', // ellipsis (NOT one quarter)
+                    0xBD => '\u{2030}', // perthousand (NOT one half)
+                    0xBF => '\u{00BF}', // questiondown
+                    // 0xC0-0xCF — accent marks and modifiers
+                    0xC1 => '\u{0060}', // grave (NOT A-grave)
+                    0xC2 => '\u{00B4}', // acute (NOT A-circumflex)
+                    0xC3 => '\u{02C6}', // circumflex (NOT A-tilde)
+                    0xC4 => '\u{02DC}', // tilde (NOT A-dieresis)
+                    0xC5 => '\u{00AF}', // macron (NOT A-ring)
+                    0xC6 => '\u{02D8}', // breve (NOT AE)
+                    0xC7 => '\u{02D9}', // dotaccent (NOT C-cedilla)
+                    0xC8 => '\u{00A8}', // dieresis (NOT E-grave)
+                    0xCA => '\u{02DA}', // ring (NOT E-circumflex)
+                    0xCB => '\u{00B8}', // cedilla (NOT E-dieresis)
+                    0xCD => '\u{02DD}', // hungarumlaut (NOT I-acute)
+                    0xCE => '\u{02DB}', // ogonek (NOT I-circumflex)
+                    0xCF => '\u{02C7}', // caron (NOT I-dieresis)
+                    // 0xD0 — em dash
+                    0xD0 => '\u{2014}', // emdash (NOT Eth)
+                    // 0xE0-0xEF — uppercase special chars
+                    0xE1 => '\u{00C6}', // AE (NOT a-acute)
+                    0xE3 => '\u{00AA}', // ordfeminine (NOT a-tilde)
+                    0xE8 => '\u{0141}', // Lslash (NOT e-grave)
+                    0xE9 => '\u{00D8}', // Oslash (NOT e-acute)
+                    0xEA => '\u{0152}', // OE (NOT e-circumflex)
+                    0xEB => '\u{00BA}', // ordmasculine (NOT e-dieresis)
+                    // 0xF0-0xFF — lowercase special chars
+                    0xF1 => '\u{00E6}', // ae (NOT n-tilde)
+                    0xF5 => '\u{0131}', // dotlessi (NOT o-tilde)
+                    0xF8 => '\u{0142}', // lslash (NOT o-stroke)
+                    0xF9 => '\u{00F8}', // oslash (NOT u-grave)
+                    0xFA => '\u{0153}', // oe (NOT u-acute)
+                    0xFB => '\u{00DF}', // germandbls (NOT u-circumflex)
+                    _ => return None,
+                };
+                Some(unicode.to_string())
             }
         },
         "MacRomanEncoding" => {
@@ -3231,10 +3456,9 @@ fn standard_encoding_lookup(encoding: &str, code: u8) -> Option<String> {
             if (32..=126).contains(&code) {
                 Some((code as char).to_string())
             } else {
-                // MacRoman extended characters
-                // Partial implementation focusing on common punctuation
-                // PDF Spec: ISO 32000-1:2008, Annex D.2
+                // Complete Mac OS Roman encoding per PDF Spec ISO 32000-1:2008, Annex D, Table D.2
                 let unicode = match code {
+                    // 0x80-0x9F: Accented letters
                     0x80 => '\u{00C4}', // Adieresis
                     0x81 => '\u{00C5}', // Aring
                     0x82 => '\u{00C7}', // Ccedilla
@@ -3267,15 +3491,107 @@ fn standard_encoding_lookup(encoding: &str, code: u8) -> Option<String> {
                     0x9D => '\u{00F9}', // ugrave
                     0x9E => '\u{00FB}', // ucircumflex
                     0x9F => '\u{00FC}', // udieresis
-                    0xD0 => '\u{2013}', // EN DASH (this is the key fix!)
-                    0xD1 => '\u{2014}', // EM DASH
-                    0xD2 => '\u{201C}', // LEFT DOUBLE QUOTATION MARK
-                    0xD3 => '\u{201D}', // RIGHT DOUBLE QUOTATION MARK
-                    0xD4 => '\u{2018}', // LEFT SINGLE QUOTATION MARK
-                    0xD5 => '\u{2019}', // RIGHT SINGLE QUOTATION MARK
-                    0xE0 => '\u{2020}', // dagger
-                    0xE1 => '\u{00B0}', // degree
-                    _ if code >= 0xA0 => char::from_u32(code as u32)?,
+                    // 0xA0-0xBF: Symbols and punctuation (NOT Latin-1!)
+                    0xA0 => '\u{2020}', // dagger (NOT NBSP)
+                    0xA1 => '\u{00B0}', // degree (NOT inverted exclamation)
+                    0xA2 => '\u{00A2}', // cent
+                    0xA3 => '\u{00A3}', // sterling
+                    0xA4 => '\u{00A7}', // section (NOT currency sign)
+                    0xA5 => '\u{2022}', // bullet (NOT yen)
+                    0xA6 => '\u{00B6}', // paragraph (NOT broken bar)
+                    0xA7 => '\u{00DF}', // germandbls (NOT section)
+                    0xA8 => '\u{00AE}', // registered (NOT dieresis)
+                    0xA9 => '\u{00A9}', // copyright
+                    0xAA => '\u{2122}', // trademark (NOT ordfeminine)
+                    0xAB => '\u{00B4}', // acute (NOT guillemotleft)
+                    0xAC => '\u{00A8}', // dieresis (NOT logical not)
+                    0xAD => '\u{2260}', // notequal (NOT soft hyphen)
+                    0xAE => '\u{00C6}', // AE (NOT registered)
+                    0xAF => '\u{00D8}', // Oslash (NOT macron)
+                    0xB0 => '\u{221E}', // infinity (NOT degree)
+                    0xB1 => '\u{00B1}', // plusminus
+                    0xB2 => '\u{2264}', // lessequal (NOT superscript 2)
+                    0xB3 => '\u{2265}', // greaterequal (NOT superscript 3)
+                    0xB4 => '\u{00A5}', // yen (NOT acute)
+                    0xB5 => '\u{00B5}', // mu
+                    0xB6 => '\u{2202}', // partialdiff (NOT paragraph)
+                    0xB7 => '\u{2211}', // summation (NOT middle dot)
+                    0xB8 => '\u{220F}', // product (NOT cedilla)
+                    0xB9 => '\u{03C0}', // pi (NOT superscript 1)
+                    0xBA => '\u{222B}', // integral (NOT ordmasculine)
+                    0xBB => '\u{00AA}', // ordfeminine (NOT guillemotright)
+                    0xBC => '\u{00BA}', // ordmasculine (NOT one quarter)
+                    0xBD => '\u{2126}', // Omega (NOT one half)
+                    0xBE => '\u{00E6}', // ae (NOT three quarters)
+                    0xBF => '\u{00F8}', // oslash (NOT inverted question)
+                    // 0xC0-0xCF: More symbols and accented capitals
+                    0xC0 => '\u{00BF}', // questiondown
+                    0xC1 => '\u{00A1}', // exclamdown
+                    0xC2 => '\u{00AC}', // logicalnot
+                    0xC3 => '\u{221A}', // radical
+                    0xC4 => '\u{0192}', // florin
+                    0xC5 => '\u{2248}', // approxequal
+                    0xC6 => '\u{2206}', // Delta
+                    0xC7 => '\u{00AB}', // guillemotleft
+                    0xC8 => '\u{00BB}', // guillemotright
+                    0xC9 => '\u{2026}', // ellipsis
+                    0xCA => '\u{00A0}', // nonbreakingspace
+                    0xCB => '\u{00C0}', // Agrave
+                    0xCC => '\u{00C3}', // Atilde
+                    0xCD => '\u{00D5}', // Otilde
+                    0xCE => '\u{0152}', // OE
+                    0xCF => '\u{0153}', // oe
+                    // 0xD0-0xDF: Dashes, quotes, ligatures
+                    0xD0 => '\u{2013}', // endash
+                    0xD1 => '\u{2014}', // emdash
+                    0xD2 => '\u{201C}', // quotedblleft
+                    0xD3 => '\u{201D}', // quotedblright
+                    0xD4 => '\u{2018}', // quoteleft
+                    0xD5 => '\u{2019}', // quoteright
+                    0xD6 => '\u{00F7}', // divide
+                    0xD7 => '\u{25CA}', // lozenge
+                    0xD8 => '\u{00FF}', // ydieresis
+                    0xD9 => '\u{0178}', // Ydieresis
+                    0xDA => '\u{2044}', // fraction
+                    0xDB => '\u{20AC}', // Euro
+                    0xDC => '\u{2039}', // guilsinglleft
+                    0xDD => '\u{203A}', // guilsinglright
+                    0xDE => '\u{FB01}', // fi ligature
+                    0xDF => '\u{FB02}', // fl ligature
+                    // 0xE0-0xEF: More symbols and accented capitals
+                    0xE0 => '\u{2021}', // daggerdbl
+                    0xE1 => '\u{00B7}', // periodcentered
+                    0xE2 => '\u{201A}', // quotesinglbase
+                    0xE3 => '\u{201E}', // quotedblbase
+                    0xE4 => '\u{2030}', // perthousand
+                    0xE5 => '\u{00C2}', // Acircumflex
+                    0xE6 => '\u{00CA}', // Ecircumflex
+                    0xE7 => '\u{00C1}', // Aacute
+                    0xE8 => '\u{00CB}', // Edieresis
+                    0xE9 => '\u{00C8}', // Egrave
+                    0xEA => '\u{00CD}', // Iacute
+                    0xEB => '\u{00CE}', // Icircumflex
+                    0xEC => '\u{00CF}', // Idieresis
+                    0xED => '\u{00CC}', // Igrave
+                    0xEE => '\u{00D3}', // Oacute
+                    0xEF => '\u{00D4}', // Ocircumflex
+                    // 0xF0-0xFF: More accented and special chars
+                    0xF0 => '\u{F8FF}', // Apple logo (private use area)
+                    0xF1 => '\u{00D2}', // Ograve
+                    0xF2 => '\u{00DA}', // Uacute
+                    0xF3 => '\u{00DB}', // Ucircumflex
+                    0xF4 => '\u{00D9}', // Ugrave
+                    0xF5 => '\u{0131}', // dotlessi
+                    0xF6 => '\u{02C6}', // circumflex
+                    0xF7 => '\u{02DC}', // tilde
+                    0xF8 => '\u{00AF}', // macron
+                    0xF9 => '\u{02D8}', // breve
+                    0xFA => '\u{02D9}', // dotaccent
+                    0xFB => '\u{02DA}', // ring
+                    0xFC => '\u{00B8}', // cedilla
+                    0xFD => '\u{02DD}', // hungarumlaut
+                    0xFE => '\u{02DB}', // ogonek
+                    0xFF => '\u{02C7}', // caron
                     _ => return None,
                 };
                 Some(unicode.to_string())
@@ -3409,6 +3725,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font.is_bold());
 
@@ -3432,6 +3750,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(!font2.is_bold());
     }
@@ -3458,6 +3778,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font.is_italic());
 
@@ -3481,6 +3803,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font2.is_italic());
     }
@@ -3510,6 +3834,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Should use ToUnicode mapping (priority)
@@ -3540,6 +3866,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
@@ -3569,6 +3897,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Type0 without ToUnicode should use CID-as-Unicode fallback
@@ -3596,6 +3926,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Simple fonts (Type1) CAN use Identity encoding for valid Unicode codes
@@ -3721,6 +4053,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         let font2 = font.clone();
@@ -3836,6 +4170,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Should use custom encoding
@@ -3869,6 +4205,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_with_force_bold.get_font_weight(), FontWeight::Bold);
@@ -3895,6 +4233,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_without_force_bold.get_font_weight(), FontWeight::Normal);
@@ -3925,6 +4265,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_heavy_stem.get_font_weight(), FontWeight::Bold);
@@ -3951,6 +4293,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_medium_stem.get_font_weight(), FontWeight::Medium);
@@ -3977,6 +4321,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_light_stem.get_font_weight(), FontWeight::Normal);
@@ -4007,6 +4353,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_explicit.get_font_weight(), FontWeight::Light);
@@ -4033,6 +4381,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_force_bold.get_font_weight(), FontWeight::Bold);
@@ -4059,6 +4409,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_name.get_font_weight(), FontWeight::Bold);
@@ -4089,6 +4441,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_black.get_font_weight(), FontWeight::Black);
         assert!(font_black.is_bold());
@@ -4114,6 +4468,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_extrabold.get_font_weight(), FontWeight::ExtraBold);
         assert!(font_extrabold.is_bold());
@@ -4139,6 +4495,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_bold.get_font_weight(), FontWeight::Bold);
         assert!(font_bold.is_bold());
@@ -4164,6 +4522,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_semibold.get_font_weight(), FontWeight::SemiBold);
         assert!(font_semibold.is_bold());
@@ -4189,6 +4549,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_medium.get_font_weight(), FontWeight::Medium);
         assert!(!font_medium.is_bold());
@@ -4214,6 +4576,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_light.get_font_weight(), FontWeight::Light);
         assert!(!font_light.is_bold());
@@ -4239,6 +4603,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_extralight.get_font_weight(), FontWeight::ExtraLight);
         assert!(!font_extralight.is_bold());
@@ -4264,6 +4630,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_thin.get_font_weight(), FontWeight::Thin);
         assert!(!font_thin.is_bold());
@@ -4289,6 +4657,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_normal.get_font_weight(), FontWeight::Normal);
         assert!(!font_normal.is_bold());
@@ -4562,6 +4932,8 @@ mod tests {
             cid_widths: Some(cid_widths),
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Widths from cid_widths
@@ -4599,6 +4971,8 @@ mod tests {
             cid_widths: Some(cid_widths),
             cid_default_width: 800.0, // CID default width
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // CID 1 has explicit width
@@ -4632,6 +5006,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // All CIDs use default_width when no cid_widths and no widths array
@@ -4675,6 +5051,8 @@ mod tests {
             cid_widths: Some(cid_widths),
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Range test

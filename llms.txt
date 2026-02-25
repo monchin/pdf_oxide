@@ -4,7 +4,7 @@
 > Text extraction, image extraction, PDF creation, editing, and markdown conversion.
 > 0.8ms mean per document. 100% pass rate on 3,830 real-world PDFs.
 > 5× faster than PyMuPDF, 15× faster than pypdf.
-> MIT / Apache-2.0 license. Current version: 0.3.8.
+> MIT / Apache-2.0 license. Current version: 0.3.9.
 
 - Python: `pip install pdf-oxide`
 - Rust: `cargo add pdf_oxide`
@@ -22,7 +22,7 @@
 - [README](https://raw.githubusercontent.com/yfedoseev/pdf_oxide/main/README.md): Project overview, installation, quick start examples
 - [Changelog](https://raw.githubusercontent.com/yfedoseev/pdf_oxide/main/CHANGELOG.md): Version history and release notes
 
-## Performance (v0.3.8)
+## Performance (v0.3.9)
 
 Benchmarked on 3,830 PDFs (veraPDF, Mozilla pdf.js, DARPA SafeDocs). 18 libraries tested.
 

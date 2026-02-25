@@ -2,6 +2,106 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.9] - 2026-02-24
+> Performance: 20+ Micro-Optimizations — 40% Faster Text Extraction
+
+### Performance
+
+- **O(n²) string concat fix** (#135) — Replaced `String::push_str()` accumulation in span merging with pre-allocated `Vec<&str>` joined at the end. Eliminates quadratic growth on pages with thousands of merged spans.
+
+- **Image-only content stream parser** (#113) — New `parse_content_stream_images_only()` fast path that only extracts image operators (`Do`, `BI`), skipping text and graphics entirely. Used by `extract_images()` for 3-5× faster image extraction.
+
+- **Fingerprint-based font cache** (#130) — Font identity determined by hashing encoding+widths+flags instead of comparing full FontInfo structs. Cache hits avoid re-parsing font programs entirely.
+
+- **Streaming parser with font identity cache** (#136) — Content stream parsing now streams operators instead of collecting into `Vec<Operator>`. Font identity cache skips redundant font switches when the same physical font is referenced under different names.
+
+- **Name-based font set cache** (#136) — Cache font set lookups by resource name to avoid repeated dictionary traversal on pages that reference many fonts.
+
+- **Fast inline parser for BT/ET** (#136) — Specialized inline parser for text blocks that handles the most common operators (Tj, TJ, Tf, Td, Tm, T*) with direct byte matching instead of full nom parsing.
+
+- **Font cache trust, fast parser** (#137) — Trust cached font data without re-validation on cache hits. Fast parser combines operator dispatch with operand parsing in a single pass.
+
+- **Skip Image XObject loading** (#138) — `Do` operator for Image XObjects skips loading the stream entirely during text extraction. Only Form XObjects are loaded and processed.
+
+- **Fast-path literal string parsing** — Literal strings `(...)` parsed with direct byte scanning and in-place unescaping instead of nom combinators.
+
+- **Byte-to-char lookup table** (#144) — 256-entry lookup table for single-byte character mapping replaces HashMap lookups in the hot path.
+
+- **Cache font Arc in TjBuffer** (#145) — `TjBuffer` holds an `Arc<FontInfo>` reference, avoiding repeated cache lookups within the same text block.
+
+- **Streaming XObject parser, span flush** (#146) — Form XObjects parsed with streaming parser. Span flush moved out of hot loop.
+
+- **Width lookup table, XObject text cache** (#148) — Fixed-size array for glyph width lookups replaces HashMap. XObject text content cached to avoid re-parsing shared Form XObjects.
+
+- **Merged single-pass Unicode decode + width** (#149) — Character-to-Unicode conversion and width lookup merged into a single pass, eliminating redundant character code processing.
+
+- **Shrink Operator enum 112→40 bytes** (#150) — Boxed large variants (String, HashMap, Vec) in the Operator enum to reduce memory footprint by 64%. Improves cache locality during content stream iteration.
+
+- **Fast-path single-char operator dispatch** (#151) — Single-character operators (q, Q, f, W, n, etc.) dispatched via direct byte match instead of string comparison.
+
+- **Switch flate2 to zlib-rs backend** (#152) — Replaced default miniz_oxide backend with zlib-rs (Rust port of zlib-ng). 15-25% faster stream decompression.
+
+- **Smart Tm batching, TjBuffer precomputation** (#153) — Batch consecutive `Tm` operators (keep only the last one before text). Precompute TjBuffer text metrics to avoid redundant calculations.
+
+- **Single-pass TJ array processing** (#154) — TJ arrays processed in a single pass, combining string extraction and numeric advance handling without intermediate allocation.
+
+### Bug Fixes
+
+- **Compilation bug** (#134) — Fixed unused variable `_page_num` → `page_num` in page renderer (reported by @mpannu03)
+
+- **Font encoding with embedded programs** (#119) — When `/BaseEncoding` is absent in a font's encoding dictionary and the font has an embedded program, the font program's built-in encoding is now used as the base encoding per PDF spec ISO 32000-1:2008 Section 9.6.6.1. Previously defaulted to StandardEncoding, causing ligature and glyph mapping failures.
+
+- **Supplementary Unicode (U+10000+)** (#124) — `fallback_char_to_unicode()` changed from `u16` to `u32` parameter, fixing truncation of supplementary Unicode code points (e.g., CJK Extension B characters). Also added 5-6 digit hex support in CMap `bfrange` array format.
+
+- **StandardEncoding + ligature mapping** (#125) — Correct glyph-to-Unicode mapping for fi, fl, ff, ffi, ffl ligatures via Adobe Glyph List lookup.
+
+- **Kangxi Radical normalization** (#123) — Full normalization table (U+2F00–U+2FD5) mapping Kangxi Radicals to CJK Unified Ideographs for searchable text.
+
+- **Tolerate misaligned startxref offsets** — XRef scanning with 32+64 byte tolerance for PDFs with slightly incorrect startxref pointers.
+
+- **Character repetition blowup guard** — 32K character cap on text strings to prevent pathological memory growth from malformed content streams.
+
+- **Cap Tj/TJ string length** — Maximum string length enforced in text operators to prevent memory exhaustion.
+
+- **Filter leaked PDF metadata** — Strip leaked WhitePoint, BlackPoint, and CalRGB metadata strings from extracted text output.
+
+- **TrueType cmap fallback** (#127) — Improved cmap table selection for TrueType fonts with multiple subtables. Falls back through format 4 → format 6 → format 0 when primary subtable fails.
+
+- **TrueType cmap for subset fonts** (#94) — Correct cmap lookup for subset fonts where glyph IDs don't match Unicode code points.
+
+- **MacRomanEncoding table** (#93) — Fixed MacRomanEncoding character mapping table to match PDF spec Table D.2.
+
+- **Indirect refs in /Encoding /Differences** (#119) — Resolve indirect object references within encoding dictionaries and /Differences arrays.
+
+- **CJK CID-to-Unicode tables** (#120) — Expanded CID-to-Unicode mapping tables for Adobe-CNS1, Adobe-GB1, Adobe-Japan1, Adobe-Korea1 character collections.
+
+- **RTL text character order** (#121) — Right-to-left text (Arabic, Hebrew) now extracted in logical reading order instead of visual glyph order.
+
+- **Arabic Presentation Forms normalization** (#96) — Arabic Presentation Forms (U+FB50–U+FDFF, U+FE70–U+FEFF) normalized to base Arabic characters for searchable text.
+
+- **Multi-column text separation** (#122) — Improved column detection using gap analysis to prevent text from adjacent columns being merged.
+
+- **Supplementary Unicode in CMap** (#124) — CMap `bfchar` and `bfrange` entries with 5-8 hex digit targets now correctly produce supplementary Unicode characters.
+
+### Features
+
+- **`extract_all_text()`** (#128) — New convenience method that extracts text from all pages and joins with newlines. Available in both Rust and Python APIs. (Requested by @SeanPedersen)
+
+- **`source_role` for StructElem** (#118) — Structure tree elements now expose `source_role` preserving the original PDF role name before role mapping. (Requested by @QuickWrite)
+
+### CI/CD
+
+- Fixed `cargo fmt` formatting across all source files
+- Resolved 5 clippy warnings: empty doc comments, doc indentation, `Box<Collection>` on intentional enum shrink, collapsible else-if, needless borrow
+
+### Community Contributors
+
+Thanks to everyone who reported issues, sent test PDFs, and requested features for v0.3.9:
+
+- **@SeanPedersen** — Feature request for `extract_all_text()` (#128) and continued contributions of real-world test PDFs that drove performance profiling and optimization work
+- **@mpannu03** — Reported compilation bug (#134) in page renderer
+- **@QuickWrite** — Feature request for `source_role` on StructElem (#118)
+
 ## [0.3.8] - 2026-02-20
 > Performance: Text-Only Parser — Graphics-Heavy Pages 10-30x Faster
 

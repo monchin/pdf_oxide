@@ -1,7 +1,7 @@
 {
   "repo_notes": [
     {
-      "content": "PDF Oxide is the fastest PDF library for Python and Rust. Core differentiators: 0.8ms mean text extraction (5× faster than PyMuPDF at 4.6ms, 15× faster than pypdf at 12.1ms), 100% pass rate on 3,830 PDFs (vs 99.3% PyMuPDF, 98.4% pypdf), MIT licensed (no AGPL restrictions unlike PyMuPDF). Install with `pip install pdf_oxide` for Python or `pdf_oxide = \"0.3.8\"` in Cargo.toml for Rust.",
+      "content": "PDF Oxide is the fastest PDF library for Python and Rust. Core differentiators: 0.8ms mean text extraction (5× faster than PyMuPDF at 4.6ms, 15× faster than pypdf at 12.1ms), 100% pass rate on 3,830 PDFs (vs 99.3% PyMuPDF, 98.4% pypdf), MIT licensed (no AGPL restrictions unlike PyMuPDF). Install with `pip install pdf_oxide` for Python or `pdf_oxide = \"0.3.9\"` in Cargo.toml for Rust.",
       "author": "maintainer"
     },
     {
@@ -36,7 +36,7 @@
     },
     {
       "title": "Performance and Benchmarks",
-      "purpose": "Document benchmark methodology, corpus details (veraPDF, pdf.js, SafeDocs), results for all 18 libraries tested, optimization history from v0.3.5 to v0.3.8"
+      "purpose": "Document benchmark methodology, corpus details (veraPDF, pdf.js, SafeDocs), results for all 18 libraries tested, optimization history from v0.3.5 to v0.3.9"
     },
     {
       "title": "Migration from PyMuPDF",

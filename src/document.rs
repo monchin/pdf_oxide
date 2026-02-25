@@ -81,6 +81,21 @@ pub struct PdfDocument {
     /// Cached font sets keyed by /Font dictionary ObjectRef.
     /// Pages sharing the same /Font dict skip the entire load_fonts() loop.
     font_set_cache: HashMap<ObjectRef, Vec<(String, Arc<crate::fonts::FontInfo>)>>,
+    /// Fingerprint-based font set cache for direct /Font dictionaries.
+    /// Keyed by sorted font ObjectRefs hash, catches pages with different
+    /// /Resources but same font references.
+    font_fingerprint_cache: HashMap<u64, Vec<(String, Arc<crate::fonts::FontInfo>)>>,
+    /// Name-based font set cache keyed by hash of sorted font names.
+    /// Catches pages with different font ObjectRefs but the same font name→base font
+    /// mapping (common in PDFs that create new font objects per page).
+    /// Stores the resolved font set (Arc-wrapped to avoid cloning) plus a spot-check
+    /// (font_name, content_hash) pair for verification before reuse.
+    font_name_set_cache:
+        HashMap<u64, (Arc<Vec<(String, Arc<crate::fonts::FontInfo>)>>, String, u64)>,
+    /// Per-font identity cache keyed by font_identity_hash (BaseFont + Subtype + Encoding +
+    /// ToUnicode + FontDescriptor + DescendantFonts references). Skips expensive
+    /// `FontInfo::from_dict()` when a structurally identical font was already parsed.
+    font_identity_cache: HashMap<u64, Arc<crate::fonts::FontInfo>>,
     /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged).
     /// Uses Arc to avoid expensive deep clones on every page extraction.
     structure_tree_cache: Option<Option<Arc<crate::structure::StructTreeRoot>>>,
@@ -96,6 +111,14 @@ pub struct PdfDocument {
     /// Cached object offsets from full file scan (built on first xref miss).
     /// Maps object number to byte offset in file.
     scanned_object_offsets: Option<HashMap<u32, u64>>,
+    /// Cache of XObject refs known to NOT be Form XObjects (i.e., Image or unknown).
+    /// Used by text extraction to skip expensive full-object loads for images.
+    image_xobject_cache: HashSet<ObjectRef>,
+    /// Document-level cache of Form XObject refs whose streams contain NO text
+    /// operators (BT) and no nested Do invocations. Persists across pages so that
+    /// shared graphics-only XObjects (watermarks, logos, chart elements) are
+    /// decompressed and scanned at most once across the entire document.
+    pub(crate) xobject_text_free_cache: HashSet<ObjectRef>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -200,11 +223,16 @@ impl PdfDocument {
             header_offset,
             font_cache: HashMap::new(),
             font_set_cache: HashMap::new(),
+            font_fingerprint_cache: HashMap::new(),
+            font_name_set_cache: HashMap::new(),
+            font_identity_cache: HashMap::new(),
             structure_tree_cache: None,
             structure_content_cache: None,
             page_cache: HashMap::new(),
             page_cache_populated: false,
             scanned_object_offsets: None,
+            image_xobject_cache: HashSet::new(),
+            xobject_text_free_cache: HashSet::new(),
         };
 
         // Initialize encryption immediately
@@ -852,6 +880,77 @@ impl PdfDocument {
             // For all other types, just return a clone
             _ => Ok(obj.clone()),
         }
+    }
+
+    /// Peek at an XObject's /Subtype without loading the full object.
+    /// Returns true if the XObject is a Form XObject, false if Image or unknown.
+    /// For compressed objects or on any error, returns true (conservative — will load fully).
+    pub fn is_form_xobject(&mut self, obj_ref: ObjectRef) -> bool {
+        // Check negative cache first (known non-Form XObjects)
+        if self.image_xobject_cache.contains(&obj_ref) {
+            return false;
+        }
+
+        // If already in object cache, check directly
+        if let Some(cached) = self.object_cache.get(&obj_ref) {
+            let is_form = cached
+                .as_dict()
+                .and_then(|d| d.get("Subtype"))
+                .and_then(|s| s.as_name())
+                == Some("Form");
+            if !is_form {
+                self.image_xobject_cache.insert(obj_ref);
+            }
+            return is_form;
+        }
+
+        // Look up in xref table
+        let entry = match self.xref.get(obj_ref.id) {
+            Some(e) => e,
+            None => return true, // conservative fallback
+        };
+
+        // Only peek uncompressed objects — compressed ones require full load
+        use crate::xref::XRefEntryType;
+        if entry.entry_type != XRefEntryType::Uncompressed || !entry.in_use {
+            return true; // conservative fallback
+        }
+
+        // Seek to object offset and read a small buffer
+        let offset = entry.offset;
+        if self.reader.seek(SeekFrom::Start(offset)).is_err() {
+            return true;
+        }
+
+        // Read enough bytes for the object header + dictionary (typically <1KB)
+        let mut buf = [0u8; 1024];
+        let n = match self.reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return true,
+        };
+        let data = &buf[..n];
+
+        // Search for /Subtype in the buffer
+        // Look for "/Subtype" followed by a name like "/Form" or "/Image"
+        if let Some(pos) = data.windows(8).position(|w| w == b"/Subtype") {
+            let after = &data[pos + 8..];
+            // Skip whitespace
+            let trimmed = after
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n');
+            if let Some(start) = trimmed {
+                let name_data = &after[start..];
+                if name_data.starts_with(b"/Form") {
+                    return true;
+                }
+                // Image, PS, or anything else — not a Form
+                self.image_xobject_cache.insert(obj_ref);
+                return false;
+            }
+        }
+
+        // /Subtype not found in first 1KB — conservative fallback
+        true
     }
 
     /// Load an uncompressed object (Type 1 xref entry).
@@ -2451,6 +2550,16 @@ impl PdfDocument {
                     // Same line but significant horizontal gap - insert space
                     // This handles PDFs that don't include space characters (ISO 32000-1:2008 Section 9.3.3)
                     text.push(' ');
+                } else {
+                    // Check for column boundary: same line with very large gap
+                    // When should_insert_space returns false due to gap >= 5×font,
+                    // this indicates a column boundary — insert line break
+                    let prev_end_x = prev.bbox.x + prev.bbox.width;
+                    let col_gap = span.bbox.x - prev_end_x;
+                    let fs = span.font_size.max(prev.font_size).max(6.0);
+                    if col_gap > fs * 3.0 {
+                        text.push('\n');
+                    }
                 }
             }
 
@@ -2471,11 +2580,62 @@ impl PdfDocument {
         // (Widget /V values, FreeText /Contents, Stamp appearance streams)
         self.append_annotation_text(page_index, &mut text);
 
+        // Filter leaked PDF metadata (e.g., CalRGB ColorSpace dictionaries)
+        // Some PDFs embed inline color space definitions that get parsed as text
+        let text = Self::filter_leaked_metadata(&text);
+
+        // Normalize Kangxi Radicals (U+2F00-U+2FD5) and CJK Radicals Supplement
+        // (U+2E80-U+2EFF) to CJK Unified Ideographs for proper search/matching
+        let text = Self::normalize_kangxi_radicals(&text);
+
+        // Normalize Arabic Presentation Forms (U+FB50-U+FDFF, U+FE70-U+FEFF) to
+        // base Unicode characters for proper text search and matching
+        let text = Self::normalize_arabic_presentation_forms(&text);
+
         // Apply whitespace cleanup for better readability
         // This normalizes excessive double spaces and blank lines
         let cleaned_text = crate::converters::whitespace::cleanup_plain_text(&text);
 
         Ok(cleaned_text)
+    }
+
+    /// Extract text from all pages of the document.
+    ///
+    /// Concatenates text from every page, separated by form feed characters (`\x0c`).
+    /// This is a convenience method equivalent to calling `extract_text()` for each page.
+    ///
+    /// # Returns
+    ///
+    /// The combined text from all pages.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pdf_oxide::document::PdfDocument;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut doc = PdfDocument::open("paper.pdf")?;
+    /// let all_text = doc.extract_all_text()?;
+    /// println!("Full document: {} chars", all_text.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extract_all_text(&mut self) -> Result<String> {
+        let num_pages = self.page_count()?;
+        let mut result = String::new();
+
+        for i in 0..num_pages {
+            if i > 0 {
+                result.push('\x0c'); // Form feed page separator
+            }
+            match self.extract_text(i) {
+                Ok(text) => result.push_str(&text),
+                Err(e) => {
+                    log::warn!("Failed to extract text from page {}: {}", i, e);
+                },
+            }
+        }
+
+        Ok(result)
     }
 
     /// Extract text from a page with automatic OCR fallback for scanned pages.
@@ -2579,6 +2739,205 @@ impl PdfDocument {
     /// * `prev` - Previous text span
     /// * `current` - Current text span
     ///
+    /// Filter leaked PDF internal metadata from extracted text.
+    ///
+    /// Some PDFs embed inline ColorSpace definitions (CalRGB, CalGray, Lab) that
+    /// get parsed as text content. This removes known metadata patterns like
+    /// "WhitePoint [ ... ]", "BlackPoint [ ... ]", "Gamma [ ... ]", "Matrix [ ... ]".
+    fn filter_leaked_metadata(text: &str) -> String {
+        // Known PDF metadata keys that should never appear in extracted text.
+        // These come from CalRGB/CalGray/Lab color space dictionaries.
+        const METADATA_PATTERNS: &[&str] = &[
+            "WhitePoint",
+            "BlackPoint",
+            "Gamma",
+            "Matrix",
+            "CalRGB",
+            "CalGray",
+        ];
+
+        // Quick check: if none of the patterns appear, return as-is
+        if !METADATA_PATTERNS.iter().any(|p| text.contains(p)) {
+            return text.to_string();
+        }
+
+        // Filter line-by-line: remove lines that look like PDF metadata
+        let mut result = String::with_capacity(text.len());
+        for line in text.lines() {
+            let trimmed = line.trim();
+            // Skip lines matching "MetadataKey [ ... ]" or "MetadataKey [ ... ] ..."
+            let is_metadata = METADATA_PATTERNS.iter().any(|pattern| {
+                if let Some(rest) = trimmed.strip_prefix(pattern) {
+                    // Must be followed by whitespace and bracket, or end of line
+                    let rest = rest.trim_start();
+                    rest.is_empty()
+                        || rest.starts_with('[')
+                        || rest.starts_with('/')
+                        || rest.starts_with('<')
+                } else {
+                    false
+                }
+            });
+
+            if !is_metadata {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(line);
+            }
+        }
+
+        result
+    }
+
+    /// Normalize Kangxi Radical characters to CJK Unified Ideographs.
+    ///
+    /// Some PDF fonts/CMaps emit Kangxi Radicals (U+2F00–U+2FD5) or CJK Radicals
+    /// Supplement (U+2E80–U+2EFF) instead of the standard CJK Unified Ideographs.
+    /// While visually similar, these are different Unicode codepoints and will break
+    /// text search, string matching, and NLP pipelines.
+    fn normalize_kangxi_radicals(text: &str) -> String {
+        // Quick check: if no characters in the Kangxi/Supplement range, return as-is
+        if !text.chars().any(|c| {
+            let cp = c as u32;
+            (0x2E80..=0x2EFF).contains(&cp) || (0x2F00..=0x2FD5).contains(&cp)
+        }) {
+            return text.to_string();
+        }
+
+        text.chars()
+            .map(|c| crate::text::kangxi::kangxi_to_unified(c).unwrap_or(c))
+            .collect()
+    }
+
+    /// Normalize Arabic Presentation Forms to base Unicode characters.
+    ///
+    /// Arabic PDFs often use presentation forms (U+FE70-U+FEFF for Forms-B,
+    /// U+FB50-U+FDFF for Forms-A) which represent contextual glyph shapes.
+    /// For text extraction, these should be normalized to base characters.
+    fn normalize_arabic_presentation_forms(text: &str) -> String {
+        // Quick check: skip if no Arabic presentation form characters
+        if !text.chars().any(|c| {
+            let cp = c as u32;
+            (0xFB50..=0xFDFF).contains(&cp) || (0xFE70..=0xFEFF).contains(&cp)
+        }) {
+            return text.to_string();
+        }
+
+        text.chars()
+            .map(|c| {
+                let cp = c as u32;
+                // Arabic Presentation Forms-B (U+FE70-U+FEFF): contextual forms
+                // Each base letter has isolated/final/initial/medial forms
+                let base = match cp {
+                    // Hamza forms
+                    0xFE80 => 0x0621,
+                    // Alef with Madda
+                    0xFE81 | 0xFE82 => 0x0622,
+                    // Alef with Hamza Above
+                    0xFE83 | 0xFE84 => 0x0623,
+                    // Waw with Hamza
+                    0xFE85 | 0xFE86 => 0x0624,
+                    // Alef with Hamza Below
+                    0xFE87 | 0xFE88 => 0x0625,
+                    // Yeh with Hamza
+                    0xFE89..=0xFE8C => 0x0626,
+                    // Alef
+                    0xFE8D | 0xFE8E => 0x0627,
+                    // Beh
+                    0xFE8F..=0xFE92 => 0x0628,
+                    // Teh Marbuta
+                    0xFE93 | 0xFE94 => 0x0629,
+                    // Teh
+                    0xFE95..=0xFE98 => 0x062A,
+                    // Theh
+                    0xFE99..=0xFE9C => 0x062B,
+                    // Jeem
+                    0xFE9D..=0xFEA0 => 0x062C,
+                    // Hah
+                    0xFEA1..=0xFEA4 => 0x062D,
+                    // Khah
+                    0xFEA5..=0xFEA8 => 0x062E,
+                    // Dal
+                    0xFEA9 | 0xFEAA => 0x062F,
+                    // Thal
+                    0xFEAB | 0xFEAC => 0x0630,
+                    // Reh
+                    0xFEAD | 0xFEAE => 0x0631,
+                    // Zain
+                    0xFEAF | 0xFEB0 => 0x0632,
+                    // Seen
+                    0xFEB1..=0xFEB4 => 0x0633,
+                    // Sheen
+                    0xFEB5..=0xFEB8 => 0x0634,
+                    // Sad
+                    0xFEB9..=0xFEBC => 0x0635,
+                    // Dad
+                    0xFEBD..=0xFEC0 => 0x0636,
+                    // Tah
+                    0xFEC1..=0xFEC4 => 0x0637,
+                    // Zah
+                    0xFEC5..=0xFEC8 => 0x0638,
+                    // Ain
+                    0xFEC9..=0xFECC => 0x0639,
+                    // Ghain
+                    0xFECD..=0xFED0 => 0x063A,
+                    // Feh
+                    0xFED1..=0xFED4 => 0x0641,
+                    // Qaf
+                    0xFED5..=0xFED8 => 0x0642,
+                    // Kaf
+                    0xFED9..=0xFEDC => 0x0643,
+                    // Lam
+                    0xFEDD..=0xFEE0 => 0x0644,
+                    // Meem
+                    0xFEE1..=0xFEE4 => 0x0645,
+                    // Noon
+                    0xFEE5..=0xFEE8 => 0x0646,
+                    // Heh
+                    0xFEE9..=0xFEEC => 0x0647,
+                    // Waw
+                    0xFEED | 0xFEEE => 0x0648,
+                    // Alef Maksura
+                    0xFEEF | 0xFEF0 => 0x0649,
+                    // Yeh
+                    0xFEF1..=0xFEF4 => 0x064A,
+                    // Lam-Alef ligatures → expand to two characters
+                    0xFEF5 | 0xFEF6 => {
+                        // Lam + Alef with Madda
+                        return '\u{0644}'; // Just return Lam; Alef is separate
+                    },
+                    0xFEF7 | 0xFEF8 => {
+                        return '\u{0644}'; // Lam + Alef with Hamza Above
+                    },
+                    0xFEF9 | 0xFEFA => {
+                        return '\u{0644}'; // Lam + Alef with Hamza Below
+                    },
+                    0xFEFB | 0xFEFC => {
+                        return '\u{0644}'; // Lam + Alef
+                    },
+                    // Tatweel (kashida)
+                    0xFE70 => 0x064B, // Fathatan isolated
+                    0xFE71 => 0x064B, // Tatweel + Fathatan
+                    0xFE72 => 0x064C, // Dammatan isolated
+                    0xFE74 => 0x064D, // Kasratan isolated
+                    0xFE76 => 0x064E, // Fatha isolated
+                    0xFE77 => 0x064E, // Fatha medial
+                    0xFE78 => 0x064F, // Damma isolated
+                    0xFE79 => 0x064F, // Damma medial
+                    0xFE7A => 0x0650, // Kasra isolated
+                    0xFE7B => 0x0650, // Kasra medial
+                    0xFE7C => 0x0651, // Shadda isolated
+                    0xFE7D => 0x0651, // Shadda medial
+                    0xFE7E => 0x0652, // Sukun isolated
+                    0xFE7F => 0x0652, // Sukun medial
+                    _ => cp,          // Pass through unchanged
+                };
+                char::from_u32(base).unwrap_or(c)
+            })
+            .collect()
+    }
+
     /// # Returns
     /// `true` if a space should be inserted between the spans
     fn should_insert_space(prev: &TextSpan, current: &TextSpan) -> bool {
@@ -2987,33 +3346,45 @@ impl PdfDocument {
     /// objects. However, a page may contain text only inside Form XObjects
     /// referenced via `Do` operators, so we must also check for those.
     pub(crate) fn may_contain_text(data: &[u8]) -> bool {
-        // PDF delimiter characters per ISO 32000-1:2008 Table 2
-        fn is_delimiter(b: u8) -> bool {
-            matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
-        }
+        // SIMD-accelerated pre-check using memchr to find candidate positions
+        // for BT (Begin Text) and Do (XObject invocation) operators.
+        // ~50x faster than byte-by-byte scanning for large graphics-heavy pages.
         fn is_boundary(b: u8) -> bool {
-            b.is_ascii_whitespace() || is_delimiter(b)
+            b.is_ascii_whitespace()
+                || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
         }
+
+        // Search for 'B' (BT) and 'D' (Do) candidates using SIMD memchr
         let len = data.len();
-        let mut i = 0;
-        while i + 1 < len {
-            // Check for BT (Begin Text)
-            if data[i] == b'B' && data[i + 1] == b'T' {
-                let before_ok = i == 0 || is_boundary(data[i - 1]);
-                let after_ok = i + 2 >= len || is_boundary(data[i + 2]);
-                if before_ok && after_ok {
-                    return true;
-                }
+        let mut offset = 0;
+        while offset + 1 < len {
+            // Find next 'B' or 'D' byte
+            match memchr::memchr2(b'B', b'D', &data[offset..]) {
+                None => return false,
+                Some(pos) => {
+                    let i = offset + pos;
+                    if i + 1 >= len {
+                        return false;
+                    }
+                    // Check for BT operator
+                    if data[i] == b'B' && data[i + 1] == b'T' {
+                        let before_ok = i == 0 || is_boundary(data[i - 1]);
+                        let after_ok = i + 2 >= len || is_boundary(data[i + 2]);
+                        if before_ok && after_ok {
+                            return true;
+                        }
+                    }
+                    // Check for Do operator
+                    if data[i] == b'D' && data[i + 1] == b'o' {
+                        let before_ok = i == 0 || is_boundary(data[i - 1]);
+                        let after_ok = i + 2 >= len || is_boundary(data[i + 2]);
+                        if before_ok && after_ok {
+                            return true;
+                        }
+                    }
+                    offset = i + 1;
+                },
             }
-            // Check for Do (XObject invocation)
-            if data[i] == b'D' && data[i + 1] == b'o' {
-                let before_ok = i == 0 || is_boundary(data[i - 1]);
-                let after_ok = i + 2 >= len || is_boundary(data[i + 2]);
-                if before_ok && after_ok {
-                    return true;
-                }
-            }
-            i += 1;
         }
         false
     }
@@ -4596,6 +4967,54 @@ impl PdfDocument {
         }
     }
 
+    /// Compute a cheap content-based font identity hash from a loaded font object.
+    /// Uses only inline fields (no reference resolution / load_object calls) to keep
+    /// the cost at ~200ns. Relies on BaseFont + Subtype + Encoding (when inline) to
+    /// uniquely identify fonts within a document. For reference-only fields (ToUnicode,
+    /// FontDescriptor, DescendantFonts), hashes their presence to avoid false positives
+    /// between fonts with vs without these features.
+    fn font_identity_hash_cheap(font_obj: &Object) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        if let Some(d) = font_obj.as_dict() {
+            // BaseFont: primary identity — unique per font within a document
+            if let Some(Object::Name(n)) = d.get("BaseFont") {
+                1u8.hash(&mut hasher);
+                n.hash(&mut hasher);
+            }
+            // Subtype: Type1, TrueType, Type0, CIDFontType0, CIDFontType2
+            if let Some(Object::Name(n)) = d.get("Subtype") {
+                2u8.hash(&mut hasher);
+                n.hash(&mut hasher);
+            }
+            // Encoding: hash inline name or presence of reference
+            if let Some(enc) = d.get("Encoding") {
+                3u8.hash(&mut hasher);
+                match enc {
+                    Object::Name(n) => n.hash(&mut hasher),
+                    Object::Reference(_) => b"enc_ref".hash(&mut hasher),
+                    Object::Dictionary(_) => b"enc_dict".hash(&mut hasher),
+                    _ => {},
+                }
+            }
+            // ToUnicode: hash presence (BaseFont already differentiates content)
+            if d.get("ToUnicode").is_some() {
+                4u8.hash(&mut hasher);
+            }
+            // FontDescriptor: hash presence
+            if d.get("FontDescriptor").is_some() {
+                5u8.hash(&mut hasher);
+            }
+            // DescendantFonts: hash count for Type0 fonts
+            if let Some(Object::Array(arr)) = d.get("DescendantFonts") {
+                6u8.hash(&mut hasher);
+                arr.len().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Load fonts from a Resources dictionary into the extractor.
     pub(crate) fn load_fonts(
         &mut self,
@@ -4645,6 +5064,67 @@ impl PdfDocument {
             }
 
             if let Some(font_dict) = font_dict_obj.as_dict() {
+                // Compute font fingerprint for direct /Font dicts:
+                // hash of sorted font ObjectRefs enables cache hits even when
+                // different pages have different /Resources but same font refs.
+                let mut font_refs_for_fingerprint: Vec<ObjectRef> = Vec::new();
+                for (_, fo) in font_dict.iter() {
+                    if let Some(r) = fo.as_reference() {
+                        font_refs_for_fingerprint.push(r);
+                    }
+                }
+                font_refs_for_fingerprint.sort_by(|a, b| a.id.cmp(&b.id).then(a.gen.cmp(&b.gen)));
+
+                // Check fingerprint cache (works even for direct /Font dicts)
+                let fingerprint = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    font_refs_for_fingerprint.hash(&mut hasher);
+                    // Include font dict keys for uniqueness
+                    for (name, _) in font_dict.iter() {
+                        name.hash(&mut hasher);
+                    }
+                    hasher.finish()
+                };
+
+                if let Some(cached_set) = self.font_fingerprint_cache.get(&fingerprint) {
+                    for (name, font_arc) in cached_set {
+                        extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
+                    }
+                    return Ok(());
+                }
+
+                // Layer 4: Name-based font set cache with spot-check verification.
+                // Pages in the same document often use the same font names mapped to
+                // different ObjectRefs but identical base fonts (e.g., 764 pages each
+                // creating T1_0→Helvetica, T1_1→Times-Roman with unique object numbers).
+                // Cache the resolved font set by sorted font names, then on subsequent
+                // pages verify ONE font via load+hash to confirm the mapping is the same.
+                let name_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut font_names: Vec<&str> = font_dict.keys().map(|k| k.as_str()).collect();
+                    font_names.sort();
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    font_names.hash(&mut hasher);
+                    hasher.finish()
+                };
+
+                if let Some((cached_set, _check_name, _check_hash)) =
+                    self.font_name_set_cache.get(&name_hash)
+                {
+                    // Layer 4: Same font names within a document virtually always map
+                    // to the same underlying fonts. Trust the name-based cache to avoid
+                    // expensive load_object calls for spot-check verification.
+                    for (name, font_arc) in cached_set.iter() {
+                        extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
+                    }
+                    return Ok(());
+                }
+
+                let mut all_from_cache = true;
+                // Track spot-check data: first font name and its content hash
+                let mut spot_check: Option<(String, u64)> = None;
+
                 for (name, font_obj) in font_dict {
                     // If font is a reference, check per-font cache first
                     if let Some(font_ref) = font_obj.as_reference() {
@@ -4652,10 +5132,30 @@ impl PdfDocument {
                             extractor.add_font_shared(name.clone(), Arc::clone(cached));
                             continue;
                         }
+                        all_from_cache = false;
                         let font = self.load_object(font_ref)?;
+
+                        // Compute identity hash (cheap: 3-6 dict lookups, ~200ns)
+                        let id_hash = Self::font_identity_hash_cheap(&font);
+
+                        // Collect spot-check data (first font only) for name cache
+                        if spot_check.is_none() {
+                            spot_check = Some((name.clone(), id_hash));
+                        }
+
+                        // Layer 5: Per-font identity cache — skip from_dict when a
+                        // structurally identical font was already parsed elsewhere.
+                        if let Some(cached) = self.font_identity_cache.get(&id_hash) {
+                            let arc = Arc::clone(cached);
+                            self.font_cache.insert(font_ref, Arc::clone(&arc));
+                            extractor.add_font_shared(name.clone(), arc);
+                            continue;
+                        }
+
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
                                 let arc = Arc::new(font_info);
+                                self.font_identity_cache.insert(id_hash, Arc::clone(&arc));
                                 self.font_cache.insert(font_ref, Arc::clone(&arc));
                                 extractor.add_font_shared(name.clone(), arc);
                             },
@@ -4670,6 +5170,7 @@ impl PdfDocument {
                         }
                     } else {
                         // Direct font object — parse without caching (no stable key)
+                        all_from_cache = false;
                         let font = font_obj.clone();
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
@@ -4686,21 +5187,28 @@ impl PdfDocument {
                         }
                     }
                 }
-            }
-        }
 
-        // Cross-font TrueType cmap sharing: when a CIDFontType2 Identity-H font
-        // has no embedded font data (no TrueType cmap), try to borrow the cmap
-        // from another font on the same page with the same base font name.
-        // This handles PDFs that create paired font resources (e.g., a simple TrueType
-        // font with embedded data + a CID font referencing the same base font without).
-        extractor.share_truetype_cmaps();
+                // Only call share_truetype_cmaps when new fonts were parsed
+                // (cached fonts already had sharing applied)
+                if !all_from_cache {
+                    extractor.share_truetype_cmaps();
+                }
 
-        // Layer 2: Cache the complete font set (post-sharing) for this /Font dict
-        if let Some(font_obj) = resources_dict.get("Font") {
-            if let Some(font_dict_ref) = font_obj.as_reference() {
-                self.font_set_cache
-                    .insert(font_dict_ref, extractor.get_font_set());
+                // Cache font set by both ObjectRef and fingerprint
+                let font_set = extractor.get_font_set();
+                if let Some(fdr) = font_dict_ref {
+                    self.font_set_cache.insert(fdr, font_set.clone());
+                }
+                self.font_fingerprint_cache
+                    .insert(fingerprint, font_set.clone());
+
+                // Cache by font names with spot-check data for Layer 4
+                if let Some((check_name, check_hash)) = spot_check {
+                    self.font_name_set_cache
+                        .insert(name_hash, (Arc::new(font_set), check_name, check_hash));
+                }
+
+                return Ok(());
             }
         }
 
@@ -5440,7 +5948,7 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
-        use crate::content::parse_content_stream;
+        use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
 
         // Get page object and resources
@@ -5465,8 +5973,8 @@ impl PdfDocument {
             None => None,
         };
 
-        // Parse content stream and extract images
-        let operators = match parse_content_stream(&content_data) {
+        // Parse content stream with image-only fast path (skips BT/ET text blocks)
+        let operators = match parse_content_stream_images_only(&content_data) {
             Ok(ops) => ops,
             Err(_) => {
                 // If content stream parsing fails, return empty

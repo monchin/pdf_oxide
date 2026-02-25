@@ -7,6 +7,7 @@
 use crate::config::ExtractionProfile;
 use crate::content::graphics_state::{GraphicsStateStack, Matrix};
 use crate::content::operators::{Operator, TextElement};
+use crate::content::parse_and_execute_text_only;
 use crate::content::parse_content_stream_text_only;
 use crate::error::Result;
 use crate::extract_log_debug;
@@ -1073,8 +1074,10 @@ fn should_insert_space(
 ///
 /// This prevents double-spacing when text already contains space characters.
 fn has_boundary_space(preceding: &str, following: &str) -> bool {
-    let has_trailing_space = preceding.chars().last().is_some_and(|c| c.is_whitespace());
-    let has_leading_space = following.chars().next().is_some_and(|c| c.is_whitespace());
+    // Use ends_with/starts_with patterns instead of .chars().last() to avoid
+    // O(n) iteration over the entire accumulated text
+    let has_trailing_space = preceding.ends_with(|c: char| c.is_whitespace());
+    let has_leading_space = following.starts_with(|c: char| c.is_whitespace());
 
     has_trailing_space || has_leading_space
 }
@@ -1102,11 +1105,13 @@ fn build_boundary_characters(
     let next_first_char = next_text.chars().next().unwrap_or(' ');
 
     // Estimate character widths from bbox and character count
-    let prev_char_count = prev_text.chars().count().max(1) as f32;
+    // Use byte length as fast O(1) approximation (accurate for ASCII, close for UTF-8)
+    // to avoid O(n) char counting on the accumulated merge text
+    let prev_char_count = prev_text.len().max(1) as f32;
     let prev_char_width = prev_bbox.width / prev_char_count;
     let prev_last_x = prev_bbox.x + prev_bbox.width - prev_char_width;
 
-    let next_char_count = next_text.chars().count().max(1) as f32;
+    let next_char_count = next_text.len().max(1) as f32;
     let next_char_width = next_bbox.width / next_char_count;
 
     // Build CharacterInfo for boundary analysis
@@ -1157,7 +1162,12 @@ fn build_boundary_characters(
 /// - "user@outlook" + "." + "com" (space before TLD)
 /// - "user@" + "domain.com" (space after @)
 fn is_email_context(preceding_text: &str, following_text: &str) -> bool {
-    let prev = preceding_text.trim_end();
+    // Only check the last ~64 bytes for email patterns to avoid O(n) scan
+    // of the entire accumulated text (which would cause O(n²) in merge loop)
+    let prev_start = preceding_text.len().saturating_sub(64);
+    // Find a valid UTF-8 char boundary
+    let prev_start = preceding_text.ceil_char_boundary(prev_start);
+    let prev = preceding_text[prev_start..].trim_end();
     let next = following_text.trim_start();
 
     // Pattern 1: @ followed by domain part
@@ -1233,20 +1243,12 @@ fn is_citation_context(
 /// a single logical text span, only breaking on explicit word boundaries.
 #[derive(Debug)]
 struct TjBuffer {
-    /// Accumulated raw bytes from text strings
-    text: Vec<u8>,
     /// Accumulated Unicode text
     unicode: String,
     /// Text matrix at the start of this buffer
     start_matrix: Matrix,
-    /// Current transformation matrix at the start of this buffer
-    /// Per PDF Spec ISO 32000-1:2008 Section 9.4.4, CTM must be applied
-    /// to convert text space coordinates to user space
-    start_ctm: Matrix,
     /// Font name when buffer started
     font_name: Option<String>,
-    /// Font size when buffer started
-    font_size: f32,
     /// Fill color RGB when buffer started
     fill_color_rgb: (f32, f32, f32),
     /// Character spacing (Tc) when buffer started
@@ -1257,41 +1259,116 @@ struct TjBuffer {
     horizontal_scaling: f32,
     /// MCID when buffer started
     mcid: Option<u32>,
+    /// Accumulated width from advance_position_for_string calls.
+    /// Avoids redundant per-byte width recalculation in flush.
+    accumulated_width: f32,
+    /// Cached font reference — avoids per-Tj HashMap lookup in append.
+    /// Set once at buffer creation, never changes (font change flushes buffer).
+    cached_font: Option<Arc<FontInfo>>,
+    /// Pre-computed effective font size (CTM × text_matrix scaling × font_size).
+    /// Computed once at buffer creation to avoid matrix multiply + sqrt per flush.
+    effective_font_size: f32,
+    /// Pre-computed font weight from cached font reference.
+    font_weight: FontWeight,
+    /// Pre-computed italic flag from cached font reference.
+    is_italic: bool,
+    /// Pre-computed user-space position (CTM applied to text matrix origin).
+    /// Avoids two transform_point calls per flush.
+    user_pos_x: f32,
+    user_pos_y: f32,
 }
 
 impl TjBuffer {
     /// Create a new empty buffer with current state.
-    fn new(state: &crate::content::graphics_state::GraphicsState, mcid: Option<u32>) -> Self {
+    fn new(
+        state: &crate::content::graphics_state::GraphicsState,
+        mcid: Option<u32>,
+        cached_font: Option<Arc<FontInfo>>,
+    ) -> Self {
+        // Pre-compute effective font size: CTM × text_matrix scaling × font_size
+        let combined = state.ctm.multiply(&state.text_matrix);
+        let effective_font_size =
+            state.font_size * (combined.d * combined.d + combined.b * combined.b).sqrt();
+        let font_weight = match &cached_font {
+            Some(f) if f.is_bold() => FontWeight::Bold,
+            _ => FontWeight::Normal,
+        };
+        let is_italic = cached_font.as_ref().map(|f| f.is_italic()).unwrap_or(false);
+        // Pre-compute user-space position: text_matrix origin → CTM transform
+        let text_pos = state.text_matrix.transform_point(0.0, 0.0);
+        let user_pos = state.ctm.transform_point(text_pos.x, text_pos.y);
         Self {
-            text: Vec::new(),
             unicode: String::new(),
             start_matrix: state.text_matrix,
-            start_ctm: state.ctm,
             font_name: state.font_name.clone(),
-            font_size: state.font_size,
             fill_color_rgb: state.fill_color_rgb,
             char_space: state.char_space,
             word_space: state.word_space,
             horizontal_scaling: state.horizontal_scaling,
             mcid,
+            accumulated_width: 0.0,
+            cached_font,
+            effective_font_size,
+            font_weight,
+            is_italic,
+            user_pos_x: user_pos.x,
+            user_pos_y: user_pos.y,
         }
     }
 
     /// Check if the buffer is empty.
     fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.unicode.is_empty()
     }
 
     /// Append a text string to the buffer.
-    fn append(&mut self, bytes: &[u8], fonts: &HashMap<String, Arc<FontInfo>>) -> Result<()> {
-        self.text.extend_from_slice(bytes);
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        // PDF spec Section 7.3.4.2: implementation limit of 32,767 bytes per string.
+        // Malformed PDFs may exceed this, causing text blowup.
+        let bytes = if bytes.len() > 32_767 {
+            &bytes[..32_767]
+        } else {
+            bytes
+        };
 
-        // Convert to Unicode using helper function
-        let font = self
-            .font_name
-            .as_ref()
-            .and_then(|name| fonts.get(name))
-            .map(|f| f.as_ref());
+        let font = self.cached_font.as_deref();
+
+        // Fast path: OneByte fonts push chars directly into buffer via lookup table.
+        // Avoids String allocation in decode_text_to_unicode (2 allocations per call).
+        if let Some(font) = font {
+            if font.subtype != "Type0" {
+                let table = font.get_byte_to_char_table();
+                for &byte in bytes {
+                    let c = table[byte as usize];
+                    if c != '\0' {
+                        self.unicode.push(c);
+                    } else {
+                        // Rare: multi-char mapping or unmapped byte
+                        if let Some(s) = font.char_to_unicode(byte as u32) {
+                            if s != "\u{FFFD}" {
+                                for ch in s.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        self.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        } else {
+                            let fb = fallback_char_to_unicode(byte as u32);
+                            if fb != "\u{FFFD}" {
+                                for ch in fb.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        self.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        // Slow path: Type0 (CID) fonts or no font — use full decode function
         let unicode_text = decode_text_to_unicode(bytes, font);
         self.unicode.push_str(&unicode_text);
 
@@ -1319,7 +1396,7 @@ impl TjBuffer {
 ///
 /// # Returns
 /// Best-effort Unicode string representation, or "?" if no mapping possible
-fn fallback_char_to_unicode(char_code: u16) -> String {
+fn fallback_char_to_unicode(char_code: u32) -> String {
     match char_code {
         // ==================================================================================
         // PRIORITY 1: Common Punctuation (most frequently failing)
@@ -1443,44 +1520,18 @@ fn fallback_char_to_unicode(char_code: u16) -> String {
         // ==================================================================================
         // PRIORITY 5: Direct Unicode (for valid ranges)
         // ==================================================================================
-        // Valid Unicode ranges: 0x0000-0xD7FF, 0xE000-0xFFFF (BMP)
-        // Excludes surrogate pairs (0xD800-0xDFFF) and above BMP (handled separately)
-        code if (code <= 0xD7FF || (0xE000..=0xF8FF).contains(&code)) => {
-            // Private Use Area (0xE000-0xF8FF): Return visual description
-            if (0xE000..=0xF8FF).contains(&code) {
-                // These are application-specific symbols (logos, custom glyphs, etc.)
-                // Can't decode to standard Unicode, so provide context
-                log::debug!("Private Use Area character: U+{:04X}", code);
-                // Return the character itself - it's valid Unicode but application-specific
-                if let Some(ch) = char::from_u32(code as u32) {
-                    return ch.to_string();
+        // Valid Unicode: BMP (0x0000-0xD7FF, 0xE000-0xFFFF) and supplementary planes
+        // Excludes surrogate pairs (0xD800-0xDFFF)
+        code => {
+            if let Some(ch) = char::from_u32(code) {
+                if (0xE000..=0xF8FF).contains(&code) {
+                    log::debug!("Private Use Area character: U+{:04X}", code);
                 }
-            }
-
-            // Standard Unicode in valid range
-            if let Some(ch) = char::from_u32(code as u32) {
                 ch.to_string()
             } else {
+                log::warn!("Character code 0x{:04X} is not a valid Unicode code point", code);
                 "?".to_string()
             }
-        },
-
-        // Above Basic Multilingual Plane would require surrogate pairs
-        // These shouldn't appear as u16, but handle gracefully
-        code if code >= 0xF900 => {
-            if let Some(ch) = char::from_u32(code as u32) {
-                ch.to_string()
-            } else {
-                "?".to_string()
-            }
-        },
-
-        // ==================================================================================
-        // PRIORITY 7: Last Resort - Replacement Character
-        // ==================================================================================
-        _ => {
-            log::warn!("Character code 0x{:04X} failed all fallback strategies", char_code);
-            "?".to_string()
         },
     }
 }
@@ -1511,9 +1562,19 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                     } else if name.contains("RKSJ") {
                         // 90ms-RKSJ-H, 90ms-RKSJ-V — Shift-JIS variable-width
                         ByteMode::ShiftJIS
+                    } else if name.contains("EUC")
+                        || name.contains("GBK")
+                        || name.contains("GBpc")
+                        || name.contains("GB-")
+                        || name.contains("CNS")
+                        || name.contains("B5")
+                        || name.contains("KSC")
+                        || name.contains("KSCms")
+                    {
+                        // CJK multi-byte CMaps — treat as 2-byte since CIDs are 2-byte values
+                        ByteMode::TwoByte
                     } else {
-                        // Other predefined CMaps (EUC, etc.) — treat as 1-byte
-                        // and let char_to_unicode handle the mapping
+                        // Other predefined CMaps — treat as 1-byte
                         ByteMode::OneByte
                     }
                 },
@@ -1533,7 +1594,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = ((bytes[i] as u16) << 8) | (bytes[i + 1] as u16);
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1542,7 +1603,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = bytes[i] as u16;
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1563,7 +1624,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                         let char_code = ((b as u16) << 8) | (bytes[i + 1] as u16);
                         let char_str = font
                             .char_to_unicode(char_code as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(char_code));
+                            .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1571,7 +1632,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                     } else {
                         let char_str = font
                             .char_to_unicode(b as u32)
-                            .unwrap_or_else(|| fallback_char_to_unicode(b as u16));
+                            .unwrap_or_else(|| fallback_char_to_unicode(b as u32));
                         if char_str != "\u{FFFD}" {
                             result.push_str(&char_str);
                         }
@@ -1581,15 +1642,23 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                 result
             },
             _ => {
-                // Simple fonts use single-byte character codes
-                let mut result = String::new();
+                // Simple fonts use single-byte character codes.
+                // Use pre-computed lookup table for single-char mappings (avoids
+                // per-byte HashMap lookups and String allocations).
+                let table = font.get_byte_to_char_table();
+                let mut result = String::with_capacity(bytes.len());
                 for &byte in bytes {
-                    let char_code = byte as u16;
-                    let char_str = font
-                        .char_to_unicode(char_code as u32)
-                        .unwrap_or_else(|| fallback_char_to_unicode(char_code));
-                    if char_str != "\u{FFFD}" {
-                        result.push_str(&char_str);
+                    let c = table[byte as usize];
+                    if c != '\0' {
+                        result.push(c);
+                    } else {
+                        // Fallback: multi-char mapping or unmapped byte
+                        let char_str = font
+                            .char_to_unicode(byte as u32)
+                            .unwrap_or_else(|| fallback_char_to_unicode(byte as u32));
+                        if char_str != "\u{FFFD}" {
+                            result.push_str(&char_str);
+                        }
                     }
                 }
                 result
@@ -1756,6 +1825,9 @@ pub struct TextExtractor {
     /// - Tiebreaker: Only when TJ and geometric signals conflict (default)
     /// - Primary: Before creating TextSpans from tj_character_array
     word_boundary_mode: WordBoundaryMode,
+    /// Cached current font (updated on Tf). Avoids per-Tj HashMap lookup
+    /// in advance_position_for_string.
+    cached_current_font: Option<Arc<FontInfo>>,
 }
 
 impl TextExtractor {
@@ -1812,6 +1884,7 @@ impl TextExtractor {
             tj_character_array: Vec::new(),              // Character tracking for word boundaries
             current_x_position: 0.0,                     // Start at origin
             word_boundary_mode,                          // Word boundary detection mode
+            cached_current_font: None,                   // Set on first Tf
         }
     }
 
@@ -2384,64 +2457,41 @@ impl TextExtractor {
         self.spans.clear();
         self.span_sequence_counter = 0; // Reset sequence counter for this page
 
-        // Parse content stream into operators
+        // Streaming parse+execute: operators are processed immediately without
+        // building an intermediate Vec<Operator>. This eliminates allocation of
+        // potentially huge vectors (196K+ operators for graphics-heavy pages)
+        // and improves cache locality.
         extract_log_debug!("Parsing content stream for text extraction");
-        let operators = parse_content_stream_text_only(content_stream)?;
-
-        // Execute each operator
-        for op in operators {
-            self.execute_operator(op)?;
-        }
+        parse_and_execute_text_only(content_stream, |op| self.execute_operator(op))?;
 
         // Flush any remaining Tj buffer at end of content stream
         self.flush_tj_span_buffer()?;
 
         // Sort spans by reading order (top-to-bottom, left-to-right)
-        // DEBUG: Log span count and offset_semantic values before sorting
-        let space_spans_before = self
-            .spans
-            .iter()
-            .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
-            .count();
-        let offset_semantic_before = self.spans.iter().filter(|s| s.offset_semantic).count();
-        log::debug!(
-            "Before sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
-            self.spans.len(),
-            space_spans_before,
-            offset_semantic_before
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            let space_spans = self
+                .spans
+                .iter()
+                .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
+                .count();
+            let offset_semantic = self.spans.iter().filter(|s| s.offset_semantic).count();
+            log::debug!(
+                "Before sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
+                self.spans.len(),
+                space_spans,
+                offset_semantic
+            );
+        }
 
         self.sort_spans_by_reading_order();
-
-        // DEBUG: Log after sorting
-        let space_spans_after = self
-            .spans
-            .iter()
-            .filter(|s| s.text.chars().all(|c| c.is_whitespace()))
-            .count();
-        let offset_semantic_after = self.spans.iter().filter(|s| s.offset_semantic).count();
-        log::debug!(
-            "After sort_spans_by_reading_order(): {} spans total, {} space-only, {} offset_semantic=true",
-            self.spans.len(),
-            space_spans_after,
-            offset_semantic_after
-        );
 
         // Deduplicate overlapping spans
         self.deduplicate_overlapping_spans();
 
-        // PHASE 10: DISABLED - CamelCase splitting is a linguistic heuristic not in PDF spec
-        // Per ISO 32000-1:2008, text strings are extracted as-is from the content stream.
-        // Splitting on pattern matching (e.g., "theGeneral" -> "the"/"General") requires knowledge
-        // external to the PDF spec. Spec-compliant extraction accepts malformed PDFs as-is.
-        // See: PHASE10_PDF_SPEC_COMPLIANCE.md for rationale.
-        // self.split_fused_words();
-
         // Merge adjacent spans on the same line to reconstruct complete words
-        // This will respect split_boundary_before flags set by split_fused_words()
         self.merge_adjacent_spans();
 
-        Ok(self.spans.clone())
+        Ok(std::mem::take(&mut self.spans))
     }
 
     /// Extract individual characters from a PDF content stream.
@@ -2638,9 +2688,10 @@ impl TextExtractor {
                     in_gap = true;
                 }
             } else if in_gap {
-                // End of gap - only record if gap is significant (>5% of page width)
+                // End of gap - record if significant
+                // Use 2% of page width OR absolute 15pt minimum (catches narrow column gutters)
                 let gap_width = (i - gap_start) as f32 * bin_width;
-                if gap_width > page_width * 0.05 {
+                if gap_width > (page_width * 0.02).max(15.0) {
                     let gap_x = min_x + gap_start as f32 * bin_width;
                     gaps.push(gap_x);
                 }
@@ -2720,7 +2771,10 @@ impl TextExtractor {
             return;
         }
 
-        let mut deduplicated = Vec::with_capacity(self.spans.len());
+        // Take ownership of spans to avoid cloning during iteration
+        let old_len = self.spans.len();
+        let spans = std::mem::take(&mut self.spans);
+        let mut deduplicated = Vec::with_capacity(old_len);
         let mut prev_y_rounded: Option<i32> = None;
         let mut prev_x: Option<f32> = None;
         let mut prev_text: Option<String> = None;
@@ -2730,7 +2784,7 @@ impl TextExtractor {
         let mut geometric_skips = 0;
         let mut content_skips = 0;
 
-        for span in self.spans.iter() {
+        for span in spans {
             let y_rounded = span.bbox.y.round() as i32;
             let x = span.bbox.x;
 
@@ -2738,7 +2792,7 @@ impl TextExtractor {
             let geometric_duplicate = if let (Some(prev_y), Some(prev_x_val), Some(ref prev_txt)) =
                 (prev_y_rounded, prev_x, &prev_text)
             {
-                y_rounded == prev_y && (x - prev_x_val).abs() < 2.0 && &span.text == prev_txt
+                y_rounded == prev_y && (x - prev_x_val).abs() < 2.0 && span.text == *prev_txt
             } else {
                 false
             };
@@ -2767,7 +2821,6 @@ impl TextExtractor {
             } else if content_duplicate {
                 content_skips += 1;
             } else {
-                deduplicated.push(span.clone());
                 prev_y_rounded = Some(y_rounded);
                 prev_x = Some(x);
                 prev_text = Some(span.text.clone());
@@ -2776,6 +2829,8 @@ impl TextExtractor {
                 if span.text.len() >= 5 {
                     seen_content.insert(span.text.clone(), (span.bbox.x, span.bbox.y));
                 }
+                // Move span instead of cloning
+                deduplicated.push(span);
             }
         }
 
@@ -2784,7 +2839,7 @@ impl TextExtractor {
             geometric_skips + content_skips,
             geometric_skips,
             content_skips,
-            self.spans.len(),
+            old_len,
             deduplicated.len()
         );
 
@@ -2805,13 +2860,16 @@ impl TextExtractor {
             return;
         }
 
-        let mut merged = Vec::with_capacity(self.spans.len());
+        // Take ownership of spans to avoid cloning during iteration
+        let old_len = self.spans.len();
+        let spans = std::mem::take(&mut self.spans);
+        let mut merged = Vec::with_capacity(old_len);
         let mut current_span: Option<TextSpan> = None;
 
-        for span in self.spans.iter() {
+        for span in spans {
             if current_span.is_none() {
-                // First span
-                current_span = Some(span.clone());
+                // First span — move, no clone needed
+                current_span = Some(span);
                 continue;
             }
 
@@ -2846,16 +2904,14 @@ impl TextExtractor {
                 || (same_line && has_split_boundary);
 
             if should_merge {
-                // Merge spans: concatenate text and extend bbox
-                let old_text = current.text.clone();
-
                 // PHASE 1 FIX: Check if next span is entirely whitespace-only OR marked as offset_semantic space
                 // If either is true, never insert an additional space - just concatenate directly
                 // This prevents double-space issue when TJ processor creates space spans
                 let next_is_whitespace_only = span.text.chars().all(|c| c.is_whitespace());
                 let next_is_offset_semantic_space = span.offset_semantic && next_is_whitespace_only;
 
-                let merged_text = if next_is_whitespace_only {
+                // Merge spans: append text in-place using push_str (O(n) total vs O(n²) with format!)
+                if next_is_whitespace_only {
                     // Next span is already space-only: just concatenate without adding more space
                     log::debug!(
                         "Merging with whitespace-only span: '{}' + '{}' (whitespace, offset_semantic={})",
@@ -2863,7 +2919,7 @@ impl TextExtractor {
                         span.text.escape_default(),
                         span.offset_semantic
                     );
-                    format!("{}{}", current.text, span.text)
+                    current.text.push_str(&span.text);
                 } else {
                     // Use unified space decision function with detected document type
                     // If we have a split_boundary_before flag, FORCE a space by treating it like a TJ offset
@@ -2902,7 +2958,7 @@ impl TextExtractor {
                             log::debug!(
                                 "Suppressing space insertion: next span is already TJ-offset space"
                             );
-                            format!("{}{}", current.text, span.text)
+                            current.text.push_str(&span.text);
                         } else {
                             // NEW: Prevent double-space edge case
                             // If current text ends with space AND next span starts with space, skip inserting space
@@ -2913,7 +2969,7 @@ impl TextExtractor {
                                 log::debug!(
                                     "Preventing double-space: current ends with space, next starts with space"
                                 );
-                                format!("{}{}", current.text, span.text)
+                                current.text.push_str(&span.text);
                             } else {
                                 match space_decision.source {
                                     SpaceSource::CharacterHeuristic => {
@@ -2936,7 +2992,8 @@ impl TextExtractor {
                                         log::trace!("Space via {:?}", space_decision.source);
                                     },
                                 }
-                                format!("{} {}", current.text, span.text)
+                                current.text.push(' ');
+                                current.text.push_str(&span.text);
                             }
                         }
                     } else {
@@ -2945,7 +3002,7 @@ impl TextExtractor {
                             "No space insertion: decision source={:?}",
                             space_decision.source
                         );
-                        format!("{}{}", current.text, span.text)
+                        current.text.push_str(&span.text);
                     }
                 };
 
@@ -2953,16 +3010,14 @@ impl TextExtractor {
                 let new_width = (span.bbox.x + span.bbox.width) - current.bbox.x;
                 let new_height = current.bbox.height.max(span.bbox.height);
 
-                current.text = merged_text;
                 current.bbox.width = new_width;
                 current.bbox.height = new_height;
 
                 log::trace!(
-                    "Merged spans: '{}' + '{}' -> '{}' (gap={:.1}pt)",
-                    old_text,
+                    "Merged span: appended '{}' (gap={:.1}pt, now {} chars)",
                     span.text,
-                    current.text,
-                    gap
+                    gap,
+                    current.text.len()
                 );
 
                 // Put modified current back
@@ -2986,7 +3041,7 @@ impl TextExtractor {
                     }
                 }
                 merged.push(current);
-                current_span = Some(span.clone());
+                current_span = Some(span);
             }
         }
 
@@ -2995,7 +3050,7 @@ impl TextExtractor {
             merged.push(last);
         }
 
-        log::debug!("Merged adjacent spans: {} -> {} spans", self.spans.len(), merged.len());
+        log::debug!("Merged adjacent spans: {} -> {} spans", old_len, merged.len());
 
         self.spans = merged;
     }
@@ -3186,20 +3241,55 @@ impl TextExtractor {
         match op {
             // Text state operators
             Operator::Tf { font, size } => {
-                // Flush Tj buffer before changing font — the buffer decodes bytes
-                // using the font set at creation time, so a font change requires a
-                // new buffer to avoid decoding with the wrong ToUnicode CMap.
-                self.flush_tj_span_buffer()?;
+                // Skip flush + lookup when font name AND size haven't changed.
+                // Many PDFs redundantly set the same font (e.g., Tf after q/Q).
+                let same_font = {
+                    let state = self.state_stack.current();
+                    state.font_size == size && state.font_name.as_deref() == Some(font.as_str())
+                };
+                if !same_font {
+                    // Flush Tj buffer before changing font — the buffer decodes bytes
+                    // using the font set at creation time, so a font change requires a
+                    // new buffer to avoid decoding with the wrong ToUnicode CMap.
+                    self.flush_tj_span_buffer()?;
 
-                let state = self.state_stack.current_mut();
-                state.font_name = Some(font);
-                state.font_size = size;
+                    // Cache font reference for advance_position_for_string
+                    self.cached_current_font = self.fonts.get(&font).cloned();
+
+                    let state = self.state_stack.current_mut();
+                    state.font_name = Some(font);
+                    state.font_size = size;
+                }
             },
 
             // Text positioning operators
             Operator::Tm { a, b, c, d, e, f } => {
-                // Flush Tj buffer before changing text matrix
-                self.flush_tj_span_buffer()?;
+                // Optimization: batch character-by-character Tm+Tj patterns.
+                // Many PDFs position each character with individual Tm+Tj operators.
+                // If the new Tm is on the same line with the same transform,
+                // keep accumulating into the existing buffer instead of flushing
+                // (avoids creating thousands of 1-char TextSpans per page).
+                let is_continuation = match self.tj_span_buffer {
+                    Some(ref mut buffer)
+                        if !buffer.is_empty()
+                            && f.round() as i32 == buffer.start_matrix.f.round() as i32
+                            && a == buffer.start_matrix.a
+                            && b == buffer.start_matrix.b
+                            && c == buffer.start_matrix.c
+                            && d == buffer.start_matrix.d
+                            && e >= buffer.start_matrix.e =>
+                    {
+                        // Same line, same transform, LTR progression →
+                        // update width to reflect actual visual extent
+                        buffer.accumulated_width = e - buffer.start_matrix.e;
+                        true
+                    },
+                    _ => false,
+                };
+
+                if !is_continuation {
+                    self.flush_tj_span_buffer()?;
+                }
 
                 let state = self.state_stack.current_mut();
                 state.text_matrix = Matrix { a, b, c, d, e, f };
@@ -3253,13 +3343,16 @@ impl TextExtractor {
                     if self.extract_spans {
                         // Use ActualText in span mode - buffer it like normal text
                         if self.tj_span_buffer.is_none() {
-                            self.tj_span_buffer =
-                                Some(TjBuffer::new(self.state_stack.current(), self.current_mcid));
+                            self.tj_span_buffer = Some(TjBuffer::new(
+                                self.state_stack.current(),
+                                self.current_mcid,
+                                self.cached_current_font.clone(),
+                            ));
                         }
 
                         // Append ActualText to buffer (convert to bytes for consistency)
                         if let Some(ref mut buffer) = self.tj_span_buffer {
-                            buffer.append(actual_text.as_bytes(), &self.fonts)?;
+                            buffer.append(actual_text.as_bytes())?;
                         }
                     } else {
                         // Use ActualText in character mode - process each character
@@ -3267,7 +3360,10 @@ impl TextExtractor {
                     }
 
                     // Advance position for the original text (to maintain layout)
-                    self.advance_position_for_string(&text)?;
+                    let w = self.advance_position_for_string(&text)?;
+                    if let Some(ref mut buffer) = self.tj_span_buffer {
+                        buffer.accumulated_width += w;
+                    }
                 } else {
                     // No ActualText - use standard text extraction
                     if self.extract_spans {
@@ -3277,17 +3373,15 @@ impl TextExtractor {
 
                         // Create buffer if doesn't exist
                         if self.tj_span_buffer.is_none() {
-                            self.tj_span_buffer =
-                                Some(TjBuffer::new(self.state_stack.current(), self.current_mcid));
+                            self.tj_span_buffer = Some(TjBuffer::new(
+                                self.state_stack.current(),
+                                self.current_mcid,
+                                self.cached_current_font.clone(),
+                            ));
                         }
 
-                        // Append to buffer
-                        if let Some(ref mut buffer) = self.tj_span_buffer {
-                            buffer.append(&text, &self.fonts)?;
-                        }
-
-                        // Advance position (text matrix must be updated)
-                        self.advance_position_for_string(&text)?;
+                        // Merged single-pass: Unicode decode + width + position advance
+                        self.append_and_advance(&text)?;
                     } else {
                         self.show_text(&text)?;
                     }
@@ -3312,10 +3406,13 @@ impl TextExtractor {
 
                     if self.extract_spans {
                         // Use ActualText in span mode - create a single span
-                        let mut buffer =
-                            TjBuffer::new(self.state_stack.current(), self.current_mcid);
-                        buffer.append(actual_text.as_bytes(), &self.fonts)?;
-                        self.flush_tj_buffer(&buffer)?;
+                        let mut buffer = TjBuffer::new(
+                            self.state_stack.current(),
+                            self.current_mcid,
+                            self.cached_current_font.clone(),
+                        );
+                        buffer.append(actual_text.as_bytes())?;
+                        self.flush_tj_buffer(buffer)?;
                     } else {
                         // Use ActualText in character mode
                         self.show_text(actual_text.as_bytes())?;
@@ -3326,7 +3423,10 @@ impl TextExtractor {
                     for element in array {
                         match element {
                             TextElement::String(s) => {
-                                self.advance_position_for_string(&s)?;
+                                let w = self.advance_position_for_string(&s)?;
+                                if let Some(ref mut buffer) = self.tj_span_buffer {
+                                    buffer.accumulated_width += w;
+                                }
                             },
                             TextElement::Offset(offset) => {
                                 self.advance_position_for_offset(offset)?;
@@ -3469,13 +3569,13 @@ impl TextExtractor {
 
                 if self.extract_spans {
                     if self.tj_span_buffer.is_none() {
-                        self.tj_span_buffer =
-                            Some(TjBuffer::new(self.state_stack.current(), self.current_mcid));
+                        self.tj_span_buffer = Some(TjBuffer::new(
+                            self.state_stack.current(),
+                            self.current_mcid,
+                            self.cached_current_font.clone(),
+                        ));
                     }
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.append(&text, &self.fonts)?;
-                    }
-                    self.advance_position_for_string(&text)?;
+                    self.append_and_advance(&text)?;
                 } else {
                     self.show_text(&text)?;
                 }
@@ -3501,13 +3601,13 @@ impl TextExtractor {
 
                 if self.extract_spans {
                     if self.tj_span_buffer.is_none() {
-                        self.tj_span_buffer =
-                            Some(TjBuffer::new(self.state_stack.current(), self.current_mcid));
+                        self.tj_span_buffer = Some(TjBuffer::new(
+                            self.state_stack.current(),
+                            self.current_mcid,
+                            self.cached_current_font.clone(),
+                        ));
                     }
-                    if let Some(ref mut buffer) = self.tj_span_buffer {
-                        buffer.append(&text, &self.fonts)?;
-                    }
-                    self.advance_position_for_string(&text)?;
+                    self.append_and_advance(&text)?;
                 } else {
                     self.show_text(&text)?;
                 }
@@ -3539,6 +3639,14 @@ impl TextExtractor {
             },
             Operator::RestoreState => {
                 self.state_stack.restore();
+                // Sync cached font with restored state
+                self.cached_current_font = self
+                    .state_stack
+                    .current()
+                    .font_name
+                    .as_ref()
+                    .and_then(|name| self.fonts.get(name))
+                    .cloned();
             },
             Operator::Cm { a, b, c, d, e, f } => {
                 let state = self.state_stack.current_mut();
@@ -4241,7 +4349,20 @@ impl TextExtractor {
             None => return Ok(()),
         };
 
-        // Load the XObject
+        // Quick Subtype check: skip Image XObjects without loading the full object.
+        // Image XObjects can be megabytes of compressed pixel data — loading them
+        // just to discover Subtype=Image is a major bottleneck (10-15ms per image).
+        if !doc.is_form_xobject(xobject_ref) {
+            return Ok(());
+        }
+
+        // Document-level cache: skip Form XObjects already known to contain no text.
+        // Avoids repeated decompression of shared graphics-only XObjects across pages.
+        if doc.xobject_text_free_cache.contains(&xobject_ref) {
+            return Ok(());
+        }
+
+        // Load the XObject (now known to be Form or unknown — worth the full load)
         let xobject = doc.load_object(xobject_ref)?;
 
         // Check if it's a Form XObject (has Subtype /Form)
@@ -4280,6 +4401,7 @@ impl TextExtractor {
                                     "Skipping Form XObject '{}': no Font/XObject in Resources",
                                     name
                                 );
+                                doc.xobject_text_free_cache.insert(xobject_ref);
                                 return Ok(());
                             }
                         }
@@ -4315,17 +4437,24 @@ impl TextExtractor {
                         name,
                         stream_data.len()
                     );
+                    doc.xobject_text_free_cache.insert(xobject_ref);
                     return Ok(());
                 }
 
-                // Load fonts from the Form XObject's own /Resources if present
-                // Per PDF spec §8.10.1, Form XObjects can have their own resources
-                let saved_fonts = self.fonts.clone();
-                let saved_resources = self.resources.clone();
-                let saved_xobj_cache = std::mem::take(&mut self.cached_xobject_refs);
+                // Only save/restore fonts+resources when XObject has its own Resources.
+                // Avoids expensive HashMap clone for XObjects that inherit page fonts.
+                let has_own_resources = xobject_dict.contains_key("Resources");
 
-                if let Some(xobj_resources) = xobject_dict.get("Resources") {
-                    // Resolve indirect reference if needed
+                let saved_fonts;
+                let saved_resources;
+                let saved_xobj_cache;
+
+                if has_own_resources {
+                    saved_fonts = Some(self.fonts.clone());
+                    saved_resources = self.resources.clone();
+                    saved_xobj_cache = Some(std::mem::take(&mut self.cached_xobject_refs));
+
+                    let xobj_resources = xobject_dict.get("Resources").unwrap();
                     let xobj_res = if let Some(res_ref) = xobj_resources.as_reference() {
                         match doc.load_object(res_ref) {
                             Ok(obj) => obj,
@@ -4335,7 +4464,6 @@ impl TextExtractor {
                         xobj_resources.clone()
                     };
 
-                    // Load fonts from XObject resources
                     if let Err(e) = doc.load_fonts(&xobj_res, self) {
                         log::debug!(
                             "Failed to load fonts for Form XObject '{}': {}, using page fonts",
@@ -4344,39 +4472,36 @@ impl TextExtractor {
                         );
                     }
 
-                    // Set XObject resources for nested XObject resolution
                     self.resources = Some(xobj_res);
+                } else {
+                    saved_fonts = None;
+                    saved_resources = None;
+                    saved_xobj_cache = None;
                 }
 
-                // Parse and execute operators from the Form XObject
-                let operators = match parse_content_stream_text_only(&stream_data) {
-                    Ok(ops) => ops,
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to parse Form XObject '{}' content stream: {}, skipping",
-                            name,
-                            e
-                        );
-                        self.fonts = saved_fonts;
-                        self.resources = saved_resources;
-                        self.cached_xobject_refs = saved_xobj_cache;
-                        return Ok(());
-                    },
-                };
-
+                // Streaming parse+execute: avoids allocating Vec<Operator>
                 self.xobject_depth += 1;
-                for op in operators {
-                    // Continue processing even if individual operators fail
-                    if let Err(e) = self.execute_operator(op) {
-                        log::debug!("Error executing operator in Form XObject '{}': {}", name, e);
-                    }
-                }
+                let parse_result =
+                    parse_and_execute_text_only(&stream_data, |op| self.execute_operator(op));
                 self.xobject_depth -= 1;
+                if let Err(e) = parse_result {
+                    log::debug!(
+                        "Error parsing Form XObject '{}' content stream: {}, partial text may be extracted",
+                        name,
+                        e
+                    );
+                }
 
-                // Restore page-level fonts, resources, and XObject cache
-                self.fonts = saved_fonts;
-                self.resources = saved_resources;
-                self.cached_xobject_refs = saved_xobj_cache;
+                // Restore fonts, resources, and XObject cache only if saved
+                if let Some(fonts) = saved_fonts {
+                    self.fonts = fonts;
+                }
+                if let Some(res) = saved_resources {
+                    self.resources = Some(res);
+                }
+                if let Some(cache) = saved_xobj_cache {
+                    self.cached_xobject_refs = cache;
+                }
 
                 // Keep xobject_ref in processed_xobjects permanently.
                 // For text extraction, re-processing the same Form XObject produces
@@ -4401,55 +4526,31 @@ impl TextExtractor {
     ///
     /// This creates one span for the entire buffer content, properly calculating
     /// the total width including character spacing (Tc) and word spacing (Tw).
-    fn flush_tj_buffer(&mut self, buffer: &TjBuffer) -> Result<()> {
+    fn flush_tj_buffer(&mut self, mut buffer: TjBuffer) -> Result<()> {
         if buffer.is_empty() {
             return Ok(());
         }
 
-        // Calculate total width using PDF spec formula (including Tc/Tw)
-        let total_width = self.calculate_tj_buffer_width(buffer)?;
+        // Use accumulated width from advance_position_for_string calls
+        // (equivalent to calculate_tj_buffer_width, avoids redundant per-byte iteration)
+        let total_width = buffer.accumulated_width;
 
-        // Calculate effective font size (accounting for CTM and text matrix scaling)
-        let combined = buffer.start_ctm.multiply(&buffer.start_matrix);
-        let effective_font_size =
-            buffer.font_size * (combined.d * combined.d + combined.b * combined.b).sqrt();
+        // Use pre-computed values from buffer creation (avoids
+        // matrix multiply + sqrt + HashMap lookup + transform_point per flush)
+        let effective_font_size = buffer.effective_font_size;
+        let font_weight = buffer.font_weight;
+        let is_italic_span = buffer.is_italic;
 
-        // Determine font weight
-        let font_weight = if let Some(font_name) = &buffer.font_name {
-            if let Some(font) = self.fonts.get(font_name) {
-                if font.is_bold() {
-                    FontWeight::Bold
-                } else {
-                    FontWeight::Normal
-                }
-            } else {
-                FontWeight::Normal
-            }
-        } else {
-            FontWeight::Normal
-        };
-
-        // Apply CTM to convert from text space to user space
-        // Per PDF Spec ISO 32000-1:2008 Section 9.4.4
-        let text_pos = buffer.start_matrix.transform_point(0.0, 0.0);
-        let user_pos = buffer.start_ctm.transform_point(text_pos.x, text_pos.y);
-
-        // Create single span for entire buffer
+        // Move owned strings out of buffer (avoids clone)
         let font_name_span = buffer
             .font_name
-            .clone()
+            .take()
             .unwrap_or_else(|| "Unknown".to_string());
-        let is_italic_span = buffer
-            .font_name
-            .as_ref()
-            .and_then(|name| self.fonts.get(name))
-            .map(|font| font.is_italic())
-            .unwrap_or(false);
         let span = TextSpan {
-            text: buffer.unicode.clone(),
+            text: std::mem::take(&mut buffer.unicode),
             bbox: Rect {
-                x: user_pos.x,
-                y: user_pos.y,
+                x: buffer.user_pos_x,
+                y: buffer.user_pos_y,
                 width: total_width,
                 height: effective_font_size,
             },
@@ -4479,47 +4580,6 @@ impl TextExtractor {
 
     /// Calculate total width of TJ buffer using PDF spec formula.
     ///
-    /// Per PDF Spec ISO 32000-1:2008, Section 9.4.4:
-    /// tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
-    ///
-    /// For TJ arrays without offset adjustments (Tj=0 for strings):
-    /// tx = (w0 × Tfs / 1000 + Tc + Tw) × Th
-    fn calculate_tj_buffer_width(&self, buffer: &TjBuffer) -> Result<f32> {
-        let font = buffer
-            .font_name
-            .as_ref()
-            .and_then(|name| self.fonts.get(name));
-
-        let mut total_width = 0.0;
-
-        for &byte in &buffer.text {
-            // Per PDF Spec 9.4.4: tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
-            let glyph_width = if let Some(font) = font {
-                font.get_glyph_width(byte as u16)
-            } else {
-                500.0 // Default glyph width if no font available
-            };
-
-            // 1. Convert glyph width to user space: w0 * Tfs / 1000
-            let mut char_width = glyph_width * buffer.font_size / 1000.0;
-
-            // 2. Add character spacing (Tc) - applies to ALL characters
-            char_width += buffer.char_space;
-
-            // 3. Add word spacing (Tw) - applies ONLY to space (0x20)
-            if byte == 0x20 {
-                char_width += buffer.word_space;
-            }
-
-            // 4. Apply horizontal scaling (Th)
-            char_width *= buffer.horizontal_scaling / 100.0;
-
-            total_width += char_width;
-        }
-
-        Ok(total_width)
-    }
-
     /// Process TJ array according to configured word boundary detection mode.
     ///
     /// Per PDF Spec ISO 32000-1:2008 Section 9.4.4,
@@ -4564,7 +4624,11 @@ impl TextExtractor {
         let char_space = self.state_stack.current().char_space;
         let word_space = self.state_stack.current().word_space;
 
-        let mut buffer = TjBuffer::new(self.state_stack.current(), self.current_mcid);
+        let mut buffer = TjBuffer::new(
+            self.state_stack.current(),
+            self.current_mcid,
+            self.cached_current_font.clone(),
+        );
         let mut _element_count = 0;
 
         for (idx, element) in array.iter().enumerate() {
@@ -4616,11 +4680,8 @@ impl TextExtractor {
                         }
                     }
 
-                    // Append string to buffer
-                    buffer.append(s, &self.fonts)?;
-
-                    // Advance position for this string
-                    self.advance_position_for_string(s)?;
+                    // Single-pass: append unicode + compute width + advance position
+                    self.append_advance_buffer(&mut buffer, s)?;
                 },
                 TextElement::Offset(offset) => {
                     // Track TJ offset for statistical analysis
@@ -4655,7 +4716,7 @@ impl TextExtractor {
                                 .unwrap_or(false);
 
                         // Flush buffer before space
-                        self.flush_tj_buffer(&buffer)?;
+                        self.flush_tj_buffer(buffer)?;
 
                         // Check if the next element in the TJ array is a string
                         // that starts with whitespace. If so, DON'T insert a space to avoid doubling.
@@ -4679,7 +4740,11 @@ impl TextExtractor {
                         }
 
                         // Start new buffer with current state
-                        buffer = TjBuffer::new(self.state_stack.current(), self.current_mcid);
+                        buffer = TjBuffer::new(
+                            self.state_stack.current(),
+                            self.current_mcid,
+                            self.cached_current_font.clone(),
+                        );
                     }
 
                     // Advance position for offset (updates text matrix)
@@ -4690,7 +4755,7 @@ impl TextExtractor {
 
         // Flush remaining buffer
         if !buffer.is_empty() {
-            self.flush_tj_buffer(&buffer)?;
+            self.flush_tj_buffer(buffer)?;
         }
 
         Ok(())
@@ -4846,7 +4911,7 @@ impl TextExtractor {
 
         // Step 3: Convert characters to Unicode string
         // Use same decoding as existing code
-        let unicode_text = if let Some(font_name) = state.font_name.as_ref() {
+        let mut unicode_text = if let Some(font_name) = state.font_name.as_ref() {
             if let Some(font) = self.fonts.get(font_name) {
                 let mut text = String::new();
                 for char_info in cluster {
@@ -4861,6 +4926,15 @@ impl TextExtractor {
         } else {
             String::new()
         };
+
+        // Step 3b: RTL text correction — reverse character order for RTL rendering
+        // When text_matrix.a is negative, text is rendered right-to-left (visual order).
+        // PDF stores characters in rendering order, but text extraction should produce
+        // logical order. Reverse the characters to correct RTL runs.
+        let combined_matrix = ctm.multiply(&text_matrix);
+        if combined_matrix.a < 0.0 && unicode_text.len() > 1 {
+            unicode_text = unicode_text.chars().rev().collect();
+        }
 
         // Step 4: Determine font weight
         let font_weight = if let Some(font_name) = state.font_name.as_ref() {
@@ -5034,35 +5108,260 @@ impl TextExtractor {
     }
 
     /// Advance text position for a string (used in TJ array processing).
-    fn advance_position_for_string(&mut self, text: &[u8]) -> Result<()> {
+    /// Advance the text matrix position by the width of a text string.
+    /// Returns the computed width so callers can accumulate it.
+    fn advance_position_for_string(&mut self, text: &[u8]) -> Result<f32> {
         let state = self.state_stack.current();
-        let font_name = state.font_name.clone();
         let font_size = state.font_size;
         let horizontal_scaling = state.horizontal_scaling;
         let char_space = state.char_space;
         let word_space = state.word_space;
 
-        let font = font_name.as_ref().and_then(|name| self.fonts.get(name));
+        let font = self.cached_current_font.as_deref();
 
-        // Calculate total width per PDF spec
-        let mut total_width = 0.0;
-        for &byte in text {
-            let glyph_width = if let Some(font) = font {
-                font.get_glyph_width(byte as u16)
+        // Hoist loop-invariant computations
+        let fs_factor = font_size / 1000.0;
+        let hs_factor = horizontal_scaling / 100.0;
+        let cs_hs = char_space * hs_factor;
+        let ws_hs = word_space * hs_factor;
+
+        let total_width = if let Some(font) = font {
+            if font.subtype != "Type0" {
+                // Fast path: use precomputed 256-entry width table (simple fonts)
+                let width_table = font.get_byte_to_width_table();
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = width_table[byte as usize] * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
             } else {
-                500.0
-            };
-
-            let mut char_width = glyph_width * font_size / 1000.0;
-            char_width += char_space;
-            if byte == 0x20 {
-                char_width += word_space;
+                // Type0/CID font: use HashMap-based width lookup
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = font.get_glyph_width(byte as u16) * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
             }
-            char_width *= horizontal_scaling / 100.0;
-            total_width += char_width;
-        }
+        } else {
+            // No font: use default width
+            let default_w = 500.0 * fs_factor * hs_factor + cs_hs;
+            let space_w = default_w + ws_hs;
+            let mut w_sum = 0.0f32;
+            for &byte in text {
+                w_sum += if byte == 0x20 { space_w } else { default_w };
+            }
+            w_sum
+        };
 
         // Update text matrix position
+        let state = self.state_stack.current_mut();
+        let text_matrix = state.text_matrix;
+        let advance = total_width / text_matrix.d.abs();
+        state.text_matrix.e += advance * text_matrix.a;
+        state.text_matrix.f += advance * text_matrix.b;
+
+        Ok(total_width)
+    }
+
+    /// Combined Unicode decode + width calculation in a single pass.
+    /// Merges TjBuffer::append and advance_position_for_string for simple fonts,
+    /// eliminating one full per-byte iteration per Tj operator.
+    fn append_and_advance(&mut self, text: &[u8]) -> Result<()> {
+        let text = if text.len() > 32_767 {
+            &text[..32_767]
+        } else {
+            text
+        };
+
+        let state = self.state_stack.current();
+        let font_size = state.font_size;
+        let horizontal_scaling = state.horizontal_scaling;
+        let char_space = state.char_space;
+        let word_space = state.word_space;
+
+        let fs_factor = font_size / 1000.0;
+        let hs_factor = horizontal_scaling / 100.0;
+        let cs_hs = char_space * hs_factor;
+        let ws_hs = word_space * hs_factor;
+
+        // Disjoint field borrows: cached_current_font (immutable) + tj_span_buffer (mutable)
+        let font = self.cached_current_font.as_deref();
+        let buffer = self.tj_span_buffer.as_mut().unwrap();
+
+        let total_width = if let Some(font) = font {
+            if font.subtype != "Type0" {
+                // Fast path: single pass over bytes for both Unicode and width
+                let char_table = font.get_byte_to_char_table();
+                let width_table = font.get_byte_to_width_table();
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    // Unicode decode
+                    let c = char_table[byte as usize];
+                    if c != '\0' {
+                        buffer.unicode.push(c);
+                    } else {
+                        // Rare: multi-char mapping or unmapped byte
+                        if let Some(s) = font.char_to_unicode(byte as u32) {
+                            if s != "\u{FFFD}" {
+                                for ch in s.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        buffer.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        } else {
+                            let fb = fallback_char_to_unicode(byte as u32);
+                            if fb != "\u{FFFD}" {
+                                for ch in fb.chars() {
+                                    if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                        buffer.unicode.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Width calculation
+                    let mut w = width_table[byte as usize] * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
+            } else {
+                // Type0/CID font: use existing separate paths
+                buffer.append(text)?;
+                // Width calculation (cannot merge due to multi-byte decode)
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = font.get_glyph_width(byte as u16) * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
+            }
+        } else {
+            // No font: decode as ASCII + use default widths
+            buffer.append(text)?;
+            let default_w = 500.0 * fs_factor * hs_factor + cs_hs;
+            let space_w = default_w + ws_hs;
+            let mut w_sum = 0.0f32;
+            for &byte in text {
+                w_sum += if byte == 0x20 { space_w } else { default_w };
+            }
+            w_sum
+        };
+
+        buffer.accumulated_width += total_width;
+
+        // Update text matrix position
+        let state = self.state_stack.current_mut();
+        let text_matrix = state.text_matrix;
+        let advance = total_width / text_matrix.d.abs();
+        state.text_matrix.e += advance * text_matrix.a;
+        state.text_matrix.f += advance * text_matrix.b;
+
+        Ok(())
+    }
+
+    /// Combined Unicode decode + width + position advance for a local buffer.
+    /// Same as append_and_advance but works on an explicit buffer parameter
+    /// instead of self.tj_span_buffer. Used by TJ array processing.
+    fn append_advance_buffer(&mut self, buffer: &mut TjBuffer, text: &[u8]) -> Result<()> {
+        let text = if text.len() > 32_767 {
+            &text[..32_767]
+        } else {
+            text
+        };
+
+        let state = self.state_stack.current();
+        let font_size = state.font_size;
+        let horizontal_scaling = state.horizontal_scaling;
+        let char_space = state.char_space;
+        let word_space = state.word_space;
+
+        let fs_factor = font_size / 1000.0;
+        let hs_factor = horizontal_scaling / 100.0;
+        let cs_hs = char_space * hs_factor;
+        let ws_hs = word_space * hs_factor;
+
+        let font = self.cached_current_font.as_deref();
+
+        let total_width = if let Some(font) = font {
+            if font.subtype != "Type0" {
+                let char_table = font.get_byte_to_char_table();
+                let width_table = font.get_byte_to_width_table();
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let c = char_table[byte as usize];
+                    if c != '\0' {
+                        buffer.unicode.push(c);
+                    } else if let Some(s) = font.char_to_unicode(byte as u32) {
+                        if s != "\u{FFFD}" {
+                            for ch in s.chars() {
+                                if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                    buffer.unicode.push(ch);
+                                }
+                            }
+                        }
+                    } else {
+                        let fb = fallback_char_to_unicode(byte as u32);
+                        if fb != "\u{FFFD}" {
+                            for ch in fb.chars() {
+                                if ch >= '\x20' || ch == '\t' || ch == '\n' || ch == '\r' {
+                                    buffer.unicode.push(ch);
+                                }
+                            }
+                        }
+                    }
+                    let mut w = width_table[byte as usize] * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
+            } else {
+                buffer.append(text)?;
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = font.get_glyph_width(byte as u16) * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
+            }
+        } else {
+            buffer.append(text)?;
+            let default_w = 500.0 * fs_factor * hs_factor + cs_hs;
+            let space_w = default_w + ws_hs;
+            let mut w_sum = 0.0f32;
+            for &byte in text {
+                w_sum += if byte == 0x20 { space_w } else { default_w };
+            }
+            w_sum
+        };
+
+        buffer.accumulated_width += total_width;
+
         let state = self.state_stack.current_mut();
         let text_matrix = state.text_matrix;
         let advance = total_width / text_matrix.d.abs();
@@ -5171,47 +5470,24 @@ impl TextExtractor {
     /// This is similar to flush_tj_buffer but works with the tj_span_buffer field
     /// which accumulates consecutive Tj operators.
     fn flush_tj_span_buffer(&mut self) -> Result<()> {
-        if let Some(buffer) = self.tj_span_buffer.take() {
+        if let Some(mut buffer) = self.tj_span_buffer.take() {
             if !buffer.is_empty() {
-                // Calculate total width using PDF spec formula
-                let total_width = self.calculate_tj_buffer_width(&buffer)?;
+                // Use accumulated width from advance_position_for_string calls
+                let total_width = buffer.accumulated_width;
 
-                // Calculate effective font size (accounting for CTM and text matrix scaling)
-                let combined_flush = buffer.start_ctm.multiply(&buffer.start_matrix);
-                let effective_font_size = buffer.font_size
-                    * (combined_flush.d * combined_flush.d + combined_flush.b * combined_flush.b)
-                        .sqrt();
+                // Use pre-computed values from buffer creation (avoids
+                // matrix multiply + sqrt + HashMap lookup per flush)
+                let effective_font_size = buffer.effective_font_size;
+                let font_weight = buffer.font_weight;
+                let is_italic_buf = buffer.is_italic;
 
-                // Determine font weight
-                let font_weight = if let Some(font_name) = &buffer.font_name {
-                    if let Some(font) = self.fonts.get(font_name) {
-                        if font.is_bold() {
-                            FontWeight::Bold
-                        } else {
-                            FontWeight::Normal
-                        }
-                    } else {
-                        FontWeight::Normal
-                    }
-                } else {
-                    FontWeight::Normal
-                };
-
-                // Create single span for entire buffer
-                // PHASE 1 ENHANCEMENT: Mark space-only spans as offset_semantic=true
-                // This allows merge_adjacent_spans() to recognize them and skip double-space insertion
+                // Move owned strings out of buffer (avoids clone)
                 let font_name_buf = buffer
                     .font_name
-                    .clone()
+                    .take()
                     .unwrap_or_else(|| "Unknown".to_string());
-                let is_italic_buf = buffer
-                    .font_name
-                    .as_ref()
-                    .and_then(|name| self.fonts.get(name))
-                    .map(|font| font.is_italic())
-                    .unwrap_or(false);
                 let span = TextSpan {
-                    text: buffer.unicode.clone(),
+                    text: std::mem::take(&mut buffer.unicode),
                     bbox: Rect {
                         x: buffer.start_matrix.e,
                         y: buffer.start_matrix.f,
@@ -5255,6 +5531,18 @@ impl TextExtractor {
     }
 
     fn show_text(&mut self, text: &[u8]) -> Result<()> {
+        // PDF spec Section 7.3.4.2: implementation limit of 32,767 bytes per string.
+        // Malformed PDFs may exceed this (e.g., veraPDF 6-1-12-t03-fail-c.pdf with 65K chars).
+        // Cap to spec limit to prevent text blowup.
+        let text = if text.len() > 32_767 {
+            log::warn!(
+                "String exceeds PDF spec limit: {} bytes (max 32,767), truncating",
+                text.len()
+            );
+            &text[..32_767]
+        } else {
+            text
+        };
         for &byte in text {
             let char_code = byte as u16;
 
@@ -5343,6 +5631,20 @@ impl TextExtractor {
             let final_matrix = ctm.multiply(&text_matrix);
             // Calculate rotation from matrix: atan2(b, a)
             let rotation_degrees = final_matrix.b.atan2(final_matrix.a).to_degrees();
+
+            // Guard against malformed fonts that map a single byte to an unreasonably
+            // long Unicode string (e.g., 1024 repeated chars from corrupted CMap/encoding).
+            // Normal mappings produce 1-4 chars (single char, ligature, or combining sequence).
+            let unicode_string = if unicode_string.chars().count() > 8 {
+                log::warn!(
+                    "Malformed character mapping: code 0x{:04X} maps to {} chars, truncating",
+                    char_code,
+                    unicode_string.chars().count()
+                );
+                unicode_string.chars().next().unwrap_or('?').to_string()
+            } else {
+                unicode_string
+            };
 
             // Process each character in the expanded string
             // For ligatures (e.g., "fi" from ﬁ), we create multiple TextChar objects
@@ -5518,6 +5820,8 @@ mod tests {
             cid_widths: None,
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         }
     }
 

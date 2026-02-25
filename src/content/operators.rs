@@ -8,6 +8,7 @@ use crate::object::Object;
 
 /// A content stream operator.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::box_collection)] // Intentional: Boxing reduces enum from 112 to 40 bytes (#150)
 pub enum Operator {
     // Text positioning operators
     /// Move text position (Td)
@@ -217,8 +218,9 @@ pub enum Operator {
     SetFillColorN {
         /// Color components (may be empty for patterns)
         components: Vec<f32>,
-        /// Optional pattern name for pattern color spaces
-        name: Option<String>,
+        /// Optional pattern name for pattern color spaces.
+        /// Boxed to reduce Operator enum size (Option<String> is 24 bytes → 8 bytes).
+        name: Option<Box<String>>,
     },
     /// Set stroke color with named pattern (SCN)
     ///
@@ -226,8 +228,9 @@ pub enum Operator {
     SetStrokeColorN {
         /// Color components (may be empty for patterns)
         components: Vec<f32>,
-        /// Optional pattern name for pattern color spaces
-        name: Option<String>,
+        /// Optional pattern name for pattern color spaces.
+        /// Boxed to reduce Operator enum size.
+        name: Option<Box<String>>,
     },
 
     // Text object operators
@@ -412,8 +415,9 @@ pub enum Operator {
     /// - DP: DecodeParms (decode parameters for filter)
     /// - I: Interpolate (boolean)
     InlineImage {
-        /// Inline image dictionary with abbreviated keys
-        dict: std::collections::HashMap<String, Object>,
+        /// Inline image dictionary with abbreviated keys.
+        /// Boxed to reduce Operator enum size (HashMap is 48 bytes).
+        dict: Box<std::collections::HashMap<String, Object>>,
         /// Raw image data bytes (possibly compressed)
         data: Vec<u8>,
     },
@@ -435,8 +439,9 @@ pub enum Operator {
     BeginMarkedContentDict {
         /// Tag name identifying the marked content
         tag: String,
-        /// Properties (dictionary or name reference to /Properties resource)
-        properties: Object,
+        /// Properties (dictionary or name reference to /Properties resource).
+        /// Boxed to reduce Operator enum size from 112 to 56 bytes (Object is 88 bytes).
+        properties: Box<Object>,
     },
     /// End marked content (EMC)
     ///
@@ -449,8 +454,8 @@ pub enum Operator {
     Other {
         /// Operator name
         name: String,
-        /// Operands
-        operands: Vec<Object>,
+        /// Operands. Boxed to reduce Operator enum size.
+        operands: Box<Vec<Object>>,
     },
 }
 
@@ -944,7 +949,7 @@ mod tests {
     fn test_operator_other() {
         let op = Operator::Other {
             name: "Do".to_string(),
-            operands: vec![Object::Name("Im1".to_string())],
+            operands: Box::new(vec![Object::Name("Im1".to_string())]),
         };
         match op {
             Operator::Other { name, operands } => {
@@ -953,6 +958,17 @@ mod tests {
             },
             _ => panic!("Wrong operator type"),
         }
+    }
+
+    #[test]
+    fn test_operator_enum_size() {
+        let size = std::mem::size_of::<Operator>();
+        eprintln!("Operator enum size: {} bytes", size);
+        // After boxing BeginMarkedContentDict.properties, InlineImage.dict,
+        // Other.operands, SetFillColorN/SetStrokeColorN.name:
+        // largest variant is now SetFillColorN/SetStrokeColorN at Vec<f32>(24) + Option<Box<String>>(8) = 32 bytes
+        // Enum: 32 (payload) + 8 (discriminant + alignment) = 40 bytes (was 112)
+        assert!(size <= 40, "Operator enum too large: {} bytes (expected <= 40)", size);
     }
 
     #[test]
