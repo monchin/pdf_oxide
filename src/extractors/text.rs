@@ -1243,8 +1243,6 @@ fn is_citation_context(
 /// a single logical text span, only breaking on explicit word boundaries.
 #[derive(Debug)]
 struct TjBuffer {
-    /// Accumulated raw bytes from text strings
-    text: Vec<u8>,
     /// Accumulated Unicode text
     unicode: String,
     /// Text matrix at the start of this buffer
@@ -1288,7 +1286,6 @@ impl TjBuffer {
             .and_then(|name| fonts.get(name))
             .cloned();
         Self {
-            text: Vec::new(),
             unicode: String::new(),
             start_matrix: state.text_matrix,
             start_ctm: state.ctm,
@@ -1306,7 +1303,7 @@ impl TjBuffer {
 
     /// Check if the buffer is empty.
     fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.unicode.is_empty()
     }
 
     /// Append a text string to the buffer.
@@ -1318,7 +1315,6 @@ impl TjBuffer {
         } else {
             bytes
         };
-        self.text.extend_from_slice(bytes);
 
         let font = self.cached_font.as_deref();
 
@@ -4341,6 +4337,12 @@ impl TextExtractor {
             return Ok(());
         }
 
+        // Document-level cache: skip Form XObjects already known to contain no text.
+        // Avoids repeated decompression of shared graphics-only XObjects across pages.
+        if doc.xobject_text_free_cache.contains(&xobject_ref) {
+            return Ok(());
+        }
+
         // Load the XObject (now known to be Form or unknown — worth the full load)
         let xobject = doc.load_object(xobject_ref)?;
 
@@ -4380,6 +4382,7 @@ impl TextExtractor {
                                     "Skipping Form XObject '{}': no Font/XObject in Resources",
                                     name
                                 );
+                                doc.xobject_text_free_cache.insert(xobject_ref);
                                 return Ok(());
                             }
                         }
@@ -4415,6 +4418,7 @@ impl TextExtractor {
                         name,
                         stream_data.len()
                     );
+                    doc.xobject_text_free_cache.insert(xobject_ref);
                     return Ok(());
                 }
 
@@ -4509,8 +4513,9 @@ impl TextExtractor {
             return Ok(());
         }
 
-        // Calculate total width using PDF spec formula (including Tc/Tw)
-        let total_width = self.calculate_tj_buffer_width(buffer)?;
+        // Use accumulated width from advance_position_for_string calls
+        // (equivalent to calculate_tj_buffer_width, avoids redundant per-byte iteration)
+        let total_width = buffer.accumulated_width;
 
         // Calculate effective font size (accounting for CTM and text matrix scaling)
         let combined = buffer.start_ctm.multiply(&buffer.start_matrix);
@@ -4572,47 +4577,6 @@ impl TextExtractor {
 
     /// Calculate total width of TJ buffer using PDF spec formula.
     ///
-    /// Per PDF Spec ISO 32000-1:2008, Section 9.4.4:
-    /// tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
-    ///
-    /// For TJ arrays without offset adjustments (Tj=0 for strings):
-    /// tx = (w0 × Tfs / 1000 + Tc + Tw) × Th
-    fn calculate_tj_buffer_width(&self, buffer: &TjBuffer) -> Result<f32> {
-        let font = buffer
-            .font_name
-            .as_ref()
-            .and_then(|name| self.fonts.get(name));
-
-        let mut total_width = 0.0;
-
-        for &byte in &buffer.text {
-            // Per PDF Spec 9.4.4: tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
-            let glyph_width = if let Some(font) = font {
-                font.get_glyph_width(byte as u16)
-            } else {
-                500.0 // Default glyph width if no font available
-            };
-
-            // 1. Convert glyph width to user space: w0 * Tfs / 1000
-            let mut char_width = glyph_width * buffer.font_size / 1000.0;
-
-            // 2. Add character spacing (Tc) - applies to ALL characters
-            char_width += buffer.char_space;
-
-            // 3. Add word spacing (Tw) - applies ONLY to space (0x20)
-            if byte == 0x20 {
-                char_width += buffer.word_space;
-            }
-
-            // 4. Apply horizontal scaling (Th)
-            char_width *= buffer.horizontal_scaling / 100.0;
-
-            total_width += char_width;
-        }
-
-        Ok(total_width)
-    }
-
     /// Process TJ array according to configured word boundary detection mode.
     ///
     /// Per PDF Spec ISO 32000-1:2008 Section 9.4.4,
@@ -5154,21 +5118,43 @@ impl TextExtractor {
         let cs_hs = char_space * hs_factor;
         let ws_hs = word_space * hs_factor;
 
-        let mut total_width = 0.0;
-        for &byte in text {
-            let glyph_width = if let Some(font) = font {
-                font.get_glyph_width(byte as u16)
+        let total_width = if let Some(font) = font {
+            if font.subtype != "Type0" {
+                // Fast path: use precomputed 256-entry width table (simple fonts)
+                let width_table = font.get_byte_to_width_table();
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = width_table[byte as usize] * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
             } else {
-                500.0
-            };
-
-            let mut w = glyph_width * fs_factor * hs_factor;
-            w += cs_hs;
-            if byte == 0x20 {
-                w += ws_hs;
+                // Type0/CID font: use HashMap-based width lookup
+                let mut w_sum = 0.0f32;
+                for &byte in text {
+                    let mut w = font.get_glyph_width(byte as u16) * fs_factor * hs_factor;
+                    w += cs_hs;
+                    if byte == 0x20 {
+                        w += ws_hs;
+                    }
+                    w_sum += w;
+                }
+                w_sum
             }
-            total_width += w;
-        }
+        } else {
+            // No font: use default width
+            let default_w = 500.0 * fs_factor * hs_factor + cs_hs;
+            let space_w = default_w + ws_hs;
+            let mut w_sum = 0.0f32;
+            for &byte in text {
+                w_sum += if byte == 0x20 { space_w } else { default_w };
+            }
+            w_sum
+        };
 
         // Update text matrix position
         let state = self.state_stack.current_mut();
@@ -5641,6 +5627,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         }
     }
 

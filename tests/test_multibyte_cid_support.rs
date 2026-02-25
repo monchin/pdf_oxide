@@ -79,6 +79,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Single-byte codes still work
@@ -163,6 +164,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Range 1 (0x0001-0x000F → 0x4E00-0x4E0E)
@@ -249,6 +251,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Typical GB1 characters
@@ -315,6 +318,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Range 1 (Traditional Chinese characters)
@@ -386,6 +390,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Hiragana range
@@ -471,6 +476,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: ASCII range (0x0020-0x007E)
@@ -543,6 +549,7 @@ end
         default_width: 1000.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Large CID values

@@ -80,6 +80,10 @@ pub struct FontInfo {
     /// Index by byte value (0-255). '\0' means "use full char_to_unicode fallback".
     /// Built lazily on first text decode. Avoids per-byte HashMap lookups.
     pub byte_to_char_table: std::sync::OnceLock<[char; 256]>,
+    /// Pre-computed byte→width lookup for simple (non-Type0) fonts.
+    /// Index by byte value (0-255). Built lazily on first advance_position call.
+    /// Eliminates per-byte bounds check and subtraction in get_glyph_width.
+    pub byte_to_width_table: std::sync::OnceLock<[f32; 256]>,
 }
 
 /// Font encoding types.
@@ -699,6 +703,7 @@ impl FontInfo {
             cid_default_width,
             multi_char_map: diff_multi_char_map,
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
     }
 
@@ -1787,6 +1792,27 @@ impl FontInfo {
                             tbl[i as usize] = c;
                         }
                         // Multi-char, replacement, or control char: leave as '\0'
+                    }
+                }
+            }
+            tbl
+        })
+    }
+
+    /// Pre-computed byte→width lookup for simple (non-Type0) fonts.
+    /// Returns a 256-entry array where index i = glyph width for byte i.
+    /// Eliminates per-byte bounds check and subtraction in advance_position.
+    #[inline]
+    pub fn get_byte_to_width_table(&self) -> &[f32; 256] {
+        self.byte_to_width_table.get_or_init(|| {
+            let mut tbl = [self.default_width; 256];
+            if let Some(widths) = &self.widths {
+                if let Some(first_char) = self.first_char {
+                    for (idx, &w) in widths.iter().enumerate() {
+                        let code = first_char as usize + idx;
+                        if code < 256 {
+                            tbl[code] = w;
+                        }
                     }
                 }
             }
@@ -3717,6 +3743,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font.is_bold());
 
@@ -3741,6 +3768,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(!font2.is_bold());
     }
@@ -3768,6 +3796,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font.is_italic());
 
@@ -3792,6 +3821,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert!(font2.is_italic());
     }
@@ -3822,6 +3852,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Should use ToUnicode mapping (priority)
@@ -3853,6 +3884,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
@@ -3883,6 +3915,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Type0 without ToUnicode should use CID-as-Unicode fallback
@@ -3911,6 +3944,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Simple fonts (Type1) CAN use Identity encoding for valid Unicode codes
@@ -4037,6 +4071,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         let font2 = font.clone();
@@ -4153,6 +4188,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Should use custom encoding
@@ -4187,6 +4223,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_with_force_bold.get_font_weight(), FontWeight::Bold);
@@ -4214,6 +4251,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_without_force_bold.get_font_weight(), FontWeight::Normal);
@@ -4245,6 +4283,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_heavy_stem.get_font_weight(), FontWeight::Bold);
@@ -4272,6 +4311,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_medium_stem.get_font_weight(), FontWeight::Medium);
@@ -4299,6 +4339,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_light_stem.get_font_weight(), FontWeight::Normal);
@@ -4330,6 +4371,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_explicit.get_font_weight(), FontWeight::Light);
@@ -4357,6 +4399,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_force_bold.get_font_weight(), FontWeight::Bold);
@@ -4384,6 +4427,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         assert_eq!(font_name.get_font_weight(), FontWeight::Bold);
@@ -4415,6 +4459,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_black.get_font_weight(), FontWeight::Black);
         assert!(font_black.is_bold());
@@ -4441,6 +4486,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_extrabold.get_font_weight(), FontWeight::ExtraBold);
         assert!(font_extrabold.is_bold());
@@ -4467,6 +4513,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_bold.get_font_weight(), FontWeight::Bold);
         assert!(font_bold.is_bold());
@@ -4493,6 +4540,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_semibold.get_font_weight(), FontWeight::SemiBold);
         assert!(font_semibold.is_bold());
@@ -4519,6 +4567,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_medium.get_font_weight(), FontWeight::Medium);
         assert!(!font_medium.is_bold());
@@ -4545,6 +4594,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_light.get_font_weight(), FontWeight::Light);
         assert!(!font_light.is_bold());
@@ -4571,6 +4621,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_extralight.get_font_weight(), FontWeight::ExtraLight);
         assert!(!font_extralight.is_bold());
@@ -4597,6 +4648,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_thin.get_font_weight(), FontWeight::Thin);
         assert!(!font_thin.is_bold());
@@ -4623,6 +4675,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
         assert_eq!(font_normal.get_font_weight(), FontWeight::Normal);
         assert!(!font_normal.is_bold());
@@ -4897,6 +4950,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Widths from cid_widths
@@ -4935,6 +4989,7 @@ mod tests {
             cid_default_width: 800.0, // CID default width
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // CID 1 has explicit width
@@ -4969,6 +5024,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // All CIDs use default_width when no cid_widths and no widths array
@@ -5013,6 +5069,7 @@ mod tests {
             cid_default_width: 1000.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         };
 
         // Range test

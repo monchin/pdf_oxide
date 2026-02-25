@@ -82,6 +82,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     let font2 = FontInfo {
@@ -105,6 +106,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // First font: triggers cache population (parse CMap)
@@ -199,6 +201,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     let font_b = FontInfo {
@@ -222,6 +225,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Font A should map 0x0001 to 'a'
@@ -302,6 +306,7 @@ end
             default_width: 500.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
         .collect();
 
@@ -383,6 +388,7 @@ end
             default_width: 500.0,
             multi_char_map: HashMap::new(),
             byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
         })
         .collect();
 
@@ -453,6 +459,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Font should work correctly (cache metrics are internal)
@@ -525,6 +532,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     });
 
     let mut handles = vec![];

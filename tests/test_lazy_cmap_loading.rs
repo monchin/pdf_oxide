@@ -78,6 +78,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Character lookup should still work (lazy parsing on first access)
@@ -146,6 +147,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify same result from sequential calls
@@ -222,6 +224,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: All entries should be accessible
@@ -306,6 +309,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Multiple lookups should all hit the cache
@@ -377,6 +381,7 @@ end
         default_width: 500.0,
         multi_char_map: HashMap::new(),
         byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
     };
 
     // Verify: Explicit mappings work

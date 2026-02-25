@@ -113,6 +113,11 @@ pub struct PdfDocument {
     /// Cache of XObject refs known to NOT be Form XObjects (i.e., Image or unknown).
     /// Used by text extraction to skip expensive full-object loads for images.
     image_xobject_cache: HashSet<ObjectRef>,
+    /// Document-level cache of Form XObject refs whose streams contain NO text
+    /// operators (BT) and no nested Do invocations. Persists across pages so that
+    /// shared graphics-only XObjects (watermarks, logos, chart elements) are
+    /// decompressed and scanned at most once across the entire document.
+    pub(crate) xobject_text_free_cache: HashSet<ObjectRef>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -226,6 +231,7 @@ impl PdfDocument {
             page_cache_populated: false,
             scanned_object_offsets: None,
             image_xobject_cache: HashSet::new(),
+            xobject_text_free_cache: HashSet::new(),
         };
 
         // Initialize encryption immediately
