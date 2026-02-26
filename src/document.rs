@@ -15,8 +15,8 @@ use crate::xref::{find_xref_offset, parse_xref, CrossRefTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -53,8 +53,10 @@ pub struct PageInfo {
 /// # Ok::<(), pdf_oxide::error::Error>(())
 /// ```
 pub struct PdfDocument {
-    /// Buffered reader for the PDF file
-    reader: BufReader<File>,
+    /// Buffered reader backed by in-memory PDF data.
+    /// Files are read into memory at open time for portability (WASM support)
+    /// and to enable Send (required for parallel extraction).
+    reader: BufReader<Cursor<Vec<u8>>>,
     /// PDF version (major, minor)
     version: (u8, u8),
     /// Cross-reference table mapping object IDs to byte offsets
@@ -157,17 +159,48 @@ impl PdfDocument {
     /// let doc = PdfDocument::open("sample.pdf")?;
     /// # Ok::<(), pdf_oxide::error::Error>(())
     /// ```
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path.as_ref())?;
-        // Use larger read buffer for big files to reduce I/O syscalls.
-        // Default BufReader is 8 KB; for files >100 MB (e.g. 1.5 GB newspaper
-        // scans), a 256 KB buffer significantly reduces seek+read overhead.
-        let buf_capacity = match file.metadata() {
-            Ok(m) if m.len() > 100 * 1024 * 1024 => 256 * 1024, // 256 KB
-            _ => 8 * 1024,                                      // 8 KB (default)
-        };
-        let mut reader = BufReader::with_capacity(buf_capacity, file);
+    /// Open a PDF document from in-memory bytes.
+    ///
+    /// This is the primary constructor for WASM environments and for cases where
+    /// the PDF data is already in memory. The `open()` file-based constructor
+    /// delegates to this after reading the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the PDF data is invalid or cannot be parsed.
+    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
+        let reader = BufReader::new(Cursor::new(data));
+        Self::open_from_reader(reader)
+    }
 
+    /// Open a PDF document from a file path.
+    ///
+    /// Reads the entire file into memory, then parses the PDF structure.
+    /// This is the standard constructor for desktop/server environments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be opened or read
+    /// - The PDF header is invalid
+    /// - The cross-reference table is corrupted
+    /// - The trailer dictionary is invalid
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use pdf_oxide::document::PdfDocument;
+    ///
+    /// let doc = PdfDocument::open("sample.pdf")?;
+    /// # Ok::<(), pdf_oxide::error::Error>(())
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let data = std::fs::read(path.as_ref())?;
+        Self::open_from_bytes(data)
+    }
+
+    fn open_from_reader(mut reader: BufReader<Cursor<Vec<u8>>>) -> Result<Self> {
         // Parse header with lenient mode by default (handle PDFs with binary prefixes)
         let (major, minor, header_offset) = parse_header(&mut reader, true)?;
         let version = (major, minor);
