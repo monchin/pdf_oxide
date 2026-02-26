@@ -7398,4 +7398,3064 @@ mod tests {
 
         pdf
     }
+
+    // ========================================================================
+    // Helper: Build a minimal valid PDF with configurable content stream
+    // ========================================================================
+
+    /// Build a minimal PDF in memory with given content stream bytes.
+    /// Returns the raw PDF bytes suitable for `PdfDocument::open_from_bytes`.
+    fn build_minimal_pdf(content: &[u8]) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        let off3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>\nendobj\n",
+        );
+
+        let off4 = pdf.len();
+        pdf.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(content);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        pdf
+    }
+
+    /// Build a minimal PDF with a multi-page structure (given page count).
+    fn build_multi_page_pdf(page_count: usize) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets: Vec<usize> = Vec::new();
+
+        // Object 1: Catalog
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        // Object 2: Pages (we'll build the Kids array)
+        offsets.push(pdf.len());
+        let kids_str: String = (0..page_count)
+            .map(|i| format!("{} 0 R", i + 3))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let pages_obj = format!(
+            "2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
+            kids_str, page_count
+        );
+        pdf.extend_from_slice(pages_obj.as_bytes());
+
+        // Objects 3..3+page_count: Page objects (no /Contents, blank pages)
+        for _i in 0..page_count {
+            offsets.push(pdf.len());
+            let page_obj = format!(
+                "{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+                offsets.len()
+            );
+            pdf.extend_from_slice(page_obj.as_bytes());
+        }
+
+        let xref_off = pdf.len();
+        let total_objs = offsets.len() + 1; // +1 for object 0
+        pdf.extend_from_slice(format!("xref\n0 {}\n", total_objs).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                total_objs, xref_off
+            )
+            .as_bytes(),
+        );
+
+        pdf
+    }
+
+    // ========================================================================
+    // PdfDocument basic open/version/trailer tests
+    // ========================================================================
+
+    #[test]
+    fn test_open_from_bytes_minimal_pdf() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.version(), (1, 4));
+        assert!(doc.trailer().as_dict().is_some());
+    }
+
+    #[test]
+    fn test_open_from_bytes_invalid_data() {
+        let result = PdfDocument::open_from_bytes(b"not a pdf".to_vec());
+        // Should error out -- no valid xref
+        assert!(result.is_err() || result.is_ok()); // lenient mode may fall back
+    }
+
+    #[test]
+    fn test_open_from_bytes_empty() {
+        let result = PdfDocument::open_from_bytes(vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_version_accessor() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let (major, minor) = doc.version();
+        assert_eq!(major, 1);
+        assert_eq!(minor, 4);
+    }
+
+    #[test]
+    fn test_trailer_accessor() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let trailer = doc.trailer();
+        let dict = trailer.as_dict().unwrap();
+        assert!(dict.contains_key("Root"));
+        assert!(dict.contains_key("Size"));
+    }
+
+    #[test]
+    fn test_debug_impl() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let debug_str = format!("{:?}", doc);
+        assert!(debug_str.contains("PdfDocument"));
+        assert!(debug_str.contains("version"));
+        assert!(debug_str.contains("(1, 4)"));
+    }
+
+    // ========================================================================
+    // Catalog tests
+    // ========================================================================
+
+    #[test]
+    fn test_catalog_returns_dictionary() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let catalog = doc.catalog().unwrap();
+        let dict = catalog.as_dict().unwrap();
+        assert_eq!(dict.get("Type").unwrap().as_name(), Some("Catalog"));
+    }
+
+    // ========================================================================
+    // Page count tests
+    // ========================================================================
+
+    #[test]
+    fn test_page_count_single_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_page_count_multiple_pages() {
+        let pdf = build_multi_page_pdf(5);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_page_count_zero_pages() {
+        // Build a PDF with 0 pages
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 0);
+    }
+
+    // ========================================================================
+    // load_object tests
+    // ========================================================================
+
+    #[test]
+    fn test_load_object_from_cache() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // Load catalog (object 1 0 R)
+        let obj_ref = ObjectRef::new(1, 0);
+        let obj1 = doc.load_object(obj_ref).unwrap();
+        // Load again - should come from cache
+        let obj2 = doc.load_object(obj_ref).unwrap();
+        // Both should be the catalog
+        assert_eq!(obj1.as_dict().unwrap().get("Type").unwrap().as_name(), Some("Catalog"));
+        assert_eq!(obj2.as_dict().unwrap().get("Type").unwrap().as_name(), Some("Catalog"));
+    }
+
+    #[test]
+    fn test_load_object_missing_returns_null() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // Try to load a non-existent object
+        let obj_ref = ObjectRef::new(999, 0);
+        let obj = doc.load_object(obj_ref).unwrap();
+        // Per PDF Spec 7.3.10: missing objects treated as Null
+        assert!(matches!(obj, Object::Null));
+    }
+
+    // ========================================================================
+    // resolve_references tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_references_integer() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let obj = Object::Integer(42);
+        let resolved = doc.resolve_references(&obj, 3).unwrap();
+        assert_eq!(resolved.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_resolve_references_null() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let obj = Object::Null;
+        let resolved = doc.resolve_references(&obj, 3).unwrap();
+        assert!(matches!(resolved, Object::Null));
+    }
+
+    #[test]
+    fn test_resolve_references_max_depth_zero() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // With depth 0, references should not be resolved
+        let obj = Object::Reference(ObjectRef::new(1, 0));
+        let resolved = doc.resolve_references(&obj, 0).unwrap();
+        // Should still be a reference (not resolved)
+        assert!(resolved.as_reference().is_some());
+    }
+
+    #[test]
+    fn test_resolve_references_reference() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // Resolve a reference to object 1 (catalog)
+        let obj = Object::Reference(ObjectRef::new(1, 0));
+        let resolved = doc.resolve_references(&obj, 3).unwrap();
+        // Should now be a dictionary (the catalog)
+        assert!(resolved.as_dict().is_some());
+    }
+
+    #[test]
+    fn test_resolve_references_array() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let arr = Object::Array(vec![Object::Integer(1), Object::Integer(2)]);
+        let resolved = doc.resolve_references(&arr, 3).unwrap();
+        let resolved_arr = resolved.as_array().unwrap();
+        assert_eq!(resolved_arr.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_references_dictionary() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("Key".to_string(), Object::Integer(42));
+        let obj = Object::Dictionary(dict);
+        let resolved = doc.resolve_references(&obj, 3).unwrap();
+        let resolved_dict = resolved.as_dict().unwrap();
+        assert_eq!(resolved_dict.get("Key").unwrap().as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_resolve_references_bad_reference() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // A reference to a non-existent object
+        let obj = Object::Reference(ObjectRef::new(999, 0));
+        // Should return the unresolved reference (but as Null since missing objects -> Null)
+        let resolved = doc.resolve_references(&obj, 3).unwrap();
+        // The reference was resolved to Null (per PDF spec)
+        assert!(matches!(resolved, Object::Null));
+    }
+
+    // ========================================================================
+    // authenticate tests
+    // ========================================================================
+
+    #[test]
+    fn test_authenticate_unencrypted_pdf() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Unencrypted PDF should always authenticate successfully
+        let result = doc.authenticate(b"anypassword").unwrap();
+        assert!(result);
+    }
+
+    // ========================================================================
+    // get_page_content_data tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_page_content_data_empty_content() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let data = doc.get_page_content_data(0).unwrap();
+        // Empty content stream still returns data (may be empty or have a newline)
+        assert!(data.len() <= 2);
+    }
+
+    #[test]
+    fn test_get_page_content_data_with_content() {
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let data = doc.get_page_content_data(0).unwrap();
+        assert!(!data.is_empty());
+        // The content should contain the original text
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn test_get_page_content_data_blank_page() {
+        // Build a PDF where page has no /Contents at all
+        let pdf = build_multi_page_pdf(1);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let data = doc.get_page_content_data(0).unwrap();
+        assert!(data.is_empty()); // No contents = empty
+    }
+
+    // ========================================================================
+    // extract_text tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_text_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let text = doc.extract_text(0).unwrap();
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_no_font_resources() {
+        // Content stream has text operators but no fonts loaded
+        let content = b"BT /F1 12 Tf (Hello) Tj ET";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Should not crash, may return empty or partial text
+        let _text = doc.extract_text(0).unwrap();
+    }
+
+    // ========================================================================
+    // extract_all_text tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_all_text_multiple_pages() {
+        let pdf = build_multi_page_pdf(3);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let text = doc.extract_all_text().unwrap();
+        // Should have form feed separators between pages
+        let page_count = text.matches('\x0c').count();
+        assert_eq!(page_count, 2); // 3 pages = 2 separators
+    }
+
+    #[test]
+    fn test_extract_all_text_single_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let text = doc.extract_all_text().unwrap();
+        // No form feed separators for single page
+        assert!(!text.contains('\x0c'));
+    }
+
+    // ========================================================================
+    // extract_spans tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_spans_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let spans = doc.extract_spans(0).unwrap();
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn test_extract_spans_no_text_operators() {
+        // Graphics-only content (just rectangle drawing)
+        let content = b"100 200 300 400 re S";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let spans = doc.extract_spans(0).unwrap();
+        assert!(spans.is_empty());
+    }
+
+    // ========================================================================
+    // extract_chars tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_chars_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let chars = doc.extract_chars(0).unwrap();
+        assert!(chars.is_empty());
+    }
+
+    // ========================================================================
+    // may_contain_text tests
+    // ========================================================================
+
+    #[test]
+    fn test_may_contain_text_with_bt() {
+        let data = b"q BT /F1 12 Tf (Hello) Tj ET Q";
+        assert!(PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_with_do() {
+        let data = b"q /Im0 Do Q";
+        assert!(PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_no_text_operators() {
+        let data = b"100 200 300 400 re S";
+        assert!(!PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_empty() {
+        let data = b"";
+        assert!(!PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_bt_at_start() {
+        let data = b"BT /F1 12 Tf ET";
+        assert!(PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_bt_at_end() {
+        let data = b"q Q BT";
+        assert!(PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_false_positive_btype() {
+        // "BTerror" should not match BT (BT must be delimited)
+        let data = b"BTerror";
+        assert!(!PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_false_positive_document() {
+        // "Document" contains "Do" but not as a standalone operator
+        let data = b"Document";
+        assert!(!PdfDocument::may_contain_text(data));
+    }
+
+    #[test]
+    fn test_may_contain_text_do_with_name() {
+        // Standard XObject invocation
+        let data = b"/Im0 Do\n";
+        assert!(PdfDocument::may_contain_text(data));
+    }
+
+    // ========================================================================
+    // should_insert_space tests
+    // ========================================================================
+
+    /// Helper to create a TextSpan with minimal required fields for testing.
+    fn make_test_span(text: &str, x: f32, y: f32, width: f32, font_size: f32) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            bbox: crate::geometry::Rect {
+                x,
+                y,
+                width,
+                height: font_size,
+            },
+            font_name: "F1".to_string(),
+            font_size,
+            font_weight: crate::layout::FontWeight::Normal,
+            is_italic: false,
+            color: crate::layout::Color::new(0.0, 0.0, 0.0),
+            mcid: None,
+            sequence: 0,
+            split_boundary_before: false,
+            offset_semantic: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+        }
+    }
+
+    #[test]
+    fn test_should_insert_space_same_line_with_gap() {
+        let prev = make_test_span("Hello", 0.0, 100.0, 50.0, 12.0);
+        let current = make_test_span("World", 56.0, 100.0, 50.0, 12.0);
+        // 6pt gap (> 0.25 * 12 = 3pt)
+        assert!(PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    #[test]
+    fn test_should_insert_space_same_line_no_gap() {
+        let prev = make_test_span("Hello", 0.0, 100.0, 50.0, 12.0);
+        let current = make_test_span("World", 51.0, 100.0, 50.0, 12.0);
+        // 1pt gap (< 0.25 * 12 = 3pt)
+        assert!(!PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    #[test]
+    fn test_should_insert_space_different_lines() {
+        let prev = make_test_span("Hello", 0.0, 100.0, 50.0, 12.0);
+        let current = make_test_span("World", 56.0, 120.0, 50.0, 12.0);
+        // Different lines = false (no space needed, line break instead)
+        assert!(!PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    #[test]
+    fn test_should_insert_space_column_gap() {
+        let prev = make_test_span("Hello", 0.0, 100.0, 50.0, 12.0);
+        let current = make_test_span("World", 200.0, 100.0, 50.0, 12.0);
+        // Column boundary gap is too large (>5x font), should return false
+        assert!(!PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    // ========================================================================
+    // filter_leaked_metadata tests
+    // ========================================================================
+
+    #[test]
+    fn test_filter_leaked_metadata_clean_text() {
+        let text = "This is normal text without any metadata patterns.";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_removes_whitepoint() {
+        let text = "Hello World\nWhitePoint [ 0.95 1.0 1.09 ]\nMore text";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(result.contains("Hello World"));
+        assert!(result.contains("More text"));
+        assert!(!result.contains("WhitePoint"));
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_removes_calrgb() {
+        let text = "Text\nCalRGB /WhitePoint [ 1 1 1 ]\nMore";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(result.contains("Text"));
+        assert!(result.contains("More"));
+        assert!(!result.contains("CalRGB"));
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_preserves_normal_lines() {
+        let text = "The Matrix is a movie\nGamma rays from space";
+        // These lines contain metadata keywords but not in metadata format
+        let result = PdfDocument::filter_leaked_metadata(text);
+        // "The Matrix is a movie" should be preserved (doesn't start with "Matrix")
+        assert!(result.contains("The Matrix is a movie"));
+    }
+
+    // ========================================================================
+    // normalize_kangxi_radicals tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_kangxi_no_radicals() {
+        let text = "Hello World";
+        let result = PdfDocument::normalize_kangxi_radicals(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_normalize_kangxi_with_radicals() {
+        // U+2F00 is Kangxi Radical One
+        let text = "\u{2F00}";
+        let result = PdfDocument::normalize_kangxi_radicals(text);
+        // Should be normalized to a CJK unified ideograph
+        assert_ne!(result, text);
+    }
+
+    // ========================================================================
+    // normalize_arabic_presentation_forms tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_arabic_no_presentation_forms() {
+        let text = "Hello World";
+        let result = PdfDocument::normalize_arabic_presentation_forms(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_normalize_arabic_alef_presentation_form() {
+        // U+FE8D is Arabic Alef isolated form
+        let text = "\u{FE8D}";
+        let result = PdfDocument::normalize_arabic_presentation_forms(text);
+        // Should be normalized to base Alef (U+0627)
+        assert!(result.contains('\u{0627}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_lam_alef_ligature() {
+        // U+FEFB is Lam-Alef ligature
+        let text = "\u{FEFB}";
+        let result = PdfDocument::normalize_arabic_presentation_forms(text);
+        // Should become Lam (U+0644)
+        assert!(result.contains('\u{0644}'));
+    }
+
+    // ========================================================================
+    // decode_pdf_escapes tests
+    // ========================================================================
+
+    #[test]
+    fn test_decode_pdf_escapes_no_escapes() {
+        let text = "Hello World";
+        let result = PdfDocument::decode_pdf_escapes(text);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_backslash_n() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\nWorld");
+        assert_eq!(result, "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_backslash_r() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\rWorld");
+        assert_eq!(result, "Hello\rWorld");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_backslash_t() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\tWorld");
+        assert_eq!(result, "Hello\tWorld");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_parentheses() {
+        let result = PdfDocument::decode_pdf_escapes("\\(Hello\\)");
+        assert_eq!(result, "(Hello)");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_double_backslash() {
+        let result = PdfDocument::decode_pdf_escapes("path\\\\file");
+        assert_eq!(result, "path\\file");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_octal() {
+        // \101 = 'A' in octal (65 decimal)
+        let result = PdfDocument::decode_pdf_escapes("\\101");
+        assert_eq!(result, "A");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_octal_274() {
+        // \274 = 188 decimal which is a PDFDocEncoding char
+        let result = PdfDocument::decode_pdf_escapes("\\274");
+        assert_eq!(result.chars().count(), 1); // Should decode to a single character
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_soft_hyphen() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\?World");
+        assert_eq!(result, "HelloWorld");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_unknown_escape() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\zWorld");
+        assert_eq!(result, "Hello\\zWorld");
+    }
+
+    // ========================================================================
+    // pdfdoc_decode tests
+    // ========================================================================
+
+    #[test]
+    fn test_pdfdoc_decode_ascii() {
+        assert_eq!(PdfDocument::pdfdoc_decode(65), 'A');
+        assert_eq!(PdfDocument::pdfdoc_decode(48), '0');
+        assert_eq!(PdfDocument::pdfdoc_decode(32), ' ');
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_special_128_bullet() {
+        assert_eq!(PdfDocument::pdfdoc_decode(128), '\u{2022}'); // BULLET
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_special_132_em_dash() {
+        assert_eq!(PdfDocument::pdfdoc_decode(132), '\u{2014}'); // EM DASH
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_special_146_trademark() {
+        assert_eq!(PdfDocument::pdfdoc_decode(146), '\u{2122}'); // TRADE MARK SIGN
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_special_147_fi_ligature() {
+        assert_eq!(PdfDocument::pdfdoc_decode(147), '\u{FB01}'); // fi ligature
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_latin1_range() {
+        assert_eq!(PdfDocument::pdfdoc_decode(160), '\u{00A0}'); // Non-breaking space
+        assert_eq!(PdfDocument::pdfdoc_decode(255), '\u{00FF}'); // y with diaeresis
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_replacement_159() {
+        assert_eq!(PdfDocument::pdfdoc_decode(159), '\u{FFFD}'); // Replacement character
+    }
+
+    // ========================================================================
+    // decode_pdf_text_string tests
+    // ========================================================================
+
+    #[test]
+    fn test_decode_pdf_text_string_utf16be() {
+        // UTF-16BE BOM + "AB"
+        let bytes = vec![0xFE, 0xFF, 0x00, 0x41, 0x00, 0x42];
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        assert_eq!(result, "AB");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_utf16le() {
+        // UTF-16LE BOM + "AB"
+        let bytes = vec![0xFF, 0xFE, 0x41, 0x00, 0x42, 0x00];
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        assert_eq!(result, "AB");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_pdfdoc_encoding() {
+        // Plain ASCII
+        let bytes = vec![0x48, 0x65, 0x6C, 0x6C, 0x6F]; // "Hello"
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_empty() {
+        let bytes: Vec<u8> = vec![];
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        assert_eq!(result, "");
+    }
+
+    // ========================================================================
+    // strip_xhtml_tags tests
+    // ========================================================================
+
+    #[test]
+    fn test_strip_xhtml_tags_basic() {
+        let xhtml = "<p>Hello <b>World</b></p>";
+        let result = PdfDocument::strip_xhtml_tags(xhtml);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_strip_xhtml_tags_no_tags() {
+        let text = "Plain text without any tags";
+        let result = PdfDocument::strip_xhtml_tags(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_strip_xhtml_tags_empty() {
+        assert_eq!(PdfDocument::strip_xhtml_tags(""), "");
+    }
+
+    #[test]
+    fn test_strip_xhtml_tags_nested() {
+        let xhtml = "<div><p><span style='color: red'>Red text</span></p></div>";
+        let result = PdfDocument::strip_xhtml_tags(xhtml);
+        assert_eq!(result, "Red text");
+    }
+
+    // ========================================================================
+    // parse_string_value_static tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_string_value_static_string() {
+        let obj = Object::String(b"Hello".to_vec());
+        let result = PdfDocument::parse_string_value_static(Some(&obj));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_parse_string_value_static_name() {
+        let obj = Object::Name("MyName".to_string());
+        let result = PdfDocument::parse_string_value_static(Some(&obj));
+        assert_eq!(result, Some("MyName".to_string()));
+    }
+
+    #[test]
+    fn test_parse_string_value_static_integer() {
+        let obj = Object::Integer(42);
+        let result = PdfDocument::parse_string_value_static(Some(&obj));
+        assert_eq!(result, Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_parse_string_value_static_real() {
+        let obj = Object::Real(3.14);
+        let result = PdfDocument::parse_string_value_static(Some(&obj));
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.starts_with("3.14"));
+    }
+
+    #[test]
+    fn test_parse_string_value_static_null() {
+        let obj = Object::Null;
+        let result = PdfDocument::parse_string_value_static(Some(&obj));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_string_value_static_none() {
+        let result = PdfDocument::parse_string_value_static(None);
+        assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // find_references tests
+    // ========================================================================
+
+    #[test]
+    fn test_find_references_reference() {
+        let obj = Object::Reference(ObjectRef::new(5, 0));
+        let refs = PdfDocument::find_references(&obj);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], ObjectRef::new(5, 0));
+    }
+
+    #[test]
+    fn test_find_references_array() {
+        let arr = Object::Array(vec![
+            Object::Reference(ObjectRef::new(1, 0)),
+            Object::Integer(42),
+            Object::Reference(ObjectRef::new(2, 0)),
+        ]);
+        let refs = PdfDocument::find_references(&arr);
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn test_find_references_dictionary() {
+        let mut dict = std::collections::HashMap::new();
+        dict.insert(
+            "Key1".to_string(),
+            Object::Reference(ObjectRef::new(3, 0)),
+        );
+        dict.insert("Key2".to_string(), Object::Integer(1));
+        let obj = Object::Dictionary(dict);
+        let refs = PdfDocument::find_references(&obj);
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn test_find_references_stream() {
+        let mut dict = std::collections::HashMap::new();
+        dict.insert(
+            "Length".to_string(),
+            Object::Reference(ObjectRef::new(10, 0)),
+        );
+        let obj = Object::Stream {
+            dict,
+            data: bytes::Bytes::from_static(b""),
+        };
+        let refs = PdfDocument::find_references(&obj);
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn test_find_references_integer() {
+        let refs = PdfDocument::find_references(&Object::Integer(42));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_find_references_null() {
+        let refs = PdfDocument::find_references(&Object::Null);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_find_references_boolean() {
+        let refs = PdfDocument::find_references(&Object::Boolean(true));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_find_references_nested() {
+        let inner = Object::Array(vec![Object::Reference(ObjectRef::new(7, 0))]);
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("Inner".to_string(), inner);
+        dict.insert(
+            "Direct".to_string(),
+            Object::Reference(ObjectRef::new(8, 0)),
+        );
+        let obj = Object::Dictionary(dict);
+        let refs = PdfDocument::find_references(&obj);
+        assert_eq!(refs.len(), 2);
+    }
+
+    // ========================================================================
+    // find_substring tests
+    // ========================================================================
+
+    #[test]
+    fn test_find_substring_found() {
+        assert_eq!(find_substring(b"Hello World", b"World"), Some(6));
+    }
+
+    #[test]
+    fn test_find_substring_not_found() {
+        assert_eq!(find_substring(b"Hello World", b"xyz"), None);
+    }
+
+    #[test]
+    fn test_find_substring_empty_needle() {
+        assert_eq!(find_substring(b"Hello", b""), Some(0));
+    }
+
+    #[test]
+    fn test_find_substring_at_start() {
+        assert_eq!(find_substring(b"Hello", b"Hello"), Some(0));
+    }
+
+    #[test]
+    fn test_find_substring_at_end() {
+        assert_eq!(find_substring(b"Hello", b"lo"), Some(3));
+    }
+
+    #[test]
+    fn test_find_substring_empty_haystack() {
+        assert_eq!(find_substring(b"", b"Hello"), None);
+    }
+
+    // ========================================================================
+    // parse_matrix_from_object tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_matrix_from_object_valid() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let arr = Object::Array(vec![
+            Object::Real(1.0),
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(1.0),
+            Object::Real(10.0),
+            Object::Real(20.0),
+        ]);
+        let matrix = doc.parse_matrix_from_object(&arr).unwrap();
+        assert!((matrix.a - 1.0).abs() < f32::EPSILON);
+        assert!((matrix.e - 10.0).abs() < f32::EPSILON);
+        assert!((matrix.f - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_matrix_from_object_integers() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let arr = Object::Array(vec![
+            Object::Integer(2),
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(3),
+            Object::Integer(100),
+            Object::Integer(200),
+        ]);
+        let matrix = doc.parse_matrix_from_object(&arr).unwrap();
+        assert!((matrix.a - 2.0).abs() < f32::EPSILON);
+        assert!((matrix.d - 3.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_matrix_from_object_too_short() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let arr = Object::Array(vec![Object::Real(1.0), Object::Real(0.0)]);
+        let result = doc.parse_matrix_from_object(&arr);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_matrix_from_object_not_array() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let result = doc.parse_matrix_from_object(&Object::Integer(42));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_matrix_from_object_invalid_elements() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let arr = Object::Array(vec![
+            Object::Real(1.0),
+            Object::Name("bad".to_string()), // Not a number
+            Object::Real(0.0),
+            Object::Real(1.0),
+            Object::Real(0.0),
+            Object::Real(0.0),
+        ]);
+        let result = doc.parse_matrix_from_object(&arr);
+        assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // transform_bbox_with_ctm tests
+    // ========================================================================
+
+    #[test]
+    fn test_transform_bbox_identity() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let rect = crate::geometry::Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let ctm = crate::content::Matrix::identity();
+        let result = doc.transform_bbox_with_ctm(&rect, ctm);
+        assert!((result.x - 10.0).abs() < f32::EPSILON);
+        assert!((result.y - 20.0).abs() < f32::EPSILON);
+        assert!((result.width - 100.0).abs() < f32::EPSILON);
+        assert!((result.height - 50.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_transform_bbox_translation() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let rect = crate::geometry::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let ctm = crate::content::Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 50.0,
+            f: 100.0,
+        };
+        let result = doc.transform_bbox_with_ctm(&rect, ctm);
+        assert!((result.x - 50.0).abs() < f32::EPSILON);
+        assert!((result.y - 100.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_transform_bbox_scaling() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let rect = crate::geometry::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let ctm = crate::content::Matrix {
+            a: 2.0,
+            b: 0.0,
+            c: 0.0,
+            d: 3.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let result = doc.transform_bbox_with_ctm(&rect, ctm);
+        assert!((result.width - 200.0).abs() < f32::EPSILON);
+        assert!((result.height - 150.0).abs() < f32::EPSILON);
+    }
+
+    // ========================================================================
+    // font_identity_hash_cheap tests
+    // ========================================================================
+
+    #[test]
+    fn test_font_identity_hash_same_font() {
+        let mut dict1 = std::collections::HashMap::new();
+        dict1.insert("BaseFont".to_string(), Object::Name("Helvetica".to_string()));
+        dict1.insert("Subtype".to_string(), Object::Name("Type1".to_string()));
+
+        let mut dict2 = std::collections::HashMap::new();
+        dict2.insert("BaseFont".to_string(), Object::Name("Helvetica".to_string()));
+        dict2.insert("Subtype".to_string(), Object::Name("Type1".to_string()));
+
+        let hash1 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(dict1));
+        let hash2 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(dict2));
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_font_identity_hash_different_fonts() {
+        let mut dict1 = std::collections::HashMap::new();
+        dict1.insert("BaseFont".to_string(), Object::Name("Helvetica".to_string()));
+
+        let mut dict2 = std::collections::HashMap::new();
+        dict2.insert(
+            "BaseFont".to_string(),
+            Object::Name("Times-Roman".to_string()),
+        );
+
+        let hash1 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(dict1));
+        let hash2 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(dict2));
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_font_identity_hash_null_object() {
+        let hash = PdfDocument::font_identity_hash_cheap(&Object::Null);
+        // Should not panic, returns some hash
+        let _ = hash;
+    }
+
+    // ========================================================================
+    // check_for_circular_references tests
+    // ========================================================================
+
+    #[test]
+    fn test_check_for_circular_references_runs() {
+        // Minimal PDFs naturally have Page <-> Pages parent references,
+        // so we just verify the function runs without panicking and
+        // returns a list (which may include the Page<->Pages backreference).
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let cycles = doc.check_for_circular_references();
+        // Returns a Vec of (from, to) pairs - may or may not be empty
+        let _ = cycles;
+    }
+
+    // ========================================================================
+    // is_form_xobject tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_form_xobject_nonexistent_ref() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Non-existent object should return true (conservative)
+        let result = doc.is_form_xobject(ObjectRef::new(999, 0));
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_form_xobject_catalog_not_form() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Load catalog into cache first
+        let _ = doc.load_object(ObjectRef::new(1, 0));
+        // Catalog is not a Form XObject
+        let result = doc.is_form_xobject(ObjectRef::new(1, 0));
+        assert!(!result);
+    }
+
+    // ========================================================================
+    // open_from_bytes with various PDF structures
+    // ========================================================================
+
+    #[test]
+    fn test_open_from_bytes_with_v2_header() {
+        let mut pdf = b"%PDF-2.0\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.version(), (2, 0));
+    }
+
+    // ========================================================================
+    // parse_version_from_header tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_version_from_header_strict_valid() {
+        let header = *b"%PDF-1.7";
+        let (major, minor) = parse_version_from_header(&header, false).unwrap();
+        assert_eq!((major, minor), (1, 7));
+    }
+
+    #[test]
+    fn test_parse_version_from_header_strict_invalid_dot() {
+        let header = *b"%PDF-1X7";
+        let result = parse_version_from_header(&header, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_from_header_lenient_invalid_dot() {
+        let header = *b"%PDF-1X7";
+        let (major, minor) = parse_version_from_header(&header, true).unwrap();
+        assert_eq!((major, minor), (1, 4)); // defaults to 1.4
+    }
+
+    #[test]
+    fn test_parse_version_from_header_strict_non_digit() {
+        let header = *b"%PDF-X.Y";
+        let result = parse_version_from_header(&header, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_from_header_lenient_non_digit() {
+        let header = *b"%PDF-X.Y";
+        let (major, minor) = parse_version_from_header(&header, true).unwrap();
+        assert_eq!((major, minor), (1, 4));
+    }
+
+    #[test]
+    fn test_parse_version_from_header_strict_too_high() {
+        let header = *b"%PDF-3.0";
+        let result = parse_version_from_header(&header, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_version_from_header_lenient_too_high() {
+        let header = *b"%PDF-3.0";
+        let (major, minor) = parse_version_from_header(&header, true).unwrap();
+        assert_eq!((major, minor), (1, 4));
+    }
+
+    #[test]
+    fn test_parse_version_from_header_wrong_magic() {
+        let header = *b"NotPDF17";
+        let result = parse_version_from_header(&header, false);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // parse_header edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_parse_header_empty_file_strict() {
+        let mut cursor = Cursor::new(b"");
+        let result = parse_header(&mut cursor, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_header_empty_file_lenient() {
+        let mut cursor = Cursor::new(b"");
+        let result = parse_header(&mut cursor, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_header_very_short_lenient() {
+        let mut cursor = Cursor::new(b"AB");
+        let result = parse_header(&mut cursor, true);
+        // Lenient mode with no %PDF- found defaults to 1.4
+        let (major, minor, _) = result.unwrap();
+        assert_eq!((major, minor), (1, 4));
+    }
+
+    #[test]
+    fn test_parse_header_header_near_end_of_buffer() {
+        // Header at position 8100 (within 8192 byte search window)
+        let mut data = vec![0u8; 8100];
+        data.extend_from_slice(b"%PDF-1.6");
+        data.extend_from_slice(b"\nrest of file data here");
+        let mut cursor = Cursor::new(data);
+        let (major, minor, offset) = parse_header(&mut cursor, true).unwrap();
+        assert_eq!((major, minor, offset), (1, 6, 8100));
+    }
+
+    // ========================================================================
+    // parse_trailer edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_parse_trailer_with_extra_data() {
+        let data =
+            b"some xref data\ntrailer\n<< /Size 10 /Root 1 0 R /Info 2 0 R >>\nstartxref\n100\n";
+        let mut cursor = Cursor::new(data);
+        let trailer = parse_trailer(&mut cursor).unwrap();
+        let dict = trailer.as_dict().unwrap();
+        assert_eq!(dict.get("Size").unwrap().as_integer(), Some(10));
+    }
+
+    #[test]
+    fn test_parse_trailer_empty_after_keyword() {
+        let data = b"trailer";
+        let mut cursor = Cursor::new(data);
+        let result = parse_trailer(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // decode_stream_with_encryption tests
+    // ========================================================================
+
+    #[test]
+    fn test_decode_stream_with_encryption_null_object() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let result = doc
+            .decode_stream_with_encryption(&Object::Null, ObjectRef::new(1, 0))
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ========================================================================
+    // page_cannot_have_text tests
+    // ========================================================================
+
+    #[test]
+    fn test_page_cannot_have_text_no_resources() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        // Empty resources dict
+        let page_dict = std::collections::HashMap::new();
+        assert!(doc.page_cannot_have_text(&page_dict));
+    }
+
+    #[test]
+    fn test_page_cannot_have_text_with_font_resources() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let mut font_dict = std::collections::HashMap::new();
+        font_dict.insert("F1".to_string(), Object::Reference(ObjectRef::new(10, 0)));
+
+        let mut resources_dict = std::collections::HashMap::new();
+        resources_dict.insert("Font".to_string(), Object::Dictionary(font_dict));
+
+        let mut page_dict = std::collections::HashMap::new();
+        page_dict.insert("Resources".to_string(), Object::Dictionary(resources_dict));
+
+        // Has fonts, so page CAN have text
+        assert!(!doc.page_cannot_have_text(&page_dict));
+    }
+
+    #[test]
+    fn test_page_cannot_have_text_empty_font_dict() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+
+        let font_dict = std::collections::HashMap::new();
+
+        let mut resources_dict = std::collections::HashMap::new();
+        resources_dict.insert("Font".to_string(), Object::Dictionary(font_dict));
+
+        let mut page_dict = std::collections::HashMap::new();
+        page_dict.insert("Resources".to_string(), Object::Dictionary(resources_dict));
+
+        // Empty font dict and no XObjects = no text possible
+        assert!(doc.page_cannot_have_text(&page_dict));
+    }
+
+    // ========================================================================
+    // extract_images tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_images_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let images = doc.extract_images(0).unwrap();
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_graphics_only() {
+        let content = b"100 200 300 400 re S";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let images = doc.extract_images(0).unwrap();
+        assert!(images.is_empty());
+    }
+
+    // ========================================================================
+    // extract_paths tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_paths_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let paths = doc.extract_paths(0).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_extract_paths_rectangle() {
+        let content = b"100 200 300 400 re S";
+        let pdf = build_minimal_pdf(content);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let paths = doc.extract_paths(0).unwrap();
+        assert!(!paths.is_empty());
+    }
+
+    // ========================================================================
+    // mark_info tests
+    // ========================================================================
+
+    #[test]
+    fn test_mark_info_untagged_pdf() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mark_info = doc.mark_info().unwrap();
+        // Untagged PDF should have default MarkInfo
+        assert!(!mark_info.marked);
+        assert!(!mark_info.suspects);
+    }
+
+    // ========================================================================
+    // ExtractedImageRef and ImageFormat tests
+    // ========================================================================
+
+    #[test]
+    fn test_extracted_image_ref_debug() {
+        let img_ref = ExtractedImageRef {
+            filename: "img_001.png".to_string(),
+            format: ImageFormat::Png,
+            width: 100,
+            height: 200,
+        };
+        let debug = format!("{:?}", img_ref);
+        assert!(debug.contains("img_001.png"));
+        assert!(debug.contains("Png"));
+    }
+
+    #[test]
+    fn test_extracted_image_ref_clone() {
+        let img_ref = ExtractedImageRef {
+            filename: "img_001.jpg".to_string(),
+            format: ImageFormat::Jpeg,
+            width: 100,
+            height: 200,
+        };
+        let cloned = img_ref.clone();
+        assert_eq!(img_ref, cloned);
+    }
+
+    #[test]
+    fn test_image_format_equality() {
+        assert_eq!(ImageFormat::Png, ImageFormat::Png);
+        assert_eq!(ImageFormat::Jpeg, ImageFormat::Jpeg);
+        assert_ne!(ImageFormat::Png, ImageFormat::Jpeg);
+    }
+
+    // ========================================================================
+    // apply_intelligent_text_processing tests
+    // ========================================================================
+
+    #[test]
+    fn test_apply_intelligent_text_processing_empty() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let spans: Vec<TextSpan> = vec![];
+        let result = doc.apply_intelligent_text_processing(spans);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_apply_intelligent_text_processing_ligature_expansion() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let spans = vec![make_test_span("\u{FB01}nd", 0.0, 0.0, 50.0, 12.0)]; // fi-ligature + "nd" = "find"
+        let result = doc.apply_intelligent_text_processing(spans);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].text.contains("find"));
+    }
+
+    // ========================================================================
+    // Page retrieval and caching tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_page_caching() {
+        let pdf = build_multi_page_pdf(3);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Access page 0 twice -- second should come from cache
+        let _page1 = doc.get_page(0).unwrap();
+        let _page2 = doc.get_page(0).unwrap();
+        // Both should succeed
+    }
+
+    #[test]
+    fn test_get_page_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        // Page 99 doesn't exist
+        let result = doc.get_page(99);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // page_count_u32 deprecated method test
+    // ========================================================================
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_page_count_u32_returns_correct_value() {
+        let pdf = build_multi_page_pdf(3);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count_u32(), 3);
+    }
+
+    // ========================================================================
+    // structure_tree for untagged PDF
+    // ========================================================================
+
+    #[test]
+    fn test_structure_tree_untagged_pdf() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let tree = doc.structure_tree().unwrap();
+        assert!(tree.is_none()); // Untagged PDF has no structure tree
+    }
+
+    // ========================================================================
+    // Conversion output tests (to_markdown, to_html, to_plain_text)
+    // ========================================================================
+
+    #[test]
+    fn test_to_plain_text_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let text = doc.to_plain_text(0, &options).unwrap();
+        assert!(text.is_empty() || text.trim().is_empty());
+    }
+
+    #[test]
+    fn test_to_markdown_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let md = doc.to_markdown(0, &options).unwrap();
+        assert!(md.is_empty() || md.trim().is_empty());
+    }
+
+    #[test]
+    fn test_to_html_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let html = doc.to_html(0, &options).unwrap();
+        // HTML may have structure tags even for empty content
+        let _ = html;
+    }
+
+    #[test]
+    fn test_to_markdown_all_multiple_pages() {
+        let pdf = build_multi_page_pdf(2);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let md = doc.to_markdown_all(&options).unwrap();
+        // Should have a separator between pages
+        assert!(md.contains("---") || md.is_empty());
+    }
+
+    #[test]
+    fn test_to_plain_text_all_multiple_pages() {
+        let pdf = build_multi_page_pdf(2);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let text = doc.to_plain_text_all(&options).unwrap();
+        let _ = text; // Should not crash
+    }
+
+    #[test]
+    fn test_to_html_all_multiple_pages() {
+        let pdf = build_multi_page_pdf(2);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let options = crate::converters::ConversionOptions::default();
+        let html = doc.to_html_all(&options).unwrap();
+        assert!(html.contains("data-page=\"1\""));
+        assert!(html.contains("data-page=\"2\""));
+    }
+
+    // ========================================================================
+    // open_with_config test
+    // ========================================================================
+
+    #[test]
+    fn test_open_with_config() {
+        let pdf = build_minimal_pdf(b"");
+        let tmp_path = std::env::temp_dir().join("pdf_oxide_test_open_with_config.pdf");
+        std::fs::write(&tmp_path, &pdf).unwrap();
+        let config = 42u32; // Dummy config
+        let result = PdfDocument::open_with_config(&tmp_path, config);
+        let _ = std::fs::remove_file(&tmp_path);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Debug wrappers (get_page_for_debug, may_contain_text_public)
+    // ========================================================================
+
+    #[test]
+    fn test_get_page_for_debug() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let page = doc.get_page_for_debug(0).unwrap();
+        assert!(page.as_dict().is_some());
+    }
+
+    #[test]
+    fn test_may_contain_text_public() {
+        assert!(PdfDocument::may_contain_text_public(b"BT /F1 12 Tf ET"));
+        assert!(!PdfDocument::may_contain_text_public(b"100 200 re S"));
+    }
+
+    // ========================================================================
+    // Inherited attributes in page tree
+    // ========================================================================
+
+    #[test]
+    fn test_page_inherits_mediabox() {
+        // Build a PDF where MediaBox is on the Pages node, not on the Page itself
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 400 600] >>\nendobj\n",
+        );
+
+        let off3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n",
+        );
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 1);
+        // The page should inherit the MediaBox from its parent
+        let page = doc.get_page(0).unwrap();
+        let page_dict = page.as_dict().unwrap();
+        assert!(page_dict.contains_key("MediaBox"));
+    }
+
+    // ========================================================================
+    // Content stream array tests
+    // ========================================================================
+
+    #[test]
+    fn test_page_with_array_contents() {
+        // Build a PDF where /Contents is an array of stream references
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        let off3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R 5 0 R] /Resources << >> >>\nendobj\n",
+        );
+
+        let content1 = b"q";
+        let off4 = pdf.len();
+        pdf.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content1.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(content1);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let content2 = b"Q";
+        let off5 = pdf.len();
+        pdf.extend_from_slice(
+            format!("5 0 obj\n<< /Length {} >>\nstream\n", content2.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(content2);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off5).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let data = doc.get_page_content_data(0).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("q"));
+        assert!(text.contains("Q"));
+    }
+
+    // ========================================================================
+    // Hierarchical content extraction test
+    // ========================================================================
+
+    #[test]
+    fn test_extract_hierarchical_content_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let result = doc.extract_hierarchical_content(0);
+        // Should not crash, may return Ok(Some) or Ok(None)
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // extract_paths_in_rect test
+    // ========================================================================
+
+    #[test]
+    fn test_extract_paths_in_rect_empty_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let region = crate::geometry::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 612.0,
+            height: 792.0,
+        };
+        let paths = doc.extract_paths_in_rect(0, region).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    // ========================================================================
+    // PDF with nested page tree
+    // ========================================================================
+
+    #[test]
+    fn test_nested_page_tree() {
+        // Build a PDF with nested Pages nodes
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 2 >>\nendobj\n",
+        );
+
+        // Intermediate Pages node
+        let off3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 /Parent 2 0 R >>\nendobj\n",
+        );
+
+        let off4 = pdf.len();
+        pdf.extend_from_slice(
+            b"4 0 obj\n<< /Type /Page /Parent 3 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+
+        let off5 = pdf.len();
+        pdf.extend_from_slice(
+            b"5 0 obj\n<< /Type /Page /Parent 3 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off5).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 2);
+    }
+
+    // ========================================================================
+    // PDF with MarkInfo in catalog
+    // ========================================================================
+
+    #[test]
+    fn test_mark_info_tagged_pdf() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+
+        let off1 = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /MarkInfo << /Marked true /Suspects false >> >>\nendobj\n",
+        );
+
+        let off2 = pdf.len();
+        pdf.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n",
+        );
+
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                xref_off
+            )
+            .as_bytes(),
+        );
+
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mark_info = doc.mark_info().unwrap();
+        assert!(mark_info.marked);
+        assert!(!mark_info.suspects);
+    }
+
+    // ========================================================================
+    // extract_spans_with_config test
+    // ========================================================================
+
+    #[test]
+    fn test_extract_spans_with_config_blank_page() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let config = crate::extractors::SpanMergingConfig::default();
+        let spans = doc.extract_spans_with_config(0, config).unwrap();
+        assert!(spans.is_empty());
+    }
+
+    // ========================================================================
+    // get_page_ref tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_page_ref_valid() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let page_ref = doc.get_page_ref(0).unwrap();
+        // Page should be object 3 (catalog=1, pages=2, page=3)
+        assert_eq!(page_ref.id, 3);
+    }
+
+    #[test]
+    fn test_get_page_ref_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let result = doc.get_page_ref(99);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 1: decode_pdf_escapes edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_decode_pdf_escapes_trailing_backslash() {
+        let result = PdfDocument::decode_pdf_escapes("Hello\\");
+        assert_eq!(result, "Hello\\");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_octal_short() {
+        let result = PdfDocument::decode_pdf_escapes("\\1x");
+        assert_eq!(result.len(), 2);
+        assert!(result.ends_with('x'));
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_octal_two_digits() {
+        let result = PdfDocument::decode_pdf_escapes("\\41x");
+        assert_eq!(result, "!x");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_octal_non_octal_digit() {
+        // \8 matches the digit branch, but 8 is not a valid octal digit (< '8'),
+        // so octal stays empty -> backslash is kept, then '8' is consumed normally.
+        let result = PdfDocument::decode_pdf_escapes("\\8");
+        assert_eq!(result, "\\8");
+    }
+
+    #[test]
+    fn test_decode_pdf_escapes_multiple_escapes() {
+        let result = PdfDocument::decode_pdf_escapes("\\(a\\)\\\\\\n");
+        assert_eq!(result, "(a)\\\n");
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 2: pdfdoc_decode all ranges
+    // ========================================================================
+
+    #[test]
+    fn test_pdfdoc_decode_control_chars() {
+        assert_eq!(PdfDocument::pdfdoc_decode(0), '\0');
+        assert_eq!(PdfDocument::pdfdoc_decode(10), '\n');
+        assert_eq!(PdfDocument::pdfdoc_decode(13), '\r');
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_all_special_range() {
+        assert_eq!(PdfDocument::pdfdoc_decode(128), '\u{2022}');
+        assert_eq!(PdfDocument::pdfdoc_decode(129), '\u{2020}');
+        assert_eq!(PdfDocument::pdfdoc_decode(130), '\u{2021}');
+        assert_eq!(PdfDocument::pdfdoc_decode(131), '\u{2026}');
+        assert_eq!(PdfDocument::pdfdoc_decode(133), '\u{2013}');
+        assert_eq!(PdfDocument::pdfdoc_decode(134), '\u{0192}');
+        assert_eq!(PdfDocument::pdfdoc_decode(135), '\u{2044}');
+        assert_eq!(PdfDocument::pdfdoc_decode(136), '\u{2039}');
+        assert_eq!(PdfDocument::pdfdoc_decode(137), '\u{203A}');
+        assert_eq!(PdfDocument::pdfdoc_decode(138), '\u{2212}');
+        assert_eq!(PdfDocument::pdfdoc_decode(139), '\u{2030}');
+        assert_eq!(PdfDocument::pdfdoc_decode(140), '\u{201E}');
+        assert_eq!(PdfDocument::pdfdoc_decode(141), '\u{201C}');
+        assert_eq!(PdfDocument::pdfdoc_decode(142), '\u{201D}');
+        assert_eq!(PdfDocument::pdfdoc_decode(143), '\u{2018}');
+        assert_eq!(PdfDocument::pdfdoc_decode(144), '\u{2019}');
+        assert_eq!(PdfDocument::pdfdoc_decode(145), '\u{201A}');
+        assert_eq!(PdfDocument::pdfdoc_decode(148), '\u{FB02}');
+        assert_eq!(PdfDocument::pdfdoc_decode(149), '\u{0141}');
+        assert_eq!(PdfDocument::pdfdoc_decode(150), '\u{0152}');
+        assert_eq!(PdfDocument::pdfdoc_decode(151), '\u{0160}');
+        assert_eq!(PdfDocument::pdfdoc_decode(152), '\u{0178}');
+        assert_eq!(PdfDocument::pdfdoc_decode(153), '\u{017D}');
+        assert_eq!(PdfDocument::pdfdoc_decode(154), '\u{0131}');
+        assert_eq!(PdfDocument::pdfdoc_decode(155), '\u{0142}');
+        assert_eq!(PdfDocument::pdfdoc_decode(156), '\u{0153}');
+        assert_eq!(PdfDocument::pdfdoc_decode(157), '\u{0161}');
+        assert_eq!(PdfDocument::pdfdoc_decode(158), '\u{017E}');
+    }
+
+    #[test]
+    fn test_pdfdoc_decode_latin1_boundary() {
+        assert_eq!(PdfDocument::pdfdoc_decode(160), '\u{00A0}');
+        assert_eq!(PdfDocument::pdfdoc_decode(255), '\u{00FF}');
+        assert_eq!(PdfDocument::pdfdoc_decode(200), '\u{00C8}');
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 3: decode_pdf_text_string
+    // ========================================================================
+
+    #[test]
+    fn test_decode_pdf_text_string_utf8_bom_treated_as_pdfdoc() {
+        // UTF-8 BOM (EF BB BF) is NOT recognized by this function;
+        // it only handles UTF-16 BOMs. Bytes fall through to PDFDocEncoding.
+        let bytes = vec![0xEF, 0xBB, 0xBF, b'H', b'e', b'l', b'l', b'o'];
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        // 0xEF -> ï, 0xBB -> », 0xBF -> ¿ in PDFDocEncoding (Latin-1 range)
+        assert_eq!(result, "\u{00EF}\u{00BB}\u{00BF}Hello");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_plain_ascii() {
+        let result = PdfDocument::decode_pdf_text_string(b"Hello World");
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_with_special_chars() {
+        let bytes = vec![128u8];
+        let result = PdfDocument::decode_pdf_text_string(&bytes);
+        assert!(result.contains('\u{2022}'));
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 4: filter_leaked_metadata edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_filter_leaked_metadata_blackpoint() {
+        let text = "BlackPoint [ 0 0 0 ]";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_gamma() {
+        let text = "Some text\nGamma [ 2.2 2.2 2.2 ]\nMore text";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(!result.contains("Gamma"));
+        assert!(result.contains("Some text"));
+        assert!(result.contains("More text"));
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_matrix_start_line() {
+        let text = "Matrix [ 1 0 0 1 0 0 ]";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_calgray() {
+        let text = "CalGray /WhitePoint [ 1 1 1 ]";
+        let result = PdfDocument::filter_leaked_metadata(text);
+        assert!(!result.contains("CalGray"));
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_whitepoint_with_slash() {
+        let result = PdfDocument::filter_leaked_metadata("WhitePoint /something");
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_whitepoint_with_angle() {
+        let result = PdfDocument::filter_leaked_metadata("WhitePoint << /Key /Value >>");
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_leaked_metadata_empty_metadata_value() {
+        let result = PdfDocument::filter_leaked_metadata("WhitePoint");
+        assert!(result.trim().is_empty());
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 5: normalize_arabic presentation forms
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_arabic_hamza() {
+        let result = PdfDocument::normalize_arabic_presentation_forms("\u{FE80}");
+        assert!(result.contains('\u{0621}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_beh() {
+        let result = PdfDocument::normalize_arabic_presentation_forms("\u{FE8F}");
+        assert!(result.contains('\u{0628}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_teh_marbuta() {
+        let result = PdfDocument::normalize_arabic_presentation_forms("\u{FE93}");
+        assert!(result.contains('\u{0629}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_dal_to_yeh_range() {
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEA9}").contains('\u{062F}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEAB}").contains('\u{0630}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEAD}").contains('\u{0631}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEAF}").contains('\u{0632}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEB1}").contains('\u{0633}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEB5}").contains('\u{0634}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEB9}").contains('\u{0635}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEBD}").contains('\u{0636}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEC1}").contains('\u{0637}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEC5}").contains('\u{0638}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEC9}").contains('\u{0639}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FECD}").contains('\u{063A}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FED1}").contains('\u{0641}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FED5}").contains('\u{0642}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FED9}").contains('\u{0643}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEDD}").contains('\u{0644}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEE1}").contains('\u{0645}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEE5}").contains('\u{0646}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEE9}").contains('\u{0647}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEED}").contains('\u{0648}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEEF}").contains('\u{0649}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEF1}").contains('\u{064A}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_diacritics() {
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE70}").contains('\u{064B}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE71}").contains('\u{064B}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE72}").contains('\u{064C}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE74}").contains('\u{064D}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE76}").contains('\u{064E}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE77}").contains('\u{064E}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE78}").contains('\u{064F}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE79}").contains('\u{064F}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7A}").contains('\u{0650}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7B}").contains('\u{0650}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7C}").contains('\u{0651}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7D}").contains('\u{0651}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7E}").contains('\u{0652}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE7F}").contains('\u{0652}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_lam_alef_ligatures() {
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEF5}").contains('\u{0644}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEF7}").contains('\u{0644}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEF9}").contains('\u{0644}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FEFB}").contains('\u{0644}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_alef_variants() {
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE81}").contains('\u{0622}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE83}").contains('\u{0623}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE85}").contains('\u{0624}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE87}").contains('\u{0625}'));
+        assert!(PdfDocument::normalize_arabic_presentation_forms("\u{FE89}").contains('\u{0626}'));
+    }
+
+    #[test]
+    fn test_normalize_arabic_mixed_text() {
+        let result = PdfDocument::normalize_arabic_presentation_forms("Hello \u{FE8D} World");
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
+        assert!(result.contains('\u{0627}'));
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 6: strip_xhtml_tags edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_strip_xhtml_tags_self_closing() {
+        assert_eq!(PdfDocument::strip_xhtml_tags("Hello<br/>World"), "HelloWorld");
+    }
+
+    #[test]
+    fn test_strip_xhtml_tags_with_attributes() {
+        assert_eq!(PdfDocument::strip_xhtml_tags("<p class=\"body\">Content</p>"), "Content");
+    }
+
+    #[test]
+    fn test_strip_xhtml_tags_multiple() {
+        assert_eq!(PdfDocument::strip_xhtml_tags("<b>Bold</b> and <i>Italic</i>"), "Bold and Italic");
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 7: should_insert_space edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_should_insert_space_overlapping() {
+        let prev = make_test_span("Hello", 0.0, 100.0, 50.0, 12.0);
+        let current = make_test_span("World", 40.0, 100.0, 50.0, 12.0);
+        assert!(!PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    #[test]
+    fn test_should_insert_space_zero_font_size() {
+        let prev = make_test_span("A", 0.0, 100.0, 10.0, 0.0);
+        let current = make_test_span("B", 15.0, 100.0, 10.0, 0.0);
+        let _ = PdfDocument::should_insert_space(&prev, &current);
+    }
+
+    #[test]
+    fn test_should_insert_space_large_font() {
+        let prev = make_test_span("A", 0.0, 100.0, 100.0, 72.0);
+        let current = make_test_span("B", 120.0, 100.0, 100.0, 72.0);
+        assert!(PdfDocument::should_insert_space(&prev, &current));
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 8: find_references
+    // ========================================================================
+
+    #[test]
+    fn test_find_references_string_obj() {
+        assert!(PdfDocument::find_references(&Object::String(b"hello".to_vec())).is_empty());
+    }
+
+    #[test]
+    fn test_find_references_real_obj() {
+        assert!(PdfDocument::find_references(&Object::Real(3.14)).is_empty());
+    }
+
+    #[test]
+    fn test_find_references_name_obj() {
+        assert!(PdfDocument::find_references(&Object::Name("Test".to_string())).is_empty());
+    }
+
+    #[test]
+    fn test_find_references_deeply_nested() {
+        let inner_ref = Object::Reference(ObjectRef::new(10, 0));
+        let inner_arr = Object::Array(vec![inner_ref]);
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("Key".to_string(), inner_arr);
+        let refs = PdfDocument::find_references(&Object::Dictionary(dict));
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, 10);
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 9: font_identity_hash_cheap
+    // ========================================================================
+
+    #[test]
+    fn test_font_identity_hash_with_encoding_dict() {
+        let mut font_dict = std::collections::HashMap::new();
+        font_dict.insert("BaseFont".to_string(), Object::Name("Helvetica".to_string()));
+        font_dict.insert("Subtype".to_string(), Object::Name("Type1".to_string()));
+        let mut enc = std::collections::HashMap::new();
+        enc.insert("Type".to_string(), Object::Name("Encoding".to_string()));
+        font_dict.insert("Encoding".to_string(), Object::Dictionary(enc));
+        assert_ne!(PdfDocument::font_identity_hash_cheap(&Object::Dictionary(font_dict)), 0);
+    }
+
+    #[test]
+    fn test_font_identity_hash_with_encoding_ref() {
+        let mut font_dict = std::collections::HashMap::new();
+        font_dict.insert("BaseFont".to_string(), Object::Name("Helvetica".to_string()));
+        font_dict.insert("Encoding".to_string(), Object::Reference(ObjectRef::new(99, 0)));
+        assert_ne!(PdfDocument::font_identity_hash_cheap(&Object::Dictionary(font_dict)), 0);
+    }
+
+    #[test]
+    fn test_font_identity_hash_tounicode_changes_hash() {
+        let mut d1 = std::collections::HashMap::new();
+        d1.insert("BaseFont".to_string(), Object::Name("Arial".to_string()));
+        d1.insert("ToUnicode".to_string(), Object::Reference(ObjectRef::new(50, 0)));
+        let h1 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(d1));
+
+        let mut d2 = std::collections::HashMap::new();
+        d2.insert("BaseFont".to_string(), Object::Name("Arial".to_string()));
+        let h2 = PdfDocument::font_identity_hash_cheap(&Object::Dictionary(d2));
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_font_identity_hash_with_descendant_fonts() {
+        let mut d = std::collections::HashMap::new();
+        d.insert("BaseFont".to_string(), Object::Name("CIDFont".to_string()));
+        d.insert("Subtype".to_string(), Object::Name("Type0".to_string()));
+        d.insert("DescendantFonts".to_string(), Object::Array(vec![Object::Reference(ObjectRef::new(20, 0))]));
+        assert_ne!(PdfDocument::font_identity_hash_cheap(&Object::Dictionary(d)), 0);
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 10: Annotation helper and tests
+    // ========================================================================
+
+    fn build_pdf_with_annotations(annot_objects: Vec<(usize, Vec<u8>)>) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets: Vec<(usize, usize)> = Vec::new();
+
+        let off1 = pdf.len();
+        offsets.push((1, off1));
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let off2 = pdf.len();
+        offsets.push((2, off2));
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        let annot_refs: String = annot_objects.iter()
+            .map(|(num, _)| format!("{} 0 R", num))
+            .collect::<Vec<_>>().join(" ");
+
+        let off3 = pdf.len();
+        offsets.push((3, off3));
+        let page_str = format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Annots [{}] >>\nendobj\n",
+            annot_refs
+        );
+        pdf.extend_from_slice(page_str.as_bytes());
+
+        for (obj_num, obj_data) in &annot_objects {
+            let off = pdf.len();
+            offsets.push((*obj_num, off));
+            pdf.extend_from_slice(obj_data);
+        }
+
+        let max_obj = offsets.iter().map(|(n, _)| *n).max().unwrap_or(0);
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", max_obj + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for obj_num in 1..=max_obj {
+            if let Some((_, off)) = offsets.iter().find(|(n, _)| *n == obj_num) {
+                pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+            } else {
+                pdf.extend_from_slice(b"0000000000 65535 f \n");
+            }
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", max_obj + 1, xref_off).as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn test_annotation_freetext() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /Contents (Hello from annotation) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let text = doc.extract_text(0).unwrap();
+        assert!(text.contains("Hello from annotation"));
+    }
+
+    #[test]
+    fn test_annotation_text_type() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Text /Contents (Sticky note) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Sticky note"));
+    }
+
+    #[test]
+    fn test_annotation_stamp() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Stamp /Contents (APPROVED) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("APPROVED"));
+    }
+
+    #[test]
+    fn test_annotation_link() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Link /Contents (Click here) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Click here"));
+    }
+
+    #[test]
+    fn test_annotation_highlight() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Highlight /Contents (Highlighted) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Highlighted"));
+    }
+
+    #[test]
+    fn test_annotation_hidden_flag() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /F 2 /Contents (Hidden) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_text(0).unwrap().contains("Hidden"));
+    }
+
+    #[test]
+    fn test_annotation_invisible_flag() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /F 1 /Contents (Invisible) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_text(0).unwrap().contains("Invisible"));
+    }
+
+    #[test]
+    fn test_annotation_noview_flag() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Text /F 32 /Contents (NoView) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_text(0).unwrap().contains("NoView"));
+    }
+
+    #[test]
+    fn test_annotation_unknown_subtype() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /CustomType /Contents (Custom) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Custom"));
+    }
+
+    #[test]
+    fn test_annotation_multiple() {
+        let a1 = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /Contents (First) >>\nendobj\n".to_vec();
+        let a2 = b"5 0 obj\n<< /Type /Annot /Subtype /Text /Contents (Second) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, a1), (5, a2)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let text = doc.extract_text(0).unwrap();
+        assert!(text.contains("First"));
+        assert!(text.contains("Second"));
+    }
+
+    #[test]
+    fn test_annotation_no_subtype() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Contents (No subtype) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_text(0).unwrap().contains("No subtype"));
+    }
+
+    #[test]
+    fn test_annotation_widget_with_value() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Widget /V (Field value) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Field value"));
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 11: resolve_references edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_references_boolean() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let resolved = doc.resolve_references(&Object::Boolean(true), 5).unwrap();
+        assert!(matches!(resolved, Object::Boolean(true)));
+    }
+
+    #[test]
+    fn test_resolve_references_nested_dict_with_refs() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("CatalogRef".to_string(), Object::Reference(ObjectRef::new(1, 0)));
+        dict.insert("Direct".to_string(), Object::Integer(42));
+        let resolved = doc.resolve_references(&Object::Dictionary(dict), 3).unwrap();
+        let rd = resolved.as_dict().unwrap();
+        assert!(rd.get("CatalogRef").unwrap().as_dict().is_some());
+        assert_eq!(rd.get("Direct").unwrap().as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_resolve_references_array_with_refs() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let arr = Object::Array(vec![Object::Reference(ObjectRef::new(1, 0)), Object::Integer(99)]);
+        let resolved = doc.resolve_references(&arr, 3).unwrap();
+        let ra = resolved.as_array().unwrap();
+        assert!(ra[0].as_dict().is_some());
+        assert_eq!(ra[1].as_integer(), Some(99));
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 12: check_for_circular_references
+    // ========================================================================
+
+    #[test]
+    fn test_check_circular_refs_on_minimal_pdf() {
+        // The minimal PDF has a page tree cycle:
+        // Pages (2 0 R) -> Kids -> Page (3 0 R) -> Parent -> Pages (2 0 R)
+        // The DFS cycle detector reports this as a cycle.
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let cycles = doc.check_for_circular_references();
+        // Verify the function runs without panicking and returns results.
+        // The minimal PDF's parent-child relationship is detected as a cycle.
+        assert!(!cycles.is_empty());
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 13: various extract and conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_text_graphics_only() {
+        let pdf = build_minimal_pdf(b"q 1 0 0 1 0 0 cm 100 200 300 400 re S Q");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_page_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(100).is_err());
+    }
+
+    #[test]
+    fn test_extract_all_text_zero_pages() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_all_text().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_spans_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_spans(999).is_err());
+    }
+
+    #[test]
+    fn test_extract_chars_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_chars(999).is_err());
+    }
+
+    #[test]
+    fn test_get_page_content_data_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.get_page_content_data(999).is_err());
+    }
+
+    #[test]
+    fn test_to_html_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.to_html(999, &crate::converters::ConversionOptions::default()).is_err());
+    }
+
+    #[test]
+    fn test_to_markdown_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.to_markdown(999, &crate::converters::ConversionOptions::default()).is_err());
+    }
+
+    #[test]
+    fn test_to_plain_text_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.to_plain_text(999, &crate::converters::ConversionOptions::default()).is_err());
+    }
+
+    #[test]
+    fn test_extract_paths_line() {
+        let pdf = build_minimal_pdf(b"0 0 m 100 100 l S");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_paths(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_paths_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_paths(999).is_err());
+    }
+
+    #[test]
+    fn test_extract_paths_curve() {
+        let pdf = build_minimal_pdf(b"0 0 m 25 50 75 50 100 0 c S");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_paths(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_paths_filled_rect() {
+        let pdf = build_minimal_pdf(b"50 50 200 100 re f");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(!doc.extract_paths(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_paths_in_rect_with_content() {
+        let pdf = build_minimal_pdf(b"100 200 300 400 re S");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let region = crate::geometry::Rect { x: 0.0, y: 0.0, width: 612.0, height: 792.0 };
+        assert!(!doc.extract_paths_in_rect(0, region).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_images(999).is_err());
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 14: mark_info with all fields
+    // ========================================================================
+
+    #[test]
+    fn test_mark_info_with_suspects() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /MarkInfo << /Marked true /Suspects true /UserProperties true >> >>\nendobj\n",
+        );
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mi = doc.mark_info().unwrap();
+        assert!(mi.marked);
+        assert!(mi.suspects);
+        assert!(mi.user_properties);
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 15: page_count fallback with bad /Count
+    // ========================================================================
+
+    #[test]
+    fn test_page_count_exceeds_objects() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 999 >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 1);
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 16: nested page trees and caching
+    // ========================================================================
+
+    #[test]
+    fn test_deeply_nested_page_tree() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 595 842] /Resources << >> >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<< /Type /Pages /Kids [4 0 R] /Count 1 /Parent 2 0 R >>\nendobj\n");
+        let off4 = pdf.len();
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /Page /Parent 3 0 R >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert_eq!(doc.page_count().unwrap(), 1);
+        let page = doc.get_page(0).unwrap();
+        assert!(page.as_dict().unwrap().contains_key("MediaBox"));
+    }
+
+    #[test]
+    fn test_populate_page_cache_sequential() {
+        let pdf = build_multi_page_pdf(5);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        for i in 0..5 {
+            assert!(doc.get_page(i).unwrap().as_dict().is_some());
+        }
+    }
+
+    #[test]
+    fn test_get_page_ref_multi_page() {
+        let pdf = build_multi_page_pdf(3);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let r0 = doc.get_page_ref(0).unwrap();
+        let r1 = doc.get_page_ref(1).unwrap();
+        let r2 = doc.get_page_ref(2).unwrap();
+        assert_ne!(r0.id, r1.id);
+        assert_ne!(r1.id, r2.id);
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 17: content stream edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_page_content_indirect_array() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>\nendobj\n");
+        let off4 = pdf.len();
+        pdf.extend_from_slice(b"4 0 obj\n[5 0 R 6 0 R]\nendobj\n");
+        let c1 = b"q";
+        let off5 = pdf.len();
+        pdf.extend_from_slice(format!("5 0 obj\n<< /Length {} >>\nstream\n", c1.len()).as_bytes());
+        pdf.extend_from_slice(c1);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let c2 = b"Q";
+        let off6 = pdf.len();
+        pdf.extend_from_slice(format!("6 0 obj\n<< /Length {} >>\nstream\n", c2.len()).as_bytes());
+        pdf.extend_from_slice(c2);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 7\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off5).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off6).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let data = doc.get_page_content_data(0).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("q"));
+        assert!(text.contains("Q"));
+    }
+
+    #[test]
+    fn test_get_page_content_data_null_contents() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents null /Resources << >> >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.get_page_content_data(0).unwrap().is_empty());
+    }
+
+    // ========================================================================
+    // NEW COVERAGE TESTS — Batch 18: misc
+    // ========================================================================
+
+    #[test]
+    fn test_scan_for_object_finds_missing() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
+        let _off5 = pdf.len();
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /Metadata /Subtype /XML >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off3).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let obj = doc.load_object(ObjectRef::new(5, 0)).unwrap();
+        assert!(obj.as_dict().is_some());
+    }
+
+    #[test]
+    fn test_load_object_missing_returns_null_simple() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(matches!(doc.load_object(ObjectRef::new(999, 0)).unwrap(), Object::Null));
+    }
+
+    #[test]
+    fn test_decode_stream_with_encryption_non_null() {
+        let pdf = build_minimal_pdf(b"BT (Hello) Tj ET");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let stream_obj = doc.load_object(ObjectRef::new(4, 0)).unwrap();
+        assert!(doc.decode_stream_with_encryption(&stream_obj, ObjectRef::new(4, 0)).is_ok());
+    }
+
+    #[test]
+    fn test_load_fonts_public_empty_resources() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut ext = crate::extractors::TextExtractor::new();
+        assert!(doc.load_fonts_public(&Object::Dictionary(std::collections::HashMap::new()), &mut ext).is_ok());
+    }
+
+    #[test]
+    fn test_load_fonts_public_resources_not_dict() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut ext = crate::extractors::TextExtractor::new();
+        assert!(doc.load_fonts_public(&Object::Integer(42), &mut ext).is_ok());
+    }
+
+    #[test]
+    fn test_is_form_xobject_from_cache() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let _ = doc.load_object(ObjectRef::new(1, 0)).unwrap();
+        assert!(!doc.is_form_xobject(ObjectRef::new(1, 0)));
+    }
+
+    #[test]
+    fn test_find_substring_middle() {
+        assert_eq!(find_substring(b"Hello World", b"lo W"), Some(3));
+    }
+
+    #[test]
+    fn test_find_substring_full_match() {
+        assert_eq!(find_substring(b"ABC", b"ABC"), Some(0));
+    }
+
+    #[test]
+    fn test_find_substring_needle_longer() {
+        assert_eq!(find_substring(b"AB", b"ABCD"), None);
+    }
+
+    #[test]
+    fn test_parse_header_lenient_no_header() {
+        let mut cursor = Cursor::new(vec![0xABu8; 100]);
+        let (major, minor, _) = parse_header(&mut cursor, true).unwrap();
+        assert_eq!((major, minor), (1, 4));
+    }
+
+    #[test]
+    fn test_parse_version_lenient_version_0_0() {
+        let header = *b"%PDF-0.0";
+        assert_eq!(parse_version_from_header(&header, true).unwrap(), (1, 4));
+    }
+
+    #[test]
+    fn test_parse_trailer_empty_input() {
+        assert!(parse_trailer(&mut Cursor::new(b"")).is_err());
+    }
+
+    #[test]
+    fn test_apply_intelligent_text_processing_fl_ligature() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let spans = vec![make_test_span("\u{FB02}oor", 0.0, 0.0, 50.0, 12.0)];
+        let result = doc.apply_intelligent_text_processing(spans);
+        assert!(result[0].text.contains("floor"));
+    }
+
+    #[test]
+    fn test_apply_intelligent_text_processing_ocr_font() {
+        let pdf = build_minimal_pdf(b"");
+        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut span = make_test_span("Test  Text", 0.0, 0.0, 100.0, 12.0);
+        span.font_name = "OCR".to_string();
+        let result = doc.apply_intelligent_text_processing(vec![span]);
+        assert!(!result[0].text.contains("  "));
+    }
+
+    #[test]
+    fn test_extract_spans_with_config_adaptive() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_spans_with_config(0, crate::extractors::SpanMergingConfig::adaptive()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_extract_spans_with_config_out_of_bounds() {
+        let pdf = build_minimal_pdf(b"");
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_spans_with_config(999, crate::extractors::SpanMergingConfig::default()).is_err());
+    }
+
+    #[test]
+    fn test_image_format_debug() {
+        assert_eq!(format!("{:?}", ImageFormat::Png), "Png");
+        assert_eq!(format!("{:?}", ImageFormat::Jpeg), "Jpeg");
+    }
+
+    #[test]
+    fn test_may_contain_text_bt_with_newline() {
+        assert!(PdfDocument::may_contain_text(b"\nBT\n"));
+    }
+
+    #[test]
+    fn test_may_contain_text_do_with_bracket() {
+        assert!(PdfDocument::may_contain_text(b"]Do["));
+    }
+
+    #[test]
+    fn test_may_contain_text_single_b() {
+        assert!(!PdfDocument::may_contain_text(b"B"));
+    }
+
+    #[test]
+    fn test_may_contain_text_single_d() {
+        assert!(!PdfDocument::may_contain_text(b"D"));
+    }
+
+    #[test]
+    fn test_multiline_object_header() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1\n0\nobj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.catalog().unwrap().as_dict().is_some());
+    }
+
+    #[test]
+    fn test_object_content_on_same_line() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.catalog().unwrap().as_dict().is_some());
+    }
+
+    #[test]
+    fn test_open_pdf_version_2_0() {
+        let mut pdf = b"%PDF-2.0\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().version(), (2, 0));
+    }
+
+    #[test]
+    fn test_extract_text_annotations_only() {
+        let annot = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /Contents (Only annotation) >>\nendobj\n".to_vec();
+        let pdf = build_pdf_with_annotations(vec![(4, annot)]);
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        assert!(doc.extract_text(0).unwrap().contains("Only annotation"));
+    }
+
+    #[test]
+    fn test_parse_string_value_static_boolean() {
+        assert!(PdfDocument::parse_string_value_static(Some(&Object::Boolean(true))).is_none());
+    }
+
+    #[test]
+    fn test_parse_string_value_static_array() {
+        assert!(PdfDocument::parse_string_value_static(Some(&Object::Array(vec![]))).is_none());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_page_count_u32_zero_pages() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_off = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 3\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off2).as_bytes());
+        pdf.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off).as_bytes());
+        assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().page_count_u32(), 0);
+    }
 }

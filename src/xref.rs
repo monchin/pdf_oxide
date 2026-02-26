@@ -1398,4 +1398,238 @@ mod tests {
         let table = parse_xref(&mut cursor, 0).unwrap();
         assert_eq!(table.len(), 1);
     }
+
+    // === Additional XRefEntry tests ===
+
+    #[test]
+    fn test_xref_entry_uncompressed() {
+        let entry = XRefEntry::uncompressed(5000, 0);
+        assert_eq!(entry.entry_type, XRefEntryType::Uncompressed);
+        assert_eq!(entry.offset, 5000);
+        assert_eq!(entry.generation, 0);
+        assert!(entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_compressed() {
+        let entry = XRefEntry::compressed(42, 3);
+        assert_eq!(entry.entry_type, XRefEntryType::Compressed);
+        assert_eq!(entry.offset, 42); // stream obj number
+        assert_eq!(entry.generation, 3); // index in stream
+        assert!(entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_free_constructor() {
+        let entry = XRefEntry::free(7, 65535);
+        assert_eq!(entry.entry_type, XRefEntryType::Free);
+        assert_eq!(entry.offset, 7); // next free obj
+        assert_eq!(entry.generation, 65535);
+        assert!(!entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_type_equality() {
+        assert_eq!(XRefEntryType::Free, XRefEntryType::Free);
+        assert_eq!(XRefEntryType::Uncompressed, XRefEntryType::Uncompressed);
+        assert_eq!(XRefEntryType::Compressed, XRefEntryType::Compressed);
+        assert_ne!(XRefEntryType::Free, XRefEntryType::Uncompressed);
+    }
+
+    #[test]
+    fn test_xref_entry_clone_debug() {
+        let entry = XRefEntry::uncompressed(100, 0);
+        let cloned = entry.clone();
+        assert_eq!(entry, cloned);
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("Uncompressed"));
+    }
+
+    // === CrossRefTable tests ===
+
+    #[test]
+    fn test_cross_ref_table_set_trailer() {
+        let mut table = CrossRefTable::new();
+        assert!(table.trailer().is_none());
+
+        let mut trailer = HashMap::new();
+        trailer.insert("Size".to_string(), Object::Integer(10));
+        table.set_trailer(trailer);
+        assert!(table.trailer().is_some());
+        assert!(table.trailer().unwrap().contains_key("Size"));
+    }
+
+    #[test]
+    fn test_cross_ref_table_contains() {
+        let mut table = CrossRefTable::new();
+        assert!(!table.contains(1));
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        assert!(table.contains(1));
+        assert!(!table.contains(2));
+    }
+
+    #[test]
+    fn test_cross_ref_table_all_object_numbers() {
+        let mut table = CrossRefTable::new();
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        table.add_entry(5, XRefEntry::uncompressed(200, 0));
+        table.add_entry(10, XRefEntry::uncompressed(300, 0));
+
+        let mut nums: Vec<u32> = table.all_object_numbers().collect();
+        nums.sort();
+        assert_eq!(nums, vec![1, 5, 10]);
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_from() {
+        let mut table1 = CrossRefTable::new();
+        table1.add_entry(1, XRefEntry::uncompressed(100, 0));
+        table1.add_entry(2, XRefEntry::uncompressed(200, 0));
+
+        let mut table2 = CrossRefTable::new();
+        table2.add_entry(2, XRefEntry::uncompressed(999, 0)); // conflict
+        table2.add_entry(3, XRefEntry::uncompressed(300, 0));
+
+        table1.merge_from(table2);
+
+        assert_eq!(table1.len(), 3);
+        // table1's entry for obj 2 should win (not overwritten)
+        assert_eq!(table1.get(2).unwrap().offset, 200);
+        // obj 3 from table2 should be added
+        assert_eq!(table1.get(3).unwrap().offset, 300);
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_trailer() {
+        let mut table1 = CrossRefTable::new();
+        // table1 has no trailer
+
+        let mut table2 = CrossRefTable::new();
+        let mut trailer = HashMap::new();
+        trailer.insert("Size".to_string(), Object::Integer(5));
+        table2.set_trailer(trailer);
+
+        table1.merge_from(table2);
+        // Should pick up table2's trailer
+        assert!(table1.trailer().is_some());
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_preserves_existing_trailer() {
+        let mut table1 = CrossRefTable::new();
+        let mut trailer1 = HashMap::new();
+        trailer1.insert("Size".to_string(), Object::Integer(10));
+        table1.set_trailer(trailer1);
+
+        let mut table2 = CrossRefTable::new();
+        let mut trailer2 = HashMap::new();
+        trailer2.insert("Size".to_string(), Object::Integer(5));
+        table2.set_trailer(trailer2);
+
+        table1.merge_from(table2);
+        // table1 already had a trailer, should keep it
+        let size = table1.trailer().unwrap().get("Size").unwrap();
+        assert_eq!(*size, Object::Integer(10));
+    }
+
+    #[test]
+    fn test_cross_ref_table_clone() {
+        let mut table = CrossRefTable::new();
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        let cloned = table.clone();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned.get(1).unwrap().offset, 100);
+    }
+
+    // === find_stream_length tests ===
+
+    #[test]
+    fn test_find_stream_length_basic() {
+        let data = b"/Type /XRef /Length 1234 /W [1 2 2]";
+        let result = find_stream_length(data);
+        assert_eq!(result, Some(1234));
+    }
+
+    #[test]
+    fn test_find_stream_length_no_length() {
+        let data = b"/Type /XRef /W [1 2 2]";
+        let result = find_stream_length(data);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_stream_length_indirect_reference() {
+        // /Length 5 0 R -> can't resolve without full parsing
+        let data = b"/Type /XRef /Length 5 0 R";
+        // First digit should parse, but it would get "5" as the length
+        // Actually it would parse "5" as a valid number
+        let result = find_stream_length(data);
+        // It parses the first integer it finds after /Length
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_find_stream_length_zero() {
+        let data = b"/Length 0";
+        let result = find_stream_length(data);
+        assert_eq!(result, Some(0));
+    }
+
+    // === find_actual_xref_offset tests ===
+
+    #[test]
+    fn test_find_actual_xref_offset_correct() {
+        let data = b"xref\n0 1\n0000000000 65535 f\ntrailer\n";
+        let mut cursor = Cursor::new(data);
+        let offset = find_actual_xref_offset(&mut cursor, 0).unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_find_actual_xref_offset_digit_start() {
+        // xref stream starts with object number
+        let data = b"1 0 obj\n<< /Type /XRef >>\nstream\n";
+        let mut cursor = Cursor::new(data);
+        let offset = find_actual_xref_offset(&mut cursor, 0).unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    // === split_lines tests ===
+
+    #[test]
+    fn test_split_lines_lf() {
+        let lines = split_lines("a\nb\nc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_cr() {
+        let lines = split_lines("a\rb\rc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_crlf() {
+        let lines = split_lines("a\r\nb\r\nc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_empty() {
+        let lines = split_lines("");
+        // split_lines on empty string may return empty vec
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_split_lines_single_line() {
+        let lines = split_lines("hello");
+        assert_eq!(lines, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_xref_entry_type_debug() {
+        let debug = format!("{:?}", XRefEntryType::Compressed);
+        assert!(debug.contains("Compressed"));
+    }
 }
