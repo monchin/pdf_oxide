@@ -222,11 +222,14 @@ jobs:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-wasm-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.114
-
       - name: Build WASM binary
         run: cargo build --lib --target wasm32-unknown-unknown --features wasm --release
+
+      - name: Install matching wasm-bindgen-cli
+        run: |
+          WASM_BINDGEN_VERSION=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Installing wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
 
       - name: Generate bindings
         run: |
