@@ -126,6 +126,20 @@ doc.authenticate("password")
 text = doc.extract_text(0)
 ```
 
+### Form Fields
+
+```python
+# Extract form fields
+fields = doc.get_form_fields()
+for f in fields:
+    print(f"{f.name} ({f.field_type}) = {f.value}")
+
+# Fill and save
+doc.set_form_field_value("employee_name", "Jane Doe")
+doc.set_form_field_value("wages", "85000.00")
+doc.save("filled.pdf")
+```
+
 ## Rust API
 
 ```rust
@@ -148,6 +162,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Form Fields (Rust)
+
+```rust
+use pdf_oxide::editor::{DocumentEditor, EditableDocument, SaveOptions};
+use pdf_oxide::editor::form_fields::FormFieldValue;
+
+let mut editor = DocumentEditor::open("w2.pdf")?;
+editor.set_form_field_value("employee_name", FormFieldValue::Text("Jane Doe".into()))?;
+editor.save_with_options("filled.pdf", SaveOptions::incremental())?;
 ```
 
 ## Installation

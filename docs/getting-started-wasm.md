@@ -223,6 +223,39 @@ for (const span of spans) {
 }
 ```
 
+## Working with Form Fields
+
+Extract form field data and export filled values:
+
+```javascript
+const doc = new WasmPdfDocument(bytes);
+
+// Get all form fields
+const fields = doc.getFormFields();
+// Returns: [{ name, field_type, value, flags }, ...]
+
+for (const f of fields) {
+  console.log(`${f.name} (${f.field_type}) = ${f.value}`);
+}
+
+// Export form data as FDF or XFDF
+const fdfBytes = doc.exportFormData();       // FDF format (default)
+const xfdfBytes = doc.exportFormData("xfdf"); // XFDF format
+```
+
+### Form Fields in Text Extraction
+
+Filled form field values appear inline in `toMarkdown` and `toHtml`:
+
+```javascript
+// Include form field values (default)
+const md = doc.toMarkdown(0, true, true, true); // ..., include_form_fields=true
+const html = doc.toHtml(0, true, true, true);
+
+// Exclude form field values
+const mdClean = doc.toMarkdown(0, true, true, false); // include_form_fields=false
+```
+
 ## Text Search
 
 Search across all pages or within a specific page:
@@ -518,6 +551,13 @@ try {
 | `.getOutline()` | `Array\|null` | Document bookmarks / table of contents |
 | `.getAnnotations(page)` | `Array` | Annotation metadata (type, rect, contents, etc.) |
 | `.extractPaths(page)` | `Array` | Vector paths (lines, curves, shapes) |
+
+**Form Fields:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.getFormFields()` | `Array` | All form fields with name, type, value, flags |
+| `.exportFormData(format?)` | `Uint8Array` | Export form data as FDF (default) or XFDF |
 
 **Editing:**
 

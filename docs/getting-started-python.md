@@ -354,6 +354,76 @@ for path in paths:
     print(f"bbox={path['bbox']}, stroke={path.get('stroke_color')}")
 ```
 
+## Working with Form Fields
+
+PDFOxide can extract, read, fill, and export PDF form field data (AcroForm fields).
+
+### List All Form Fields
+
+```python
+from pdf_oxide import PdfDocument
+
+doc = PdfDocument("tax-form.pdf")
+fields = doc.get_form_fields()
+
+for f in fields:
+    print(f"{f.name} ({f.field_type}) = {f.value}")
+```
+
+Each `FormField` has:
+- `name` — fully qualified field name (e.g. `"topmostSubform[0].Page1[0].f1_01[0]"`)
+- `field_type` — `"text"`, `"button"`, `"choice"`, `"signature"`
+- `value` — current value (`str`, `bool`, or `None`)
+- `flags` — field flags (read-only, required, etc.)
+
+### Read and Set Field Values
+
+```python
+doc = PdfDocument("w2.pdf")
+
+# Read a field value
+ssn = doc.get_form_field_value("topmostSubform[0].CopyA[0].f1_01[0]")
+print(f"SSN: {ssn}")
+
+# Fill fields
+doc.set_form_field_value("employee_name", "Jane Doe")
+doc.set_form_field_value("wages", "85000.00")
+doc.set_form_field_value("retirement_plan", True)  # checkbox
+
+# Save (values are persisted via incremental save)
+doc.save("filled_w2.pdf")
+```
+
+### Extract Text with Form Field Values
+
+Filled form field values appear inline in `extract_text` and `to_markdown`:
+
+```python
+doc = PdfDocument("filled_w2.pdf")
+
+# Form values appear inline in extracted text
+text = doc.extract_text(0)
+print(text)  # "Jane Doe" appears where the name field is
+
+# to_markdown includes form fields by default
+md = doc.to_markdown(0, include_form_fields=True)
+
+# Exclude form field values
+md_clean = doc.to_markdown(0, include_form_fields=False)
+```
+
+### Export Form Data
+
+```python
+doc = PdfDocument("filled-form.pdf")
+
+# Export as FDF
+doc.export_form_data("form_data.fdf")
+
+# Export as XFDF
+doc.export_form_data("form_data.xfdf", format="xfdf")
+```
+
 ## Performance Tips
 
 1. **Reuse document objects** - Opening a PDF has overhead, reuse the object for multiple operations

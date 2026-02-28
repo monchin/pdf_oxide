@@ -209,7 +209,66 @@ pdf.add_link(0, [100.0, 600.0, 200.0, 620.0], "https://example.com")?;
 pdf.save("annotated.pdf")?;
 ```
 
-### Adding Form Fields
+### Working with Form Fields
+
+Extract, read, fill, and save PDF form fields (AcroForm):
+
+```rust
+use pdf_oxide::PdfDocument;
+use pdf_oxide::extractors::forms::FormExtractor;
+
+let mut doc = PdfDocument::open("tax-form.pdf")?;
+
+// List all form fields
+let fields = FormExtractor::extract_fields(&mut doc)?;
+for f in &fields {
+    println!("{} ({:?}) = {:?}", f.full_name, f.field_type, f.value);
+}
+```
+
+#### Fill Form Fields and Save
+
+```rust
+use pdf_oxide::editor::{DocumentEditor, EditableDocument, SaveOptions};
+use pdf_oxide::editor::form_fields::FormFieldValue;
+
+let mut editor = DocumentEditor::open("w2.pdf")?;
+
+// Set text values
+editor.set_form_field_value("employee_name", FormFieldValue::Text("Jane Doe".into()))?;
+editor.set_form_field_value("wages", FormFieldValue::Text("85000.00".into()))?;
+
+// Set checkbox
+editor.set_form_field_value("retirement_plan", FormFieldValue::Boolean(true))?;
+
+// Save with incremental update (preserves original, appends changes)
+editor.save_with_options("filled_w2.pdf", SaveOptions::incremental())?;
+```
+
+#### Extract Text with Filled Values
+
+Filled values appear inline in `extract_text` and `to_markdown`:
+
+```rust
+use pdf_oxide::PdfDocument;
+use pdf_oxide::converters::ConversionOptions;
+
+let mut doc = PdfDocument::open("filled_w2.pdf")?;
+
+// Form values appear where the fields are positioned
+let text = doc.extract_text(0)?;
+println!("{}", text); // "Jane Doe" appears inline
+
+// Include form fields in Markdown (default)
+let opts = ConversionOptions { include_form_fields: true, ..Default::default() };
+let md = doc.to_markdown(0, &opts)?;
+
+// Exclude form fields
+let opts_off = ConversionOptions { include_form_fields: false, ..Default::default() };
+let md_clean = doc.to_markdown(0, &opts_off)?;
+```
+
+#### Adding New Form Fields
 
 ```rust
 use pdf_oxide::api::Pdf;
