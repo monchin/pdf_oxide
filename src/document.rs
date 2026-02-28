@@ -6213,6 +6213,11 @@ impl PdfDocument {
         let mut has_content = false;
 
         for (i, image) in images.iter().enumerate() {
+            // Skip tiny images (glyph fragments, vector artifacts)
+            if image.width() < 8 || image.height() < 8 {
+                continue;
+            }
+
             let pixels = image.width() as u64 * image.height() as u64;
 
             if options.embed_images {
@@ -7027,6 +7032,15 @@ impl PdfDocument {
 
         match subtype {
             "Image" => {
+                // Skip tiny images (< 8x8) — these are typically glyph fragments,
+                // vector graphic artifacts, or padding pixels. Some PDFs contain
+                // thousands of 1x1 to 3x3 "images" per page.
+                let w = xobject_dict.get("Width").and_then(|o| o.as_integer()).unwrap_or(0);
+                let h = xobject_dict.get("Height").and_then(|o| o.as_integer()).unwrap_or(0);
+                if w < 8 || h < 8 {
+                    return Ok(images);
+                }
+
                 // Only clone+modify when ColorSpace needs resolving from indirect ref
                 let needs_cs_resolve = matches!(
                     &xobject,
