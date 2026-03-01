@@ -259,6 +259,22 @@ pub struct ConversionOptions {
     ///
     /// When false, form field values are omitted from output.
     pub include_form_fields: bool,
+
+    /// Maximum image size (in pixels) to embed in output.
+    ///
+    /// Images exceeding this pixel count (width × height) are skipped when embedding
+    /// as base64 data URIs or saving to files. This prevents oversized full-page scans
+    /// from bloating output with hundreds of KB of encoded data per page.
+    ///
+    /// Common reference sizes:
+    /// - A4 @ 150 DPI: ~1240 × 1754 = 2.2 MP
+    /// - A4 @ 300 DPI: ~2480 × 3508 = 8.7 MP
+    /// - A4 @ 600 DPI: ~4960 × 7016 = 34.8 MP
+    ///
+    /// Default: 16,000,000 (16 MP) — covers A4 at 300 DPI with margin.
+    /// Set to `u64::MAX` to disable the limit entirely.
+    /// Set to `0` to skip all images.
+    pub max_image_pixels: Option<u64>,
 }
 
 impl Default for ConversionOptions {
@@ -278,6 +294,7 @@ impl Default for ConversionOptions {
     /// - page_images: None
     /// - page_dimensions: None (defaults to A4 when needed)
     /// - include_form_fields: true
+    /// - max_image_pixels: None (uses default 16 MP)
     fn default() -> Self {
         Self {
             preserve_layout: false,
@@ -293,6 +310,7 @@ impl Default for ConversionOptions {
             page_images: None,
             page_dimensions: None,
             include_form_fields: true,
+            max_image_pixels: None,
         }
     }
 }

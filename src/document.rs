@@ -195,6 +195,54 @@ impl std::fmt::Debug for PdfDocument {
     }
 }
 
+/// Pre-decompression filter for image extraction.
+///
+/// Dimensions are checked against XObject dictionary metadata (Width, Height,
+/// ColorSpace) BEFORE the stream is decompressed, avoiding expensive decoding
+/// of images that will be discarded downstream.
+struct ImageExtractFilter {
+    /// Minimum width in pixels (images narrower are skipped).
+    min_width: i64,
+    /// Minimum height in pixels (images shorter are skipped).
+    min_height: i64,
+    /// Maximum total pixels (images exceeding this are skipped).
+    max_pixels: u64,
+    /// Skip Indexed-colorspace images below this dimension.
+    /// 0 means disabled.
+    skip_indexed_small: i64,
+}
+
+impl Default for ImageExtractFilter {
+    fn default() -> Self {
+        Self {
+            min_width: 8,
+            min_height: 8,
+            max_pixels: u64::MAX,
+            skip_indexed_small: 0,
+        }
+    }
+}
+
+/// Default max image pixels for markdown/HTML embedding (16 MP).
+/// Covers A4 at 300 DPI (8.7 MP) with comfortable margin.
+const DEFAULT_MAX_IMAGE_PIXELS: u64 = 16_000_000;
+
+impl ImageExtractFilter {
+    /// Strict filter for markdown/HTML embedding paths.
+    ///
+    /// Skips tiny glyph fragments (<32x32), small Indexed images (<64x64),
+    /// and oversized images beyond the configured limit. The `max_pixels`
+    /// override comes from `ConversionOptions::max_image_pixels`.
+    fn markdown(max_pixels_override: Option<u64>) -> Self {
+        Self {
+            min_width: 32,
+            min_height: 32,
+            max_pixels: max_pixels_override.unwrap_or(DEFAULT_MAX_IMAGE_PIXELS),
+            skip_indexed_small: 64,
+        }
+    }
+}
+
 impl PdfDocument {
     /// Open a PDF document from a file path.
     ///
@@ -6180,7 +6228,9 @@ impl PdfDocument {
 
         // Step 9: Extract and include images if enabled
         if options.include_images {
-            let images = self.extract_images(page_index).unwrap_or_default();
+            let images = self
+                .extract_images_filtered(page_index, &ImageExtractFilter::markdown(options.max_image_pixels))
+                .unwrap_or_default();
             if !images.is_empty() {
                 let image_markdown = self.generate_image_markdown(&images, options, page_index)?;
                 markdown.push_str(&image_markdown);
@@ -6205,42 +6255,15 @@ impl PdfDocument {
     ) -> Result<String> {
         use std::path::Path;
 
-        // 4 megapixels — covers charts, figures, diagrams (typical: 200×200 to 1500×1500)
-        // but skips full-page scans (2883×3655 = 10.5MP, 4320×6496 = 28MP)
-        const MAX_EMBED_PIXELS: u64 = 4_000_000;
+        // Images reaching this function have already been pre-filtered by
+        // ImageExtractFilter::markdown() during extraction (min 32x32,
+        // Indexed <64x64 skipped, max_pixels applied). No redundant checks needed.
 
         let mut markdown = String::new();
         let mut has_content = false;
 
         for (i, image) in images.iter().enumerate() {
-            // Skip tiny images (glyph fragments, vector artifacts).
-            // Images under 32x32 are almost always Type3 font glyphs stored as
-            // XObject images — not meaningful content for markdown output.
-            if image.width() < 32 || image.height() < 32 {
-                continue;
-            }
-
-            // Skip Indexed colorspace images under 64x64 — these are palette-based
-            // glyph fragments (80%+ of images in some PDFs like Neural Science).
-            if *image.color_space() == crate::extractors::images::ColorSpace::Indexed
-                && (image.width() < 64 || image.height() < 64)
-            {
-                continue;
-            }
-
-            let pixels = image.width() as u64 * image.height() as u64;
-
             if options.embed_images {
-                if pixels > MAX_EMBED_PIXELS {
-                    log::debug!(
-                        "Skipping oversized image {} ({}x{} = {}MP) for base64 embedding",
-                        i,
-                        image.width(),
-                        image.height(),
-                        pixels / 1_000_000,
-                    );
-                    continue;
-                }
                 match image.to_base64_data_uri() {
                     Ok(data_uri) => {
                         if !has_content {
@@ -6456,7 +6479,9 @@ impl PdfDocument {
 
         // Step 8: Extract and embed images if enabled
         if options.include_images {
-            let images = self.extract_images(page_index).unwrap_or_default();
+            let images = self
+                .extract_images_filtered(page_index, &ImageExtractFilter::markdown(options.max_image_pixels))
+                .unwrap_or_default();
             if !images.is_empty() {
                 let image_html = self.generate_image_html(&images, options, page_index)?;
                 if let Some(pos) = html.rfind("</body>") {
@@ -6881,6 +6906,20 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
+        self.extract_images_filtered(page_index, &ImageExtractFilter::default())
+    }
+
+    /// Extract images with pre-decompression filtering.
+    ///
+    /// Applies dimension and pixel-count checks using XObject dictionary metadata
+    /// BEFORE expensive stream decompression. This avoids decompressing oversized
+    /// images (e.g., 36MP presentation slides) or tiny glyph fragments that will
+    /// be discarded downstream.
+    fn extract_images_filtered(
+        &mut self,
+        page_index: usize,
+        filter: &ImageExtractFilter,
+    ) -> Result<Vec<crate::extractors::PdfImage>> {
         use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
 
@@ -6976,6 +7015,7 @@ impl PdfDocument {
                             resources.as_ref(),
                             current_ctm,
                             &mut xobject_stack,
+                            filter,
                         ) {
                             images.append(&mut xobj_images);
                         }
@@ -7011,6 +7051,7 @@ impl PdfDocument {
         resources: Option<&Object>,
         ctm: crate::content::Matrix,
         xobject_stack: &mut Vec<ObjectRef>,
+        filter: &ImageExtractFilter,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
         use crate::extractors::extract_image_from_xobject;
 
@@ -7042,13 +7083,31 @@ impl PdfDocument {
 
         match subtype {
             "Image" => {
-                // Skip tiny images (< 8x8) — these are typically glyph fragments,
-                // vector graphic artifacts, or padding pixels. Some PDFs contain
-                // thousands of 1x1 to 3x3 "images" per page.
+                // Pre-decompression filtering using dictionary metadata.
+                // These checks use Width/Height/ColorSpace from the XObject dictionary
+                // which are available WITHOUT decompressing the image stream data.
                 let w = xobject_dict.get("Width").and_then(|o| o.as_integer()).unwrap_or(0);
                 let h = xobject_dict.get("Height").and_then(|o| o.as_integer()).unwrap_or(0);
-                if w < 8 || h < 8 {
+                if w < filter.min_width || h < filter.min_height {
                     return Ok(images);
+                }
+                if (w as u64) * (h as u64) > filter.max_pixels {
+                    return Ok(images);
+                }
+                // Skip small Indexed colorspace images (Type3 font glyph fragments)
+                if filter.skip_indexed_small > 0 && (w < filter.skip_indexed_small || h < filter.skip_indexed_small) {
+                    if let Some(cs_obj) = xobject_dict.get("ColorSpace") {
+                        let is_indexed = match cs_obj {
+                            Object::Name(n) => n == "Indexed",
+                            Object::Array(arr) if !arr.is_empty() => {
+                                arr[0].as_name() == Some("Indexed")
+                            }
+                            _ => false,
+                        };
+                        if is_indexed {
+                            return Ok(images);
+                        }
+                    }
                 }
 
                 // Only clone+modify when ColorSpace needs resolving from indirect ref
@@ -7108,6 +7167,7 @@ impl PdfDocument {
                         parent_res,
                         ctm,
                         xobject_stack,
+                        filter,
                     ) {
                         images.append(&mut form_images);
                     }
@@ -7131,6 +7191,7 @@ impl PdfDocument {
         parent_resources: &Object,
         parent_ctm: crate::content::Matrix,
         xobject_stack: &mut Vec<ObjectRef>,
+        filter: &ImageExtractFilter,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
         use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
@@ -7272,6 +7333,7 @@ impl PdfDocument {
                             Some(&form_resources),
                             current_ctm,
                             xobject_stack,
+                            filter,
                         ) {
                             raw_images.append(&mut xobj_images);
                         }
