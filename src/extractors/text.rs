@@ -3373,7 +3373,9 @@ impl TextExtractor {
                     log::debug!("Tj operator: Using ActualText override: '{}'", actual_text);
 
                     if self.extract_spans {
-                        // Use ActualText in span mode - buffer it like normal text
+                        // Use ActualText in span mode — push pre-decoded Unicode directly
+                        // into the buffer, bypassing font character mapping (the text is
+                        // already decoded from the BDC /ActualText property).
                         if self.tj_span_buffer.is_none() {
                             self.tj_span_buffer = Some(TjBuffer::new(
                                 self.state_stack.current(),
@@ -3382,12 +3384,12 @@ impl TextExtractor {
                             ));
                         }
 
-                        // Append ActualText to buffer (convert to bytes for consistency)
                         if let Some(ref mut buffer) = self.tj_span_buffer {
-                            buffer.append(actual_text.as_bytes())?;
+                            buffer.unicode.push_str(&actual_text);
                         }
                     } else {
-                        // Use ActualText in character mode - process each character
+                        // Character mode: show_text maps through font, but ActualText
+                        // is already decoded. Fall back to show_text for positioning.
                         self.show_text(actual_text.as_bytes())?;
                     }
 
@@ -3437,16 +3439,16 @@ impl TextExtractor {
                     );
 
                     if self.extract_spans {
-                        // Use ActualText in span mode - create a single span
+                        // Use ActualText in span mode — push pre-decoded Unicode directly
                         let mut buffer = TjBuffer::new(
                             self.state_stack.current(),
                             self.current_mcid,
                             self.cached_current_font.clone(),
                         );
-                        buffer.append(actual_text.as_bytes())?;
+                        buffer.unicode.push_str(&actual_text);
                         self.flush_tj_buffer(buffer)?;
                     } else {
-                        // Use ActualText in character mode
+                        // Character mode: fall back to show_text for positioning
                         self.show_text(actual_text.as_bytes())?;
                     }
 
