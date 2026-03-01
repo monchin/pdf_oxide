@@ -435,7 +435,7 @@ jobs:
           gh release download "v${VERSION}" \
             --pattern "pdf_oxide-macos-aarch64-${VERSION}.tar.gz" \
             --pattern "pdf_oxide-macos-x86_64-${VERSION}.tar.gz" \
-            --pattern "pdf_oxide-linux-x86_64-${VERSION}.tar.gz" \
+            --pattern "pdf_oxide-linux-x86_64-musl-${VERSION}.tar.gz" \
             --pattern "pdf_oxide-windows-x86_64-${VERSION}.zip"
 
       - name: Compute SHA256 hashes
@@ -445,7 +445,7 @@ jobs:
           cd release-archives
           echo "macos_arm=$(sha256sum pdf_oxide-macos-aarch64-${VERSION}.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           echo "macos_x86=$(sha256sum pdf_oxide-macos-x86_64-${VERSION}.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "linux_x86=$(sha256sum pdf_oxide-linux-x86_64-${VERSION}.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "linux_x86=$(sha256sum pdf_oxide-linux-x86_64-musl-${VERSION}.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           echo "windows=$(sha256sum pdf_oxide-windows-x86_64-${VERSION}.zip | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
       - name: Generate Homebrew formula

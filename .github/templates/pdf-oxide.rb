@@ -15,7 +15,7 @@ class PdfOxide < Formula
   end
 
   on_linux do
-    url "https://github.com/yfedoseev/pdf_oxide/releases/download/v{{VERSION}}/pdf_oxide-linux-x86_64-{{VERSION}}.tar.gz"
+    url "https://github.com/yfedoseev/pdf_oxide/releases/download/v{{VERSION}}/pdf_oxide-linux-x86_64-musl-{{VERSION}}.tar.gz"
     sha256 "{{SHA256_LINUX_X86}}"
   end
 
