@@ -134,6 +134,47 @@ impl MarkdownOutputConverter {
         gap > line_height * self.paragraph_gap_ratio
     }
 
+    /// Check if a span consists of a single bullet character.
+    ///
+    /// Common bullet characters used in PDF documents:
+    /// ► • ▪ ▸ ‣ ◦ ● ■ ◆ ○ □
+    fn is_bullet_span(text: &str) -> bool {
+        let t = text.trim();
+        matches!(
+            t,
+            "►" | "•" | "▪" | "▸" | "‣" | "◦" | "●" | "■" | "◆" | "○" | "□"
+        )
+    }
+
+    /// Check if text starts with a bullet character (for inline bullets).
+    fn starts_with_bullet(text: &str) -> bool {
+        let t = text.trim_start();
+        t.starts_with('►')
+            || t.starts_with('•')
+            || t.starts_with('▪')
+            || t.starts_with('▸')
+            || t.starts_with('‣')
+            || t.starts_with('◦')
+            || t.starts_with('●')
+            || t.starts_with('■')
+            || t.starts_with('◆')
+            || t.starts_with('○')
+            || t.starts_with('□')
+    }
+
+    /// Strip the leading bullet character from text, returning the rest.
+    fn strip_bullet(text: &str) -> &str {
+        let t = text.trim_start();
+        // Bullet characters are single Unicode code points; skip first char
+        if Self::starts_with_bullet(t) {
+            let mut chars = t.chars();
+            chars.next(); // skip bullet
+            chars.as_str().trim_start()
+        } else {
+            text
+        }
+    }
+
     /// Detect if span should be a heading based on font size.
     ///
     /// Uses absolute font sizes (only for clear heading cases):
@@ -274,11 +315,18 @@ impl MarkdownOutputConverter {
         sorted.sort_by_key(|s| s.reading_order);
 
         // Calculate base font size for heading detection.
+        // Exclude spans < 9pt (bullet characters like ►, subscripts, footnotes)
+        // from the median to prevent their small sizes from skewing heading
+        // detection — e.g. many 8.8pt ► spans pulling the median down to 8.8pt,
+        // causing all 11pt body text to look like headings (ratio 1.25).
         // Floor at 8pt to prevent ratio explosion on pages dominated by
         // small text (tables, figures with tiny labels, etc.).
         let base_font_size = if config.output.detect_headings {
-            let sizes: Vec<f32> = sorted.iter().map(|s| s.span.font_size).collect();
-            let mut sizes_sorted = sizes.clone();
+            let mut sizes_sorted: Vec<f32> = sorted
+                .iter()
+                .map(|s| s.span.font_size)
+                .filter(|&s| s >= 9.0)
+                .collect();
             sizes_sorted.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
             sizes_sorted
                 .get(sizes_sorted.len() / 2)
@@ -320,7 +368,13 @@ impl MarkdownOutputConverter {
                 }
             }
 
-            // Check for paragraph break
+            // Check for paragraph break or line break
+            let same_line = prev_span
+                .map(|prev| {
+                    (span.span.bbox.y - prev.span.bbox.y).abs() < span.span.font_size * 0.5
+                })
+                .unwrap_or(true);
+
             if let Some(prev) = prev_span {
                 if self.is_paragraph_break(span, prev) {
                     if !current_line.is_empty() {
@@ -328,20 +382,63 @@ impl MarkdownOutputConverter {
                         result.push_str("\n\n");
                         current_line.clear();
                     }
-                } else {
-                    let same_line =
-                        (span.span.bbox.y - prev.span.bbox.y).abs() < span.span.font_size * 0.5;
-                    if !same_line {
-                        if config.output.preserve_layout {
-                            let spacing = (span.span.bbox.x - prev.span.bbox.x).max(0.0) as usize;
-                            for _ in 0..spacing.min(20) {
-                                current_line.push(' ');
-                            }
-                        } else {
+                } else if !same_line {
+                    // Different visual line but within paragraph spacing.
+                    // Check if a bullet item starts here — if so, start a new line.
+                    let is_bullet = Self::is_bullet_span(&span.span.text)
+                        || Self::starts_with_bullet(&span.span.text);
+                    if is_bullet {
+                        // Bullet on new line → flush current line and start list item
+                        if !current_line.is_empty() {
+                            result.push_str(current_line.trim());
+                            result.push('\n');
+                            current_line.clear();
+                        }
+                    } else if config.output.preserve_layout {
+                        let spacing = (span.span.bbox.x - prev.span.bbox.x).max(0.0) as usize;
+                        for _ in 0..spacing.min(20) {
                             current_line.push(' ');
                         }
+                    } else {
+                        current_line.push(' ');
                     }
                 }
+            }
+
+            // Handle bullet character spans: replace with markdown list marker
+            if Self::is_bullet_span(&span.span.text) {
+                // Standalone bullet char span (e.g., "►" as its own span)
+                // Replace with "- " prefix; text follows in next span(s)
+                if same_line && !current_line.is_empty() && !current_line.ends_with("- ") {
+                    // Bullet on same line as other content — skip
+                } else if !current_line.ends_with("- ") {
+                    current_line.push_str("- ");
+                }
+                prev_span = Some(span);
+                continue;
+            }
+
+            // Handle inline bullets (text starts with bullet char)
+            if Self::starts_with_bullet(&span.span.text) && !same_line {
+                let stripped = Self::strip_bullet(&span.span.text);
+                if !current_line.ends_with("- ") {
+                    current_line.push_str("- ");
+                }
+                // Process the stripped text through normal formatting below
+                // by re-assigning text variable
+                let normalized_bullet;
+                let mut text = stripped;
+                if !config.output.preserve_layout {
+                    normalized_bullet = self.normalize_whitespace(text);
+                    text = &normalized_bullet;
+                }
+                let linkified = self.linkify(text);
+                let is_bold = self.is_bold(span, config);
+                let is_italic = self.is_italic(span);
+                let formatted = self.apply_formatting(&linkified, is_bold, is_italic);
+                current_line.push_str(&formatted);
+                prev_span = Some(span);
+                continue;
             }
 
             // Check for heading (take best level from absolute and ratio methods)
