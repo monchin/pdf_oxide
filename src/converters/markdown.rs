@@ -286,13 +286,12 @@ impl MarkdownConverter {
             .collect();
 
         // Sort blocks by Y position (top to bottom), then X position (left to right)
-        blocks.sort_by(|a, b| match a.bbox.y.partial_cmp(&b.bbox.y) {
-            Some(std::cmp::Ordering::Equal) | None => a
-                .bbox
-                .x
-                .partial_cmp(&b.bbox.x)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            other => other.unwrap_or(std::cmp::Ordering::Equal),
+        blocks.sort_by(|a, b| {
+            let y_cmp = crate::utils::safe_float_cmp(a.bbox.y, b.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
+            }
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         // **Task B.1: Pre-Validation Bold Filter (BEFORE any grouping)**
@@ -646,16 +645,12 @@ impl MarkdownConverter {
         sorted_chars.sort_by(|a, b| {
             // Primary sort: Y coordinate (PDF coords: larger Y = higher on page)
             // For top-to-bottom reading, we want LARGER Y first
-            match b.bbox.y.partial_cmp(&a.bbox.y) {
-                Some(std::cmp::Ordering::Equal) | None => {
-                    // Secondary sort: X coordinate (left to right)
-                    a.bbox
-                        .x
-                        .partial_cmp(&b.bbox.x)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                },
-                other => other.unwrap_or(std::cmp::Ordering::Equal),
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
             }
+            // Secondary sort: X coordinate (left to right)
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         // Compute font-adaptive epsilon for word clustering
@@ -681,15 +676,24 @@ impl MarkdownConverter {
         }
 
         // Step 2: Cluster words into lines
+        // Move chars out of words instead of cloning (words are not used after this)
         let line_clusters = cluster_words_into_lines(&words, 5.0);
         let mut lines = Vec::new();
 
+        // Track which word indices belong to each line for draining
+        let mut word_taken = vec![false; words.len()];
         for cluster in &line_clusters {
-            let line_words: Vec<TextBlock> = cluster.iter().map(|&i| words[i].clone()).collect();
-            if !line_words.is_empty() {
-                // Merge words into a single line block
-                let all_chars: Vec<TextChar> =
-                    line_words.iter().flat_map(|w| w.chars.clone()).collect();
+            if cluster.is_empty() {
+                continue;
+            }
+            let mut all_chars: Vec<TextChar> = Vec::new();
+            for &i in cluster {
+                if !word_taken[i] {
+                    all_chars.extend(std::mem::take(&mut words[i].chars));
+                    word_taken[i] = true;
+                }
+            }
+            if !all_chars.is_empty() {
                 lines.push(TextBlock::from_chars(all_chars));
             }
         }
@@ -782,16 +786,12 @@ impl MarkdownConverter {
                     // Primary sort: Y coordinate (larger Y = higher on page in PDF coords)
                     // PDF coordinates: origin at bottom-left, Y increases upward
                     // So top of page (large Y) comes before bottom (small Y)
-                    match block_b.bbox.y.partial_cmp(&block_a.bbox.y) {
-                        Some(std::cmp::Ordering::Equal) => {
-                            // Secondary sort: X coordinate (smaller X = further left)
-                            block_a
-                                .bbox
-                                .x
-                                .partial_cmp(&block_b.bbox.x)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        },
-                        other => other.unwrap_or(std::cmp::Ordering::Equal),
+                    let y_cmp = crate::utils::safe_float_cmp(block_b.bbox.y, block_a.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        y_cmp
+                    } else {
+                        // Secondary sort: X coordinate (smaller X = further left)
+                        crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x)
                     }
                 });
             },
@@ -840,47 +840,46 @@ impl MarkdownConverter {
     /// 2. Add blocks without MCIDs at the end (fallback for unmarked content)
     /// 3. Preserve spatial order for blocks with the same MCID (top-to-bottom, left-to-right)
     fn reorder_by_mcid(blocks: &[TextBlock], mcid_order: &[u32]) -> Vec<usize> {
-        let mut ordered_indices = Vec::new();
+        use std::collections::HashMap;
 
-        // For each MCID in structure tree order
-        for &mcid in mcid_order {
-            // Find all blocks with this MCID
-            let mut mcid_blocks: Vec<usize> = blocks
-                .iter()
-                .enumerate()
-                .filter(|(_, block)| block.mcid == Some(mcid))
-                .map(|(idx, _)| idx)
-                .collect();
+        // Build MCID → block indices map in a single pass: O(n)
+        let mut mcid_to_blocks: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut no_mcid_indices = Vec::new();
 
-            // Sort blocks with same MCID by spatial position (top-to-bottom, left-to-right)
-            // This handles cases where multiple blocks have the same MCID
-            mcid_blocks.sort_by(|&a, &b| {
-                let block_a = &blocks[a];
-                let block_b = &blocks[b];
-
-                // Primary sort: Y coordinate (larger Y = higher on page in PDF coords)
-                match block_b.bbox.y.partial_cmp(&block_a.bbox.y) {
-                    Some(std::cmp::Ordering::Equal) => {
-                        // Secondary sort: X coordinate (smaller X = further left)
-                        block_a
-                            .bbox
-                            .x
-                            .partial_cmp(&block_b.bbox.x)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    },
-                    other => other.unwrap_or(std::cmp::Ordering::Equal),
-                }
-            });
-
-            ordered_indices.extend(mcid_blocks);
-        }
-
-        // Add blocks without MCID at the end (fallback for unmarked content)
         for (idx, block) in blocks.iter().enumerate() {
-            if block.mcid.is_none() && !ordered_indices.contains(&idx) {
-                ordered_indices.push(idx);
+            if let Some(mcid) = block.mcid {
+                mcid_to_blocks.entry(mcid).or_default().push(idx);
+            } else {
+                no_mcid_indices.push(idx);
             }
         }
+
+        // Sort each MCID's block list by spatial position
+        for indices in mcid_to_blocks.values_mut() {
+            if indices.len() > 1 {
+                indices.sort_by(|&a, &b| {
+                    let block_a = &blocks[a];
+                    let block_b = &blocks[b];
+                    let y_cmp = crate::utils::safe_float_cmp(block_b.bbox.y, block_a.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        y_cmp
+                    } else {
+                        crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x)
+                    }
+                });
+            }
+        }
+
+        // Collect in structure tree order: O(m) where m = mcid_order.len()
+        let mut ordered_indices = Vec::with_capacity(blocks.len());
+        for &mcid in mcid_order {
+            if let Some(indices) = mcid_to_blocks.get(&mcid) {
+                ordered_indices.extend(indices);
+            }
+        }
+
+        // Add blocks without MCID at the end
+        ordered_indices.extend(no_mcid_indices);
 
         ordered_indices
     }
@@ -931,9 +930,10 @@ impl MarkdownConverter {
 
         let groups = strategy.partition_region(&spans);
 
-        // Flatten groups back to indices, preserving the XY-Cut ordering
+        // Flatten groups back to indices, preserving the XY-Cut ordering.
+        // Each span's `sequence` field holds its original block index.
         let mut indices = Vec::with_capacity(blocks.len());
-        for group in groups {
+        for group in &groups {
             for span in group {
                 indices.push(span.sequence);
             }
@@ -996,38 +996,45 @@ impl MarkdownConverter {
     ///
     /// Text with URLs and emails formatted as markdown links
     fn format_links(text: &str) -> String {
+        // Quick pre-check: skip regex for text that can't contain URLs or emails
+        let might_have_url = text.contains("://") || text.contains("www.");
+        let might_have_email = text.contains('@');
+
+        if !might_have_url && !might_have_email {
+            return text.to_string();
+        }
+
         let mut result = text.to_string();
 
-        // URL regex: matches http:// and https:// URLs
-        // Exclude trailing punctuation (.!?,;:) that's likely sentence-ending
-        // Pattern: https?:// + [valid URL chars] + [not ending in sentence punctuation]
-        result = RE_URL
-            .replace_all(&result, |caps: &Captures| {
-                let url = &caps[1];
-                // Don't format if already part of a markdown link
-                if text.contains(&format!("[{}]", url)) {
-                    url.to_string()
-                } else {
-                    format!("[{}]({})", url, url)
-                }
-            })
-            .to_string();
+        if might_have_url {
+            result = RE_URL
+                .replace_all(&result, |caps: &Captures| {
+                    let url = &caps[1];
+                    // Don't format if already part of a markdown link
+                    if text.contains(&format!("[{}]", url)) {
+                        url.to_string()
+                    } else {
+                        format!("[{}]({})", url, url)
+                    }
+                })
+                .to_string();
+        }
 
-        // Email regex: simple pattern for common email formats
-        // Matches: user@domain.com, first.last@domain.co.uk
-        result = RE_EMAIL
-            .replace_all(&result, |caps: &Captures| {
-                let email = &caps[1];
-                // Don't format if already part of a markdown link or URL
-                if result.contains(&format!("[{}]", email))
-                    || result.contains(&format!("//{}", email))
-                {
-                    email.to_string()
-                } else {
-                    format!("[{}](mailto:{})", email, email)
-                }
-            })
-            .to_string();
+        if might_have_email {
+            result = RE_EMAIL
+                .replace_all(&result, |caps: &Captures| {
+                    let email = &caps[1];
+                    // Don't format if already part of a markdown link or URL
+                    if result.contains(&format!("[{}]", email))
+                        || result.contains(&format!("//{}", email))
+                    {
+                        email.to_string()
+                    } else {
+                        format!("[{}](mailto:{})", email, email)
+                    }
+                })
+                .to_string();
+        }
 
         result
     }

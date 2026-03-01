@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "pdf_oxide_mcp", "pdf_oxide_cli"]
+
 [package]
 name = "pdf_oxide"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -221,8 +224,6 @@ harness = false
 [[bench]]
 name = "full_pipeline_benchmarks"
 harness = false
-
-# Cargo auto-discovers binaries in src/bin/
 
 [package.metadata.docs.rs]
 # Document with safe features only (tesseract-rs fails on docs.rs sandbox)

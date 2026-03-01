@@ -179,6 +179,9 @@ pub struct PdfDocument {
     /// Cache of extracted TextSpan results from self-contained Form XObjects
     /// (those with own /Resources/Font). None = processed but no spans.
     pub(crate) xobject_spans_cache: HashMap<ObjectRef, Option<Vec<crate::layout::TextSpan>>>,
+    /// Cache of extracted images from Form XObjects (keyed by ObjectRef).
+    /// Images are stored without CTM applied — caller applies its own CTM.
+    pub(crate) form_xobject_images_cache: HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -189,6 +192,54 @@ impl std::fmt::Debug for PdfDocument {
             .field("cached_objects", &self.object_cache.len())
             .field("recursion_depth", &self.recursion_depth.borrow())
             .finish_non_exhaustive()
+    }
+}
+
+/// Pre-decompression filter for image extraction.
+///
+/// Dimensions are checked against XObject dictionary metadata (Width, Height,
+/// ColorSpace) BEFORE the stream is decompressed, avoiding expensive decoding
+/// of images that will be discarded downstream.
+struct ImageExtractFilter {
+    /// Minimum width in pixels (images narrower are skipped).
+    min_width: i64,
+    /// Minimum height in pixels (images shorter are skipped).
+    min_height: i64,
+    /// Maximum total pixels (images exceeding this are skipped).
+    max_pixels: u64,
+    /// Skip Indexed-colorspace images below this dimension.
+    /// 0 means disabled.
+    skip_indexed_small: i64,
+}
+
+impl Default for ImageExtractFilter {
+    fn default() -> Self {
+        Self {
+            min_width: 8,
+            min_height: 8,
+            max_pixels: u64::MAX,
+            skip_indexed_small: 0,
+        }
+    }
+}
+
+/// Default max image pixels for markdown/HTML embedding (16 MP).
+/// Covers A4 at 300 DPI (8.7 MP) with comfortable margin.
+const DEFAULT_MAX_IMAGE_PIXELS: u64 = 16_000_000;
+
+impl ImageExtractFilter {
+    /// Strict filter for markdown/HTML embedding paths.
+    ///
+    /// Skips tiny glyph fragments (<32x32), small Indexed images (<64x64),
+    /// and oversized images beyond the configured limit. The `max_pixels`
+    /// override comes from `ConversionOptions::max_image_pixels`.
+    fn markdown(max_pixels_override: Option<u64>) -> Self {
+        Self {
+            min_width: 32,
+            min_height: 32,
+            max_pixels: max_pixels_override.unwrap_or(DEFAULT_MAX_IMAGE_PIXELS),
+            skip_indexed_small: 64,
+        }
     }
 }
 
@@ -357,6 +408,7 @@ impl PdfDocument {
             xobject_stream_cache: HashMap::new(),
             xobject_stream_cache_bytes: 0,
             xobject_spans_cache: HashMap::new(),
+            form_xobject_images_cache: HashMap::new(),
         };
 
         // Initialize encryption immediately
@@ -2706,19 +2758,11 @@ impl PdfDocument {
 
         // Sort combined spans by position: Y descending (top→bottom), then X ascending (left→right)
         spans.sort_by(|a, b| {
-            let y_cmp = b
-                .bbox
-                .y
-                .partial_cmp(&a.bbox.y)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
             if y_cmp != std::cmp::Ordering::Equal {
                 return y_cmp;
             }
-            let x_cmp = a
-                .bbox
-                .x
-                .partial_cmp(&b.bbox.x)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let x_cmp = crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x);
             if x_cmp != std::cmp::Ordering::Equal {
                 return x_cmp;
             }
@@ -4461,18 +4505,11 @@ impl PdfDocument {
             );
             // Sort by Y descending (top→bottom), then X ascending (left→right)
             spans_without_mcid.sort_by(|a, b| {
-                let y_cmp = b
-                    .bbox
-                    .y
-                    .partial_cmp(&a.bbox.y)
-                    .unwrap_or(std::cmp::Ordering::Equal);
+                let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
                 if y_cmp != std::cmp::Ordering::Equal {
                     return y_cmp;
                 }
-                a.bbox
-                    .x
-                    .partial_cmp(&b.bbox.x)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
             });
             for span in &spans_without_mcid {
                 if let Some(prev) = prev_span {
@@ -5972,6 +6009,93 @@ impl PdfDocument {
         Ok(())
     }
 
+    /// Extract tables from a page using structure tree and spatial detection.
+    ///
+    /// Tries two strategies in order:
+    /// 1. **Structure tree** (tagged PDFs): Finds Table elements in the structure
+    ///    tree and extracts cell content via MCID matching.
+    /// 2. **Spatial detection** (untagged PDFs): Uses X/Y coordinate clustering
+    ///    to detect grid-aligned text as tables.
+    ///
+    /// Returns early with structure tree tables if found (high confidence).
+    fn extract_page_tables(
+        &mut self,
+        page_index: usize,
+        spans: &[TextSpan],
+        options: &crate::converters::ConversionOptions,
+    ) -> Vec<crate::structure::ExtractedTable> {
+        // Strategy 1: Structure tree (tagged PDFs)
+        if let Ok(Some(struct_tree)) = self.structure_tree() {
+            let table_elems =
+                crate::structure::find_table_elements(&struct_tree, page_index as u32);
+            if !table_elems.is_empty() {
+                let mut tables = Vec::new();
+                for table_elem in table_elems {
+                    match crate::structure::extract_table_from_spans(table_elem, spans) {
+                        Ok(mut table) if !table.is_empty() => {
+                            // Compute bbox from spans matching the table's MCIDs
+                            if table.bbox.is_none() {
+                                let all_mcids: Vec<u32> = table
+                                    .rows
+                                    .iter()
+                                    .flat_map(|r| {
+                                        r.cells.iter().flat_map(|c| c.mcids.iter().copied())
+                                    })
+                                    .collect();
+                                if !all_mcids.is_empty() {
+                                    let mut min_x = f32::INFINITY;
+                                    let mut min_y = f32::INFINITY;
+                                    let mut max_x = f32::NEG_INFINITY;
+                                    let mut max_y = f32::NEG_INFINITY;
+                                    for span in spans {
+                                        if let Some(mcid) = span.mcid {
+                                            if all_mcids.contains(&mcid) {
+                                                min_x = min_x.min(span.bbox.x);
+                                                min_y = min_y.min(span.bbox.y);
+                                                max_x = max_x.max(span.bbox.x + span.bbox.width);
+                                                max_y = max_y.max(span.bbox.y + span.bbox.height);
+                                            }
+                                        }
+                                    }
+                                    if min_x < max_x && min_y < max_y {
+                                        table.bbox = Some(crate::geometry::Rect::new(
+                                            min_x,
+                                            min_y,
+                                            max_x - min_x,
+                                            max_y - min_y,
+                                        ));
+                                    }
+                                }
+                            }
+                            tables.push(table);
+                        },
+                        _ => {},
+                    }
+                }
+                if !tables.is_empty() {
+                    log::debug!(
+                        "Found {} table(s) via structure tree for page {}",
+                        tables.len(),
+                        page_index
+                    );
+                    return tables;
+                }
+            }
+        }
+
+        // Strategy 2: Spatial detection (untagged PDFs)
+        let config = options.table_detection_config.clone().unwrap_or_default();
+        let tables = crate::structure::detect_tables_from_spans(spans, &config);
+        if !tables.is_empty() {
+            log::debug!(
+                "Found {} table(s) via spatial detection for page {}",
+                tables.len(),
+                page_index
+            );
+        }
+        tables
+    }
+
     /// Convert a page to Markdown format.
     ///
     /// Extracts text from the specified page and converts it to Markdown with
@@ -6014,8 +6138,6 @@ impl PdfDocument {
         page_index: usize,
         options: &crate::converters::ConversionOptions,
     ) -> Result<String> {
-        use crate::structure::traversal::extract_reading_order;
-
         // Step 1: Extract raw spans (unchanged - this is the foundation)
         let mut spans = self.extract_spans(page_index)?;
 
@@ -6024,51 +6146,93 @@ impl PdfDocument {
             spans.extend(self.extract_widget_spans(page_index));
         }
 
-        // Step 2: Create pipeline config from options (using adapter from Phase 2)
+        // Step 2: Extract tables if enabled
+        let tables = if options.extract_tables {
+            self.extract_page_tables(page_index, &spans, options)
+        } else {
+            Vec::new()
+        };
+
+        // Step 3: Create pipeline config from options (using adapter from Phase 2)
         let pipeline_config = TextPipelineConfig::from_conversion_options(options);
 
-        // Step 3: Handle structure tree context for reading order
-        // Try to extract MCID order for StructureTreeFirst mode
-        if let Ok(Some(struct_tree)) = self.structure_tree() {
-            match extract_reading_order(&struct_tree, page_index as u32) {
-                Ok(mcid_order) if !mcid_order.is_empty() => {
-                    // Update context with extracted MCIDs
+        // Step 4: Handle structure tree context for reading order
+        // Use cached structure tree (same cache as extract_text) to avoid
+        // re-traversing the entire tree for each page — O(1) lookup instead of O(tree_size).
+        let mcid_order = {
+            // Ensure structure tree is cached (Arc clone = cheap ref count bump)
+            let cached_tree = match &self.structure_tree_cache {
+                Some(cached) => cached.clone(),
+                None => {
+                    let tree = self.structure_tree().ok().flatten().map(Arc::new);
+                    self.structure_tree_cache = Some(tree.clone());
+                    tree
+                },
+            };
+
+            if let Some(ref struct_tree) = cached_tree {
+                // Build per-page traversal cache once, then O(1) lookup per page
+                if self.structure_content_cache.is_none() {
+                    let all_content =
+                        crate::structure::traverse_structure_tree_all_pages(struct_tree);
+                    self.structure_content_cache = Some(all_content);
+                }
+
+                // Extract MCID order from cached content for this page
+                let order: Vec<u32> = self
+                    .structure_content_cache
+                    .as_ref()
+                    .and_then(|cache| cache.get(&(page_index as u32)))
+                    .map(|content| content.iter().filter_map(|c| c.mcid).collect())
+                    .unwrap_or_default();
+
+                if !order.is_empty() {
                     log::debug!(
-                        "Extracted {} MCIDs from structure tree for page {}",
-                        mcid_order.len(),
+                        "Extracted {} MCIDs from cached structure tree for page {}",
+                        order.len(),
                         page_index
                     );
-                },
-                _ => {
-                    // No MCIDs found - that's OK, fallback will happen in strategy
+                    Some(order)
+                } else {
                     log::debug!(
                         "No MCIDs found for page {}, reading order strategy will use geometric fallback",
                         page_index
                     );
-                },
+                    None
+                }
+            } else {
+                log::debug!(
+                    "No structure tree found, reading order strategy will use geometric fallback"
+                );
+                None
             }
-        } else {
-            log::debug!(
-                "No structure tree found, reading order strategy will use geometric fallback"
-            );
-        }
+        };
 
-        // Step 4: Create pipeline with config
+        // Step 5: Create pipeline with config
         let pipeline = TextPipeline::with_config(pipeline_config.clone());
 
-        // Step 5: Build reading order context
-        let context = ReadingOrderContext::new().with_page(page_index as u32);
+        // Step 6: Build reading order context (pass mcid_order if available)
+        let mut context = ReadingOrderContext::new().with_page(page_index as u32);
+        if let Some(order) = mcid_order {
+            context = context.with_mcid_order(order);
+        }
 
-        // Step 6: Process through pipeline (applies reading order strategy)
+        // Step 7: Process through pipeline (applies reading order strategy)
         let ordered_spans = pipeline.process(spans, context)?;
 
-        // Step 7: Use pipeline converter
+        // Step 8: Use pipeline converter with tables
         let converter = MarkdownOutputConverter::new();
-        let mut markdown = converter.convert(&ordered_spans, &pipeline_config)?;
+        let mut markdown =
+            converter.convert_with_tables(&ordered_spans, &tables, &pipeline_config)?;
 
-        // Step 8: Extract and include images if enabled
+        // Step 9: Extract and include images if enabled
         if options.include_images {
-            let images = self.extract_images(page_index).unwrap_or_default();
+            let images = self
+                .extract_images_filtered(
+                    page_index,
+                    &ImageExtractFilter::markdown(options.max_image_pixels),
+                )
+                .unwrap_or_default();
             if !images.is_empty() {
                 let image_markdown = self.generate_image_markdown(&images, options, page_index)?;
                 markdown.push_str(&image_markdown);
@@ -6079,6 +6243,12 @@ impl PdfDocument {
     }
 
     /// Generate Markdown for extracted images.
+    ///
+    /// Skips images exceeding `MAX_EMBED_PIXELS` (4 megapixels) when embedding
+    /// as base64. These are typically full-page scans or high-res presentation
+    /// slides that would produce 200-700KB of base64 per page with no useful
+    /// content benefit (the text is already extracted). A placeholder comment
+    /// is emitted instead.
     fn generate_image_markdown(
         &self,
         images: &[crate::extractors::PdfImage],
@@ -6087,16 +6257,22 @@ impl PdfDocument {
     ) -> Result<String> {
         use std::path::Path;
 
+        // Images reaching this function have already been pre-filtered by
+        // ImageExtractFilter::markdown() during extraction (min 32x32,
+        // Indexed <64x64 skipped, max_pixels applied). No redundant checks needed.
+
         let mut markdown = String::new();
-        markdown.push_str("\n\n---\n\n");
+        let mut has_content = false;
 
         for (i, image) in images.iter().enumerate() {
-            let alt = format!("Image {} from page {}", i + 1, page_index + 1);
-
             if options.embed_images {
-                // Embed as base64 data URI (works in Obsidian, Typora, VS Code, Jupyter, etc.)
                 match image.to_base64_data_uri() {
                     Ok(data_uri) => {
+                        if !has_content {
+                            markdown.push_str("\n\n---\n\n");
+                            has_content = true;
+                        }
+                        let alt = format!("Image {} from page {}", i + 1, page_index + 1);
                         markdown.push_str(&format!("![{}]({})\n\n", alt, data_uri));
                     },
                     Err(e) => {
@@ -6104,17 +6280,21 @@ impl PdfDocument {
                     },
                 }
             } else if let Some(ref output_dir) = options.image_output_dir {
-                // Save to file and reference by path
+                // Save to file and reference by path (no size limit for file saves)
                 let filename = format!("page{}_{}.png", page_index + 1, i + 1);
                 let filepath = Path::new(output_dir).join(&filename);
 
-                // Create directory if needed
                 if let Some(parent) = filepath.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
 
                 match image.save_as_png(&filepath) {
                     Ok(()) => {
+                        if !has_content {
+                            markdown.push_str("\n\n---\n\n");
+                            has_content = true;
+                        }
+                        let alt = format!("Image {} from page {}", i + 1, page_index + 1);
                         let relative_path = format!("{}/{}", output_dir, filename);
                         markdown.push_str(&format!("![{}]({})\n\n", alt, relative_path));
                     },
@@ -6123,7 +6303,6 @@ impl PdfDocument {
                     },
                 }
             }
-            // If embed_images=false and no output_dir, skip image
         }
 
         Ok(markdown)
@@ -6276,28 +6455,39 @@ impl PdfDocument {
             spans.extend(self.extract_widget_spans(page_index));
         }
 
-        // Step 2: Create pipeline config from options (using adapter from Phase 2)
+        // Step 2: Extract tables if enabled
+        let tables = if options.extract_tables {
+            self.extract_page_tables(page_index, &spans, options)
+        } else {
+            Vec::new()
+        };
+
+        // Step 3: Create pipeline config from options (using adapter from Phase 2)
         let pipeline_config = TextPipelineConfig::from_conversion_options(options);
 
-        // Step 3: Create pipeline with config
+        // Step 4: Create pipeline with config
         let pipeline = TextPipeline::with_config(pipeline_config.clone());
 
-        // Step 4: Build reading order context
+        // Step 5: Build reading order context
         let context = ReadingOrderContext::new().with_page(page_index as u32);
 
-        // Step 5: Process through pipeline (applies reading order strategy)
+        // Step 6: Process through pipeline (applies reading order strategy)
         let ordered_spans = pipeline.process(spans, context)?;
 
-        // Step 6: Use pipeline converter
+        // Step 7: Use pipeline converter with tables
         let converter = HtmlOutputConverter::new();
-        let mut html = converter.convert(&ordered_spans, &pipeline_config)?;
+        let mut html = converter.convert_with_tables(&ordered_spans, &tables, &pipeline_config)?;
 
-        // Step 7: Extract and embed images if enabled
+        // Step 8: Extract and embed images if enabled
         if options.include_images {
-            let images = self.extract_images(page_index).unwrap_or_default();
+            let images = self
+                .extract_images_filtered(
+                    page_index,
+                    &ImageExtractFilter::markdown(options.max_image_pixels),
+                )
+                .unwrap_or_default();
             if !images.is_empty() {
                 let image_html = self.generate_image_html(&images, options, page_index)?;
-                // Insert images before closing </body> or at end
                 if let Some(pos) = html.rfind("</body>") {
                     html.insert_str(pos, &image_html);
                 } else {
@@ -6720,6 +6910,20 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
+        self.extract_images_filtered(page_index, &ImageExtractFilter::default())
+    }
+
+    /// Extract images with pre-decompression filtering.
+    ///
+    /// Applies dimension and pixel-count checks using XObject dictionary metadata
+    /// BEFORE expensive stream decompression. This avoids decompressing oversized
+    /// images (e.g., 36MP presentation slides) or tiny glyph fragments that will
+    /// be discarded downstream.
+    fn extract_images_filtered(
+        &mut self,
+        page_index: usize,
+        filter: &ImageExtractFilter,
+    ) -> Result<Vec<crate::extractors::PdfImage>> {
         use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
 
@@ -6761,10 +6965,27 @@ impl PdfDocument {
         // (e.g., Form X0 references X1 which references X0).
         let mut xobject_stack = Vec::new();
 
+        // Pre-resolve XObject dictionary once (avoids re-resolving per Do operator)
+        let xobject_dict = if let Some(ref res) = resources {
+            if let Some(res_dict) = res.as_dict() {
+                if let Some(xobj_entry) = res_dict.get("XObject") {
+                    let resolved = if let Some(ref_obj) = xobj_entry.as_reference() {
+                        self.load_object(ref_obj)?
+                    } else {
+                        xobj_entry.clone()
+                    };
+                    resolved.as_dict().cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Parse content stream operators to extract images from Do operators
-        // Instead of only checking the XObject dictionary, we parse the actual page content
-        // stream to find Do operators that reference images. This is how real PDFs work -
-        // images are embedded as XObjects and referenced via "Do" operators in the content stream.
         for op in operators {
             match op {
                 // Graphics state operators
@@ -6786,19 +7007,19 @@ impl PdfDocument {
                 },
 
                 // XObject reference operator - Extract images referenced via Do
-                // The "Do" operator tells the renderer: "Draw the named XObject now"
-                // We extract all images referenced this way
                 Operator::Do { name } => {
-                    if let Some(ref res) = resources {
+                    if let Some(ref xobj_dict) = xobject_dict {
                         let current_ctm = ctm_stack
                             .last()
                             .copied()
                             .unwrap_or_else(crate::content::Matrix::identity);
                         if let Ok(mut xobj_images) = self.extract_images_from_xobject_do(
                             &name,
-                            res,
+                            xobj_dict,
+                            resources.as_ref(),
                             current_ctm,
                             &mut xobject_stack,
+                            filter,
                         ) {
                             images.append(&mut xobj_images);
                         }
@@ -6825,61 +7046,20 @@ impl PdfDocument {
 
     /// Extract images referenced by a Do operator in the content stream.
     ///
-    /// This method handles image extraction from XObjects. It processes both Image and Form
-    /// XObjects, with recursion for nested Forms.
-    ///
-    /// PDF files embed images as XObjects rather than inline images. These XObjects are
-    /// referenced in the page's content stream via the `Do` operator. For example: `/ImgName Do`
-    /// tells the renderer to draw the image named "ImgName".
-    ///
-    /// This method:
-    /// - Locates XObject references in the Resources dictionary
-    /// - Resolves both direct and indirect references (e.g., `7 0 R`)
-    /// - Extracts Image XObjects directly
-    /// - Recursively processes Form XObjects
-    /// - Applies CTM transformations for proper positioning
-    /// - Resolves ColorSpace indirect references
+    /// Accepts a pre-resolved XObject dictionary to avoid redundant lookups
+    /// when called repeatedly (e.g., 194 Do operators on a single page).
     fn extract_images_from_xobject_do(
         &mut self,
         name: &str,
-        resources: &Object,
+        xobject_dict: &std::collections::HashMap<String, Object>,
+        resources: Option<&Object>,
         ctm: crate::content::Matrix,
         xobject_stack: &mut Vec<ObjectRef>,
+        filter: &ImageExtractFilter,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
         use crate::extractors::extract_image_from_xobject;
 
         let mut images = Vec::new();
-
-        // Get XObject dictionary
-        let resources_dict = match resources.as_dict() {
-            Some(d) => d,
-            None => {
-                log::warn!(
-                    "Resources is not a dictionary (type: {}), treating as empty",
-                    resources.type_name()
-                );
-                return Ok(images);
-            },
-        };
-
-        let xobject_obj = match resources_dict.get("XObject") {
-            Some(obj) => obj,
-            None => return Ok(images), // No XObjects, return empty
-        };
-
-        // Resolve indirect reference if needed
-        let resolved_xobject_obj = if let Some(ref_obj) = xobject_obj.as_reference() {
-            self.load_object(ref_obj)?
-        } else {
-            xobject_obj.clone()
-        };
-
-        let xobject_dict = resolved_xobject_obj
-            .as_dict()
-            .ok_or_else(|| Error::ParseError {
-                offset: 0,
-                reason: "XObject dictionary is not a dictionary".to_string(),
-            })?;
 
         // Get the specific XObject by name
         let xobject_ref_obj = match xobject_dict.get(name) {
@@ -6907,31 +7087,71 @@ impl PdfDocument {
 
         match subtype {
             "Image" => {
-                // For Stream objects, resolve any indirect references in the dictionary
-                let mut resolved_xobject = xobject.clone();
-
-                if let Object::Stream { dict, data } = &xobject {
-                    let mut new_dict = dict.clone();
-
-                    // Resolve ColorSpace if it's an indirect reference
-                    // Many PDFs from tools like Google Slides reference ColorSpace via indirect
-                    // references (e.g., "7 0 R"). The extraction function needs the resolved object.
-                    // Without this, we get: "Invalid color space object: Reference(...)"
-                    if let Some(Object::Reference(cs_ref)) = dict.get("ColorSpace") {
-                        if let Ok(resolved_cs) = self.load_object(*cs_ref) {
-                            new_dict.insert("ColorSpace".to_string(), resolved_cs);
+                // Pre-decompression filtering using dictionary metadata.
+                // These checks use Width/Height/ColorSpace from the XObject dictionary
+                // which are available WITHOUT decompressing the image stream data.
+                let w = xobject_dict
+                    .get("Width")
+                    .and_then(|o| o.as_integer())
+                    .unwrap_or(0);
+                let h = xobject_dict
+                    .get("Height")
+                    .and_then(|o| o.as_integer())
+                    .unwrap_or(0);
+                if w < filter.min_width || h < filter.min_height {
+                    return Ok(images);
+                }
+                if (w as u64) * (h as u64) > filter.max_pixels {
+                    return Ok(images);
+                }
+                // Skip small Indexed colorspace images (Type3 font glyph fragments)
+                if filter.skip_indexed_small > 0
+                    && (w < filter.skip_indexed_small || h < filter.skip_indexed_small)
+                {
+                    if let Some(cs_obj) = xobject_dict.get("ColorSpace") {
+                        let is_indexed = match cs_obj {
+                            Object::Name(n) => n == "Indexed",
+                            Object::Array(arr) if !arr.is_empty() => {
+                                arr[0].as_name() == Some("Indexed")
+                            },
+                            _ => false,
+                        };
+                        if is_indexed {
+                            return Ok(images);
                         }
                     }
-
-                    resolved_xobject = Object::Stream {
-                        dict: new_dict,
-                        data: data.clone(),
-                    };
                 }
+
+                // Only clone+modify when ColorSpace needs resolving from indirect ref
+                let needs_cs_resolve = matches!(
+                    &xobject,
+                    Object::Stream { dict, .. } if matches!(dict.get("ColorSpace"), Some(Object::Reference(_)))
+                );
+
+                let resolved_xobject;
+                let xobject_for_extract = if needs_cs_resolve {
+                    if let Object::Stream { dict, data } = &xobject {
+                        let mut new_dict = dict.clone();
+                        if let Some(Object::Reference(cs_ref)) = dict.get("ColorSpace") {
+                            if let Ok(resolved_cs) = self.load_object(*cs_ref) {
+                                new_dict.insert("ColorSpace".to_string(), resolved_cs);
+                            }
+                        }
+                        resolved_xobject = Object::Stream {
+                            dict: new_dict,
+                            data: data.clone(),
+                        };
+                        &resolved_xobject
+                    } else {
+                        &xobject
+                    }
+                } else {
+                    &xobject
+                };
 
                 // Extract as Image XObject
                 if let Ok(mut image) =
-                    extract_image_from_xobject(Some(self), &resolved_xobject, xobject_ref_opt)
+                    extract_image_from_xobject(Some(self), xobject_for_extract, xobject_ref_opt)
                 {
                     if let Some(rect) = image.bbox() {
                         let new_bbox = self.transform_bbox_with_ctm(rect, ctm);
@@ -6951,14 +7171,15 @@ impl PdfDocument {
             },
             "Form" => {
                 // Recursively extract from Form XObject
-                // Only process if we have a valid reference
-                if let Some(ref_obj) = xobject_ref_opt {
+                // Only process if we have a valid reference and parent resources
+                if let (Some(ref_obj), Some(parent_res)) = (xobject_ref_opt, resources) {
                     if let Ok(mut form_images) = self.extract_images_from_form_xobject(
                         ref_obj,
                         &xobject,
-                        resources,
+                        parent_res,
                         ctm,
                         xobject_stack,
+                        filter,
                     ) {
                         images.append(&mut form_images);
                     }
@@ -6971,6 +7192,10 @@ impl PdfDocument {
     }
 
     /// Recursively extract images from a Form XObject.
+    ///
+    /// Uses a document-level cache: images are extracted once using only the Form's
+    /// own Matrix, then cached. On subsequent references, cached images are cloned
+    /// and the caller's CTM is applied to transform bboxes.
     fn extract_images_from_form_xobject(
         &mut self,
         xobject_ref: ObjectRef,
@@ -6978,25 +7203,40 @@ impl PdfDocument {
         parent_resources: &Object,
         parent_ctm: crate::content::Matrix,
         xobject_stack: &mut Vec<ObjectRef>,
+        filter: &ImageExtractFilter,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
-        use crate::content::parse_content_stream;
+        use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
-
-        let mut images = Vec::new();
 
         // Cycle detection
         if xobject_stack.contains(&xobject_ref) || xobject_stack.len() >= 100 {
+            return Ok(Vec::new());
+        }
+
+        // Check image result cache — images stored with Form's own Matrix only
+        if let Some(cached_images) = self.form_xobject_images_cache.get(&xobject_ref) {
+            let images = cached_images
+                .iter()
+                .map(|img| {
+                    let mut cloned = img.clone();
+                    if let Some(rect) = cloned.bbox() {
+                        cloned.set_bbox(self.transform_bbox_with_ctm(rect, parent_ctm));
+                    }
+                    cloned
+                })
+                .collect();
             return Ok(images);
         }
+
         xobject_stack.push(xobject_ref);
 
-        let xobject_dict = xobject.as_dict().ok_or_else(|| Error::ParseError {
+        let xobj_dict = xobject.as_dict().ok_or_else(|| Error::ParseError {
             offset: 0,
             reason: "Form XObject is not a dictionary".to_string(),
         })?;
 
         // Get Form resources (with fallback to parent)
-        let form_resources = if let Some(form_res) = xobject_dict.get("Resources") {
+        let form_resources = if let Some(form_res) = xobj_dict.get("Resources") {
             if let Some(ref_obj) = form_res.as_reference() {
                 self.load_object(ref_obj)?
             } else {
@@ -7006,25 +7246,65 @@ impl PdfDocument {
             parent_resources.clone()
         };
 
+        // Pre-resolve XObject dictionary for this form's resources
+        let form_xobject_dict = if let Some(res_dict) = form_resources.as_dict() {
+            if let Some(xobj_entry) = res_dict.get("XObject") {
+                let resolved = if let Some(ref_obj) = xobj_entry.as_reference() {
+                    self.load_object(ref_obj)?
+                } else {
+                    xobj_entry.clone()
+                };
+                resolved.as_dict().cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Get Form transformation matrix (default to identity)
-        let matrix = if let Some(matrix_obj) = xobject_dict.get("Matrix") {
+        let form_matrix = if let Some(matrix_obj) = xobj_dict.get("Matrix") {
             self.parse_matrix_from_object(matrix_obj)
                 .unwrap_or_else(crate::content::Matrix::identity)
         } else {
             crate::content::Matrix::identity()
         };
 
-        // Combine transformations
-        let new_ctm = parent_ctm.multiply(&matrix);
+        // Decode form stream — check cache first to avoid repeated decompression
+        let stream_data = if let Some(cached) = self.xobject_stream_cache.get(&xobject_ref) {
+            cached.as_ref().clone()
+        } else {
+            match self.decode_stream_with_encryption(xobject, xobject_ref) {
+                Ok(data) => {
+                    const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
+                    if self.xobject_stream_cache_bytes + data.len() <= MAX_STREAM_CACHE_BYTES {
+                        self.xobject_stream_cache_bytes += data.len();
+                        self.xobject_stream_cache
+                            .insert(xobject_ref, std::sync::Arc::new(data.clone()));
+                    }
+                    data
+                },
+                Err(e) => {
+                    log::warn!("Failed to decode Form XObject stream: {}, skipping", e);
+                    xobject_stack.pop();
+                    return Ok(Vec::new());
+                },
+            }
+        };
 
-        // Decode form stream
-        let stream_data = self.decode_stream_with_encryption(xobject, xobject_ref)?;
+        // Parse operators using fast image-only path (skips text operators)
+        let operators = match parse_content_stream_images_only(&stream_data) {
+            Ok(ops) => ops,
+            Err(_) => {
+                xobject_stack.pop();
+                return Ok(Vec::new());
+            },
+        };
 
-        // Parse operators from form stream
-        let operators = parse_content_stream(&stream_data)?;
-
-        // Process operators (similar to extract_images_from_content)
-        let mut ctm_stack = vec![new_ctm];
+        // Extract using only the Form's own Matrix (no parent_ctm yet).
+        // This allows caching the results and applying different parent CTMs later.
+        let mut raw_images = Vec::new();
+        let mut ctm_stack = vec![form_matrix];
 
         for op in operators {
             match op {
@@ -7046,17 +7326,23 @@ impl PdfDocument {
                 },
 
                 Operator::Do { name } => {
-                    let current_ctm = ctm_stack
-                        .last()
-                        .copied()
-                        .unwrap_or_else(crate::content::Matrix::identity);
-                    if let Ok(mut xobj_images) = self.extract_images_from_xobject_do(
-                        &name,
-                        &form_resources,
-                        current_ctm,
-                        xobject_stack,
-                    ) {
-                        images.append(&mut xobj_images);
+                    if let Some(ref xobj_d) = form_xobject_dict {
+                        let current_ctm = ctm_stack
+                            .last()
+                            .copied()
+                            .unwrap_or_else(crate::content::Matrix::identity);
+                        // For nested Do operators, pass identity as parent_ctm since
+                        // we're building raw (un-transformed) images for caching
+                        if let Ok(mut xobj_images) = self.extract_images_from_xobject_do(
+                            &name,
+                            xobj_d,
+                            Some(&form_resources),
+                            current_ctm,
+                            xobject_stack,
+                            filter,
+                        ) {
+                            raw_images.append(&mut xobj_images);
+                        }
                     }
                 },
 
@@ -7066,15 +7352,31 @@ impl PdfDocument {
                         .copied()
                         .unwrap_or_else(crate::content::Matrix::identity);
                     if let Ok(image) = self.extract_image_from_inline(&dict, &data, current_ctm) {
-                        images.push(image);
+                        raw_images.push(image);
                     }
                 },
 
-                _ => {}, // Ignore other operators
+                _ => {},
             }
         }
 
         xobject_stack.pop();
+
+        // Cache the raw images (with Form's own Matrix applied, but no parent CTM)
+        self.form_xobject_images_cache
+            .insert(xobject_ref, raw_images.clone());
+
+        // Apply parent_ctm to produce final images for this call
+        let images = raw_images
+            .into_iter()
+            .map(|mut img| {
+                if let Some(rect) = img.bbox() {
+                    img.set_bbox(self.transform_bbox_with_ctm(rect, parent_ctm));
+                }
+                img
+            })
+            .collect();
+
         Ok(images)
     }
 
@@ -7307,6 +7609,13 @@ fn validate_object_at_offset<R: Read + Seek>(
         Some(e) => e,
         None => return false,
     };
+    // Compressed objects live inside object streams — their "offset" is the
+    // stream object number, not a byte position.  We cannot validate them by
+    // seeking, but their presence in a correctly parsed xref stream is
+    // sufficient proof that the xref is valid.
+    if entry.entry_type == crate::xref::XRefEntryType::Compressed {
+        return true;
+    }
     if reader.seek(SeekFrom::Start(entry.offset)).is_err() {
         return false;
     }
@@ -11005,5 +11314,34 @@ mod tests {
                 .as_bytes(),
         );
         assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().page_count_u32(), 0);
+    }
+
+    /// Regression test: validate_object_at_offset must return true for
+    /// compressed (type 2) xref entries.  Previously, it treated the object
+    /// stream number as a byte offset, sought to a random location, and
+    /// returned false — triggering a full-file xref reconstruction that took
+    /// 35+ seconds on large PDFs.
+    #[test]
+    fn test_validate_compressed_xref_entry() {
+        use crate::xref::{CrossRefTable, XRefEntry, XRefEntryType};
+
+        let mut xref = CrossRefTable::new();
+        // Add a compressed entry: object 5 lives inside object stream 10, at index 3
+        xref.entries.insert(
+            5,
+            XRefEntry {
+                entry_type: XRefEntryType::Compressed,
+                offset: 10,    // object stream number, NOT a byte offset
+                generation: 3, // index within the stream
+                in_use: true,
+            },
+        );
+
+        let data = b"%PDF-1.7\n%%EOF\n";
+        let mut cursor = Cursor::new(data.to_vec());
+        let obj_ref = ObjectRef { id: 5, gen: 0 };
+
+        // Must return true — compressed objects are valid by virtue of being in the xref
+        assert!(validate_object_at_offset(&mut cursor, &xref, obj_ref));
     }
 }

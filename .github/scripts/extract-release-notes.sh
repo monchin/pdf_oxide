@@ -40,7 +40,7 @@ cat >> release-notes.md << 'FOOTER'
 
 ---
 
-### 📥 Installation
+### Installation
 
 **Rust (crates.io)**
 ```bash
@@ -57,8 +57,34 @@ pip install pdf_oxide
 npm install pdf-oxide-wasm
 ```
 
+**CLI (Homebrew)**
+```bash
+brew install yfedoseev/tap/pdf-oxide
+```
+
+**CLI (Scoop — Windows)**
+```powershell
+scoop bucket add pdf-oxide https://github.com/yfedoseev/scoop-pdf-oxide
+scoop install pdf-oxide
+```
+
+**CLI (Shell installer)**
+```bash
+curl -fsSL https://raw.githubusercontent.com/yfedoseev/pdf_oxide/main/install.sh | sh
+```
+
+**CLI (cargo-binstall)**
+```bash
+cargo binstall pdf_oxide_cli
+```
+
+**MCP Server (for AI assistants)**
+```bash
+cargo install pdf_oxide_mcp
+```
+
 **Pre-built Binaries**
-Download archives for Linux, macOS, and Windows from the assets below.
+Download archives for Linux, macOS, and Windows from the assets below. Each archive includes both `pdf-oxide` (CLI) and `pdf-oxide-mcp` (MCP server).
 
 ### Platform Support
 | Platform | Architecture | Archive |

@@ -66,47 +66,64 @@ pub fn cluster_chars_into_words(chars: &[TextChar], epsilon: f32) -> Vec<Vec<usi
         return vec![vec![0]];
     }
 
-    // Simplified distance-based clustering
-    // Group characters that are within epsilon distance
-    let mut visited = vec![false; chars.len()];
+    // Optimized clustering using sort-based approach: O(n log n)
+    // Sort characters by Y then X, group into lines, then cluster by X-proximity.
+
+    let mut indices: Vec<usize> = (0..chars.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let y_cmp =
+            crate::utils::safe_float_cmp(chars[a].bbox.center().y, chars[b].bbox.center().y);
+        if y_cmp != std::cmp::Ordering::Equal {
+            return y_cmp;
+        }
+        crate::utils::safe_float_cmp(chars[a].bbox.center().x, chars[b].bbox.center().x)
+    });
+
+    // Group into lines (chars within epsilon distance vertically)
+    let mut lines: Vec<Vec<usize>> = vec![];
+    let mut current_line: Vec<usize> = vec![indices[0]];
+    let mut line_y = chars[indices[0]].bbox.center().y;
+
+    for &idx in &indices[1..] {
+        let y = chars[idx].bbox.center().y;
+        if (y - line_y).abs() <= epsilon {
+            current_line.push(idx);
+        } else {
+            lines.push(std::mem::take(&mut current_line));
+            current_line.push(idx);
+            line_y = y;
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    // Within each line, cluster by X-proximity
     let mut clusters: Vec<Vec<usize>> = vec![];
 
-    for i in 0..chars.len() {
-        if visited[i] {
-            continue;
-        }
+    for line in &lines {
+        let mut cluster = vec![line[0]];
 
-        let mut cluster = vec![i];
-        visited[i] = true;
+        for &idx in &line[1..] {
+            let prev_idx = *cluster.last().unwrap();
+            let prev_center = chars[prev_idx].bbox.center();
+            let curr_center = chars[idx].bbox.center();
+            let distance = ((prev_center.x - curr_center.x).powi(2)
+                + (prev_center.y - curr_center.y).powi(2))
+            .sqrt();
 
-        // Find all chars within epsilon distance
-        let mut j = 0;
-        while j < cluster.len() {
-            let current_idx = cluster[j];
-            let current_center = chars[current_idx].bbox.center();
-
-            // Check all unvisited characters
-            for k in 0..chars.len() {
-                if visited[k] {
-                    continue;
-                }
-
-                let other_center = chars[k].bbox.center();
-                let distance = ((current_center.x - other_center.x).powi(2)
-                    + (current_center.y - other_center.y).powi(2))
-                .sqrt();
-
-                if distance <= epsilon {
-                    cluster.push(k);
-                    visited[k] = true;
-                }
+            if distance <= epsilon {
+                cluster.push(idx);
+            } else {
+                cluster.sort_by(|&a, &b| {
+                    crate::utils::safe_float_cmp(chars[a].bbox.x, chars[b].bbox.x)
+                });
+                clusters.push(std::mem::take(&mut cluster));
+                cluster.push(idx);
             }
-
-            j += 1;
         }
 
-        // Sort cluster by x-coordinate
-        cluster.sort_by(|&a, &b| chars[a].bbox.x.partial_cmp(&chars[b].bbox.x).unwrap());
+        cluster.sort_by(|&a, &b| crate::utils::safe_float_cmp(chars[a].bbox.x, chars[b].bbox.x));
         clusters.push(cluster);
     }
 
@@ -176,46 +193,38 @@ pub fn cluster_words_into_lines(words: &[TextBlock], epsilon_y: f32) -> Vec<Vec<
         return vec![vec![0]];
     }
 
-    // Simplified Y-coordinate clustering
-    // Group words with similar Y positions
-    let mut visited = vec![false; words.len()];
+    // Optimized clustering using sort-based approach: O(n log n)
+    // Sort words by Y, then group consecutive words within epsilon_y.
+
+    let mut indices: Vec<usize> = (0..words.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let y_cmp = crate::utils::safe_float_cmp(words[a].bbox.y, words[b].bbox.y);
+        if y_cmp != std::cmp::Ordering::Equal {
+            return y_cmp;
+        }
+        crate::utils::safe_float_cmp(words[a].bbox.x, words[b].bbox.x)
+    });
+
     let mut clusters: Vec<Vec<usize>> = vec![];
+    let mut current_cluster: Vec<usize> = vec![indices[0]];
+    let mut cluster_y = words[indices[0]].bbox.y;
 
-    for i in 0..words.len() {
-        if visited[i] {
-            continue;
+    for &idx in &indices[1..] {
+        if (words[idx].bbox.y - cluster_y).abs() <= epsilon_y {
+            current_cluster.push(idx);
+        } else {
+            current_cluster
+                .sort_by(|&a, &b| crate::utils::safe_float_cmp(words[a].bbox.x, words[b].bbox.x));
+            clusters.push(std::mem::take(&mut current_cluster));
+            current_cluster.push(idx);
+            cluster_y = words[idx].bbox.y;
         }
+    }
 
-        let mut cluster = vec![i];
-        visited[i] = true;
-
-        // Find all words with similar Y position
-        let mut j = 0;
-        while j < cluster.len() {
-            let current_idx = cluster[j];
-            let current_y = words[current_idx].bbox.y;
-
-            // Check all unvisited words
-            for k in 0..words.len() {
-                if visited[k] {
-                    continue;
-                }
-
-                let other_y = words[k].bbox.y;
-                let distance = (current_y - other_y).abs();
-
-                if distance <= epsilon_y {
-                    cluster.push(k);
-                    visited[k] = true;
-                }
-            }
-
-            j += 1;
-        }
-
-        // Sort cluster by X position (left-to-right)
-        cluster.sort_by(|&a, &b| words[a].bbox.x.partial_cmp(&words[b].bbox.x).unwrap());
-        clusters.push(cluster);
+    if !current_cluster.is_empty() {
+        current_cluster
+            .sort_by(|&a, &b| crate::utils::safe_float_cmp(words[a].bbox.x, words[b].bbox.x));
+        clusters.push(current_cluster);
     }
 
     clusters
@@ -239,105 +248,68 @@ pub fn cluster_chars_into_words(chars: &[TextChar], epsilon: f32) -> Vec<Vec<usi
         return vec![vec![0]];
     }
 
-    // True spatial DBSCAN: check ALL characters within epsilon distance
-    let mut visited = vec![false; chars.len()];
-    let mut clusters: Vec<Vec<usize>> = vec![];
+    // Optimized spatial clustering using sort-based approach: O(n log n)
+    // Instead of O(n²) brute-force DBSCAN, sort characters by Y then X,
+    // and scan linearly to find connected components.
 
-    // Debug: Check if we have characters near Y=1535 (the problematic line)
-    let debug_y = 1535.0;
-    let has_debug_chars = chars.iter().any(|c| (c.bbox.y - debug_y).abs() < 10.0);
+    // Create indices sorted by Y (line grouping), then X (reading order)
+    let mut indices: Vec<usize> = (0..chars.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let y_cmp =
+            crate::utils::safe_float_cmp(chars[a].bbox.center().y, chars[b].bbox.center().y);
+        if y_cmp != std::cmp::Ordering::Equal {
+            return y_cmp;
+        }
+        crate::utils::safe_float_cmp(chars[a].bbox.center().x, chars[b].bbox.center().x)
+    });
 
-    if has_debug_chars {
-        log::warn!("🔍 DEBUG: Processing line near Y={}, epsilon={:.1}", debug_y, epsilon);
-        log::warn!("Characters in this region:");
-        for (idx, ch) in chars.iter().enumerate() {
-            if (ch.bbox.y - debug_y).abs() < 10.0 {
-                log::warn!("  [{}] '{}' at X={:.1}, Y={:.1}", idx, ch.char, ch.bbox.x, ch.bbox.y);
-            }
+    // Group into lines first (chars within font_size * 0.5 vertically)
+    let mut lines: Vec<Vec<usize>> = vec![];
+    let mut current_line: Vec<usize> = vec![indices[0]];
+    let mut line_y = chars[indices[0]].bbox.center().y;
+
+    for &idx in &indices[1..] {
+        let y = chars[idx].bbox.center().y;
+        let font_half = chars[idx].font_size * 0.5;
+        if (y - line_y).abs() < font_half.max(chars[current_line[0]].font_size * 0.5) {
+            current_line.push(idx);
+        } else {
+            lines.push(std::mem::take(&mut current_line));
+            current_line.push(idx);
+            line_y = y;
         }
     }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
 
-    for i in 0..chars.len() {
-        if visited[i] {
-            continue;
-        }
+    // Within each line, cluster by X-proximity (gap <= epsilon)
+    let mut clusters: Vec<Vec<usize>> = vec![];
 
-        let mut cluster = vec![i];
-        visited[i] = true;
+    for line in &lines {
+        // Line is already sorted by X from the initial sort
+        let mut cluster = vec![line[0]];
 
-        // Debug: Log if this is a character in the problematic region
-        let is_debug_char = (chars[i].bbox.y - debug_y).abs() < 10.0;
-        if is_debug_char && has_debug_chars {
-            log::warn!(
-                "🔍 Starting cluster with char[{}] '{}' at X={:.1}",
-                i,
-                chars[i].char,
-                chars[i].bbox.x
-            );
-        }
+        for &idx in &line[1..] {
+            let prev_idx = *cluster.last().unwrap();
+            let prev_center_x = chars[prev_idx].bbox.center().x;
+            let curr_center_x = chars[idx].bbox.center().x;
+            let dx = (curr_center_x - prev_center_x).abs();
 
-        // BFS to find all connected characters
-        let mut j = 0;
-        while j < cluster.len() {
-            let current_idx = cluster[j];
-            let current = &chars[current_idx];
-            let current_center = current.bbox.center();
-
-            // Check ALL unvisited characters (not just consecutive ones!)
-            for k in 0..chars.len() {
-                if visited[k] {
-                    continue;
-                }
-
-                let other = &chars[k];
-                let other_center = other.bbox.center();
-
-                // Compute spatial distance
-                let dx = (current_center.x - other_center.x).abs();
-                let dy = (current_center.y - other_center.y).abs();
-
-                // Word boundary heuristic: same line + close horizontally
-                // Use font size for vertical tolerance (more robust than fixed epsilon)
-                let same_line = dy < current.font_size * 0.5;
-                let close_horiz = dx <= epsilon;
-
-                // Debug: Log distance checks for problematic chars
-                if is_debug_char && has_debug_chars && (other.bbox.y - debug_y).abs() < 10.0 {
-                    if same_line && close_horiz {
-                        log::warn!(
-                            "  ✅ Adding '{}' (dx={:.1}, dy={:.1}) - CONNECTED",
-                            other.char,
-                            dx,
-                            dy
-                        );
-                    } else if same_line {
-                        log::warn!(
-                            "  ❌ Rejecting '{}' (dx={:.1}, dy={:.1}) - too far horizontally",
-                            other.char,
-                            dx,
-                            dy
-                        );
-                    }
-                }
-
-                if same_line && close_horiz {
-                    cluster.push(k);
-                    visited[k] = true;
-                }
+            if dx <= epsilon {
+                cluster.push(idx);
+            } else {
+                // Sort cluster by X position (left-to-right)
+                cluster.sort_by(|&a, &b| {
+                    crate::utils::safe_float_cmp(chars[a].bbox.x, chars[b].bbox.x)
+                });
+                clusters.push(std::mem::take(&mut cluster));
+                cluster.push(idx);
             }
-
-            j += 1;
         }
 
-        // Sort cluster by X position (left-to-right)
-        cluster.sort_by(|&a, &b| chars[a].bbox.x.partial_cmp(&chars[b].bbox.x).unwrap());
-
-        // Debug: Show the final cluster if it contains debug chars
-        if is_debug_char && has_debug_chars {
-            let cluster_text: String = cluster.iter().map(|&idx| chars[idx].char).collect();
-            log::warn!("🔍 Final cluster: \"{}\"", cluster_text);
-        }
-
+        // Don't forget the last cluster
+        cluster.sort_by(|&a, &b| crate::utils::safe_float_cmp(chars[a].bbox.x, chars[b].bbox.x));
         clusters.push(cluster);
     }
 
@@ -355,59 +327,62 @@ pub fn cluster_words_into_lines(words: &[TextBlock], epsilon_y: f32) -> Vec<Vec<
         return vec![];
     }
 
-    let mut clusters: Vec<Vec<usize>> = vec![];
-    let mut assigned = vec![false; words.len()];
+    // Optimized clustering using sort-based approach: O(n log n)
+    // Sort words by Y coordinate, then group consecutive words within epsilon_y.
+    // Within each Y-group, split by column gaps (>50pt horizontal separation).
 
-    // Estimate column gap threshold: if two words are more than 50pt apart horizontally,
-    // they're likely in different columns
     let column_gap_threshold = 50.0;
 
-    for i in 0..words.len() {
-        if assigned[i] {
-            continue;
+    // Sort indices by Y coordinate
+    let mut indices: Vec<usize> = (0..words.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let y_cmp = crate::utils::safe_float_cmp(words[a].bbox.y, words[b].bbox.y);
+        if y_cmp != std::cmp::Ordering::Equal {
+            return y_cmp;
         }
+        crate::utils::safe_float_cmp(words[a].bbox.x, words[b].bbox.x)
+    });
 
-        let mut cluster = vec![i];
-        assigned[i] = true;
+    // Group into Y-bands (words within epsilon_y vertically)
+    let mut y_bands: Vec<Vec<usize>> = vec![];
+    let mut current_band: Vec<usize> = vec![indices[0]];
+    let mut band_y = words[indices[0]].bbox.y;
 
-        // Use BFS to find horizontally connected words at the same Y
-        let mut j = 0;
-        while j < cluster.len() {
-            let current_idx = cluster[j];
-            let current_word = &words[current_idx];
+    for &idx in &indices[1..] {
+        if (words[idx].bbox.y - band_y).abs() <= epsilon_y {
+            current_band.push(idx);
+        } else {
+            y_bands.push(std::mem::take(&mut current_band));
+            current_band.push(idx);
+            band_y = words[idx].bbox.y;
+        }
+    }
+    if !current_band.is_empty() {
+        y_bands.push(current_band);
+    }
 
-            // Check all unassigned words
-            for k in 0..words.len() {
-                if assigned[k] {
-                    continue;
-                }
+    // Within each Y-band, sort by X and split by column gaps
+    let mut clusters: Vec<Vec<usize>> = vec![];
 
-                let other_word = &words[k];
+    for band in &mut y_bands {
+        // Sort by X within band
+        band.sort_by(|&a, &b| crate::utils::safe_float_cmp(words[a].bbox.x, words[b].bbox.x));
 
-                // Check if on same line (Y coordinate)
-                let y_dist = (current_word.bbox.y - other_word.bbox.y).abs();
-                if y_dist > epsilon_y {
-                    continue;
-                }
+        let mut cluster = vec![band[0]];
 
-                // Check if horizontally connected (not across column gap)
-                let x_dist = (current_word.bbox.right() - other_word.bbox.left())
-                    .abs()
-                    .min((other_word.bbox.right() - current_word.bbox.left()).abs());
+        for &idx in &band[1..] {
+            let prev_idx = *cluster.last().unwrap();
+            let x_dist = (words[idx].bbox.left() - words[prev_idx].bbox.right())
+                .abs()
+                .min((words[prev_idx].bbox.left() - words[idx].bbox.right()).abs());
 
-                // Words are in the same line if they're close horizontally
-                // (within column gap threshold)
-                if x_dist < column_gap_threshold {
-                    cluster.push(k);
-                    assigned[k] = true;
-                }
+            if x_dist < column_gap_threshold {
+                cluster.push(idx);
+            } else {
+                clusters.push(std::mem::take(&mut cluster));
+                cluster.push(idx);
             }
-
-            j += 1;
         }
-
-        // Sort by x-coordinate
-        cluster.sort_by(|&a, &b| words[a].bbox.x.partial_cmp(&words[b].bbox.x).unwrap());
 
         clusters.push(cluster);
     }
