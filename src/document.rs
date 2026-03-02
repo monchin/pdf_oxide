@@ -2802,8 +2802,14 @@ impl PdfDocument {
         // spans on the same line and reverse the text within each run.
         Self::reverse_rtl_visual_order_runs(&mut spans);
 
-        // Filter out spans with NaN coordinates (invalid CTM calculations)
-        spans.retain(|s| s.bbox.x.is_finite() && s.bbox.y.is_finite());
+        // Filter out spans with NaN/Inf coordinates, dimensions, or font size
+        spans.retain(|s| {
+            s.bbox.x.is_finite()
+                && s.bbox.y.is_finite()
+                && s.bbox.width.is_finite()
+                && s.bbox.height.is_finite()
+                && s.font_size.is_finite()
+        });
 
         // Assemble text from spans, preserving reading order
         let mut text = String::with_capacity(spans.len() * 20); // estimate
@@ -3131,7 +3137,7 @@ impl PdfDocument {
             return;
         }
 
-        // Process from back to front so removal indices stay valid
+        // Iterate forward; drain consumed runs so subsequent indices stay valid
         let mut i = 0;
         while i < spans.len() {
             // Check if this span starts an RTL single-char run

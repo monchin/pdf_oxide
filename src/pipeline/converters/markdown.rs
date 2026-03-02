@@ -316,8 +316,8 @@ impl MarkdownOutputConverter {
         // from the median to prevent their small sizes from skewing heading
         // detection — e.g. many 8.8pt ► spans pulling the median down to 8.8pt,
         // causing all 11pt body text to look like headings (ratio 1.25).
-        // Floor at 8pt to prevent ratio explosion on pages dominated by
-        // small text (tables, figures with tiny labels, etc.).
+        // If all spans are < 9pt (page dominated by small text), falls back to
+        // 12pt default. The .max(8.0) is a safety floor for edge cases.
         let base_font_size = if config.output.detect_headings {
             let mut sizes_sorted: Vec<f32> = sorted
                 .iter()
@@ -405,7 +405,8 @@ impl MarkdownOutputConverter {
                 // Standalone bullet char span (e.g., "►" as its own span)
                 // Replace with "- " prefix; text follows in next span(s)
                 if same_line && !current_line.is_empty() && !current_line.ends_with("- ") {
-                    // Bullet on same line as other content — skip
+                    // Bullet on same line as other content — preserve as-is
+                    current_line.push_str(&span.span.text);
                 } else if !current_line.ends_with("- ") {
                     current_line.push_str("- ");
                 }
