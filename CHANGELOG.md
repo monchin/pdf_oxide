@@ -2,26 +2,18 @@
 
 All notable changes to PDFOxide are documented here.
 
-<<<<<<< HEAD
-## [0.3.14] - 2026-03-XX
-> Consolidated Text Logic, Performance, Reliability, Competitor Parity
+## [0.3.14] - 2026-03-02
+> Parity in API & Bug Fixing (Issue #185, #193)
 
 ### Features
 
-- **High-Level Rendering API** (#185) — added `Pdf::render_page()` to Rust, Python, and WASM. Supports rendering any page to `Image` (Png/Jpeg) with custom DPI and quality settings.
-- **CLI Rendering** (#185) — new `pdf-oxide render` command for batch converting PDF pages to images.
-- **Word and Line Extraction** (#185) — added `extract_words()` and `extract_text_lines()` to all bindings. Provides semantic grouping of characters with bounding boxes, font info, and styling for easy integration with layout-aware tools (parity with `pdfplumber.extract_words()`).
-- **Geometric Primitive Extraction** (#185) — added `extract_rects()` and `extract_lines()` to identify vector graphics like table borders, separators, and background shapes.
-- **Hybrid Table Detection** (#185) — updated `SpatialTableDetector` to use vector lines as hints, significantly improving detection of "bordered" tables and header row identification.
-
-### Refactoring
-
-- **Consolidated text decoding and positioning logic** (#187) — unified the high-level `extract_text_spans()` and low-level `extract_chars()` paths into a single shared engine to prevent logic drift and ensure consistent character handling.
-- **Fixed render_page for in-memory PDFs** — ensured that PDFs created from bytes or strings can be rendered by automatically initializing a temporary editor if needed.
-||||||| parent of b0690fa (release: v0.3.14 — Fix inconsistent text extraction (Issue #193))
-=======
-## [0.3.14] - 2026-03-02
-> Inconsistent Text Extraction, Cache Poisoning (Issue #193)
+- **High-Level Rendering API** (#185, #190) — added `Pdf::render_page()` to Rust, Python, and WASM. Supports rendering any page to `Image` (Png/Jpeg) with custom DPI and quality settings.
+- **Word and Line Extraction** (#185, #189) — added `extract_words()` and `extract_text_lines()` to all bindings. Provides semantic grouping of characters with bounding boxes, font info, and styling for easy integration with layout-aware tools (parity with `pdfplumber.extract_words()`).
+- **Geometric Primitive Extraction** (#185, #191) — added `extract_rects()` and `extract_lines()` to identify vector graphics like table borders, separators, and background shapes.
+- **Hybrid Table Detection** (#185, #192) — updated `SpatialTableDetector` to use vector lines as hints, significantly improving detection of "bordered" tables and header row identification.
+- **API Harmonization** — implemented the fluent `.within(page, rect)` pattern across Rust, Python, and WASM, providing a unified and consistent experience for scoped extraction on all platforms.
+- **Deep Data Access** — added `.chars` property to `TextWord` and `TextLine` objects in Python, enabling granular access to individual character metadata.
+- **CLI Enhancements** — added `pdf-oxide render` for image generation and `pdf-oxide paths` for geometric JSON extraction. Integrated `--area` filtering across all extraction commands.
 
 ### Bug Fixes — Text Extraction (#193)
 
@@ -30,12 +22,18 @@ Reported by **@cole-dda** — repeated calls to `extract_texts()` and `extract_s
 - **Fixed XObject span cache poisoning** — resolved an issue where `extract_chars()` (low-level API) would incorrectly populate the high-level `xobject_spans_cache` with empty results. Because `extract_chars()` does not collect spans, it was "poisoning" the cache for subsequent `extract_spans()` calls, causing them to return empty data for any content inside Form XObjects.
 - **Improved extraction mode isolation** — ensured that the text extractor explicitly separates character and span extraction paths. The span result cache is now only accessed and updated when in span extraction mode, and internal span buffers are cleared when entering character mode.
 
+### Refactoring
+
+- **Consolidated text decoding and positioning logic** (#187) — unified the high-level `extract_text_spans()` and low-level `extract_chars()` paths into a single shared engine to prevent logic drift and ensure consistent character handling.
+- **Fixed render_page for in-memory PDFs** — ensured that PDFs created from bytes or strings can be rendered by automatically initializing a temporary editor if needed.
+- **Improved Clustering Accuracy** — updated character clustering to use gap-based distance instead of center-to-center distance, ensuring accurate word grouping regardless of font size.
+
 ### Community Contributors
 
-Thank you to **@cole-dda** for identifying this critical caching bug (#193). The detailed reproduction case was essential for pinpointing the interaction between the low-level character API and the document-level XObject caches.
->>>>>>> b0690fa (release: v0.3.14 — Fix inconsistent text extraction (Issue #193))
+Thank you to **@ankursri494** (Ankur Srivastava) for the excellent proposal to bridge the gap between `PdfPlumber`'s flexibility and PDFOxide's performance (#185). Your detailed breakdown of word-level and table extraction requirements was the roadmap for this release!
 
-## [0.3.13] - 2026-03-02
+Thank you to **@cole-dda** for identifying the critical caching bug (#193) and reporting the character extraction quality issue with excellent reproduction cases (#186). Your contributions have made PDFOxide significantly more robust for professional production pipelines.
+## [0.3.14] - 2026-03-02
 > Character Extraction Quality, Multi-byte Encoding (Issue #186)
 
 ### Bug Fixes — Character Extraction (#186)
@@ -50,7 +48,7 @@ Reported by **@cole-dda** — garbled output when using `extract_chars()` on PDF
 
 Thank you to **@cole-dda** for identifying and reporting the character extraction quality issue with an excellent reproduction case (#186). Your report directly led to identifying the divergence between our high-level and low-level extraction paths, making `extract_chars()` significantly more robust for CJK and other multi-byte documents. We really appreciate your contribution to making PDF Oxide better!
 
-## [0.3.12] - 2026-03-01
+## [0.3.14] - 2026-03-01
 > Text Extraction Quality, Determinism, Performance, Markdown Conversion
 
 ### Bug Fixes — Text Extraction (#181)
@@ -113,7 +111,7 @@ Reported by **@yunho-c** — broken markdown output on the Analog Devices AD5940
 ### Tests
 
 - 8 new unit tests for bullet detection (`is_bullet_span`, `starts_with_bullet`, `strip_bullet`), list item rendering, and heading over-detection prevention.
-- Benchmarked on 198 PDFs: 0 panics, 0 timeouts, 0 errors on both v0.3.11 and v0.3.12.
+- Benchmarked on 198 PDFs: 0 panics, 0 timeouts, 0 errors on both v0.3.11 and v0.3.14.
 
 ### Community Contributors
 
