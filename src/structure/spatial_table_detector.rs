@@ -22,6 +22,21 @@
 use crate::layout::text_block::TextSpan;
 use crate::structure::table_extractor::{ExtractedTable, TableCell, TableRow};
 
+/// Strategy for detecting table boundaries (v0.3.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum TableStrategy {
+    /// Use only vector lines to define boundaries.
+    #[serde(rename = "lines")]
+    Lines,
+    /// Use only text alignment to define boundaries.
+    #[serde(rename = "text")]
+    Text,
+    /// Use both text and lines (hybrid approach).
+    #[default]
+    #[serde(rename = "both")]
+    Both,
+}
+
 /// Configuration for spatial table detection.
 ///
 /// Controls the behavior of table detection algorithms. All parameters are in user space units
@@ -32,6 +47,12 @@ pub struct TableDetectionConfig {
     ///
     /// When disabled, detect_tables_from_spans returns an empty vector.
     pub enabled: bool,
+
+    /// Strategy for horizontal boundary detection (rows).
+    pub horizontal_strategy: TableStrategy,
+
+    /// Strategy for vertical boundary detection (columns).
+    pub vertical_strategy: TableStrategy,
 
     /// X-coordinate tolerance for column detection in user space units (default: 5.0)
     ///
@@ -68,24 +89,20 @@ pub struct TableDetectionConfig {
     /// Very wide tables (>15 columns) are often false positives from unusual layouts.
     /// This serves as a sanity check for column detection.
     pub max_table_columns: usize,
-
-    /// Enable line-based table detection (v0.3.14).
-    ///
-    /// When true, uses vector lines as hints for better "bordered" table extraction.
-    pub use_lines: bool,
 }
 
 impl Default for TableDetectionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Both,
+            vertical_strategy: TableStrategy::Both,
             column_tolerance: 5.0,
             row_tolerance: 2.8,
             min_table_cells: 4,
             min_table_columns: 2,
             regular_row_ratio: 0.7,
             max_table_columns: 15,
-            use_lines: true,
         }
     }
 }
@@ -97,13 +114,14 @@ impl TableDetectionConfig {
     pub fn strict() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Lines,
+            vertical_strategy: TableStrategy::Lines,
             column_tolerance: 2.0,
             row_tolerance: 1.0,
             min_table_cells: 6,
             min_table_columns: 3,
             regular_row_ratio: 0.8,
             max_table_columns: 12,
-            use_lines: true,
         }
     }
 
@@ -113,13 +131,14 @@ impl TableDetectionConfig {
     pub fn relaxed() -> Self {
         Self {
             enabled: true,
+            horizontal_strategy: TableStrategy::Text,
+            vertical_strategy: TableStrategy::Text,
             column_tolerance: 10.0,
             row_tolerance: 5.0,
             min_table_cells: 4,
             min_table_columns: 2,
             regular_row_ratio: 0.5,
             max_table_columns: 20,
-            use_lines: true,
         }
     }
 }
@@ -544,7 +563,11 @@ pub fn detect_tables_with_lines(
     // Use standard spatial detection as baseline
     let candidates = detect_tables_from_spans(spans, config);
 
-    if !config.use_lines || lines.is_empty() {
+    // If both strategies are 'text', we skip line refinement
+    if (config.horizontal_strategy == TableStrategy::Text
+        && config.vertical_strategy == TableStrategy::Text)
+        || lines.is_empty()
+    {
         return candidates;
     }
 

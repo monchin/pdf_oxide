@@ -5606,9 +5606,19 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
-        use crate::structure::spatial_table_detector::{
-            detect_tables_with_lines, TableDetectionConfig,
-        };
+        self.extract_tables_with_config(
+            page_index,
+            crate::structure::spatial_table_detector::TableDetectionConfig::relaxed(),
+        )
+    }
+
+    /// Extract tables from a page using a custom configuration (v0.3.14).
+    pub fn extract_tables_with_config(
+        &mut self,
+        page_index: usize,
+        config: crate::structure::spatial_table_detector::TableDetectionConfig,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        use crate::structure::spatial_table_detector::detect_tables_with_lines;
 
         // Use words instead of spans for better granularity.
         // This ensures that strings with spaces are split into separate columns
@@ -5642,7 +5652,6 @@ impl PdfDocument {
             })
             .collect();
 
-        let config = TableDetectionConfig::relaxed();
         Ok(detect_tables_with_lines(&spans, &lines, &config))
     }
 
@@ -6094,7 +6103,21 @@ impl PdfDocument {
         page_index: usize,
         region: crate::geometry::Rect,
     ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
-        let tables = self.extract_tables(page_index)?;
+        self.extract_tables_in_rect_with_config(
+            page_index,
+            region,
+            crate::structure::spatial_table_detector::TableDetectionConfig::relaxed(),
+        )
+    }
+
+    /// Extract tables from a specific region using custom configuration (v0.3.14).
+    pub fn extract_tables_in_rect_with_config(
+        &mut self,
+        page_index: usize,
+        region: crate::geometry::Rect,
+        config: crate::structure::spatial_table_detector::TableDetectionConfig,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        let tables = self.extract_tables_with_config(page_index, config)?;
         Ok(tables
             .into_iter()
             .filter(|table| {

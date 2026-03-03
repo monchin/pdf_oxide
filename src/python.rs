@@ -1736,20 +1736,34 @@ impl PyPdfDocument {
     /// Args:
     ///     page (int): Page index (0-based)
     ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///     table_settings (dict, optional): Dictionary of table detection settings
+    ///         - horizontal_strategy: "text", "lines", or "both"
+    ///         - vertical_strategy: "text", "lines", or "both"
+    ///         - column_tolerance: f32
+    ///         - row_tolerance: f32
+    ///         - min_table_cells: int
+    ///         - min_table_columns: int
     ///
     /// Returns:
     ///     list[dict]: List of detected tables
+    #[pyo3(signature = (page, region=None, table_settings=None))]
     fn extract_tables(
         &mut self,
         py: Python<'_>,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
+        table_settings: Option<Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        let config = table_settings_to_config(table_settings)?;
+
         let tables_result = if let Some((x, y, w, h)) = region {
-            self.inner
-                .extract_tables_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+            self.inner.extract_tables_in_rect_with_config(
+                page,
+                crate::geometry::Rect::new(x, y, w, h),
+                config,
+            )
         } else {
-            self.inner.extract_tables(page)
+            self.inner.extract_tables_with_config(page, config)
         };
 
         let tables = tables_result
@@ -3953,6 +3967,16 @@ impl PyWord {
         self.inner.is_italic
     }
 
+    /// Individual characters that make up this word.
+    #[getter]
+    fn chars(&self) -> Vec<PyTextChar> {
+        self.inner
+            .chars
+            .iter()
+            .map(|c| PyTextChar { inner: c.clone() })
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!("TextWord({:?})", self.inner.text)
     }
@@ -3988,6 +4012,16 @@ impl PyTextLine {
             .words
             .iter()
             .map(|w| PyWord { inner: w.clone() })
+            .collect()
+    }
+
+    /// Individual characters that make up this line.
+    #[getter]
+    fn chars(&self) -> Vec<PyTextChar> {
+        self.inner
+            .words
+            .iter()
+            .flat_map(|w| w.chars.iter().map(|c| PyTextChar { inner: c.clone() }))
             .collect()
     }
 
@@ -4039,6 +4073,59 @@ fn path_to_py_dict(py: Python<'_>, path: &crate::elements::PathContent) -> PyRes
     dict.set_item("operations_count", path.operations.len())?;
 
     Ok(dict.into())
+}
+
+/// Convert Python table_settings dict to TableDetectionConfig.
+fn table_settings_to_config(
+    settings: Option<Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<crate::structure::spatial_table_detector::TableDetectionConfig> {
+    use crate::structure::spatial_table_detector::{TableDetectionConfig, TableStrategy};
+    let mut config = TableDetectionConfig::relaxed();
+
+    if let Some(dict) = settings {
+        if let Some(val) = dict.get_item("horizontal_strategy")? {
+            let s: String = val.extract()?;
+            config.horizontal_strategy = match s.as_str() {
+                "lines" => TableStrategy::Lines,
+                "text" => TableStrategy::Text,
+                "both" => TableStrategy::Both,
+                _ => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Invalid horizontal_strategy: {}",
+                        s
+                    )))
+                },
+            };
+        }
+        if let Some(val) = dict.get_item("vertical_strategy")? {
+            let s: String = val.extract()?;
+            config.vertical_strategy = match s.as_str() {
+                "lines" => TableStrategy::Lines,
+                "text" => TableStrategy::Text,
+                "both" => TableStrategy::Both,
+                _ => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Invalid vertical_strategy: {}",
+                        s
+                    )))
+                },
+            };
+        }
+        if let Some(val) = dict.get_item("column_tolerance")? {
+            config.column_tolerance = val.extract()?;
+        }
+        if let Some(val) = dict.get_item("row_tolerance")? {
+            config.row_tolerance = val.extract()?;
+        }
+        if let Some(val) = dict.get_item("min_table_cells")? {
+            config.min_table_cells = val.extract()?;
+        }
+        if let Some(val) = dict.get_item("min_table_columns")? {
+            config.min_table_columns = val.extract()?;
+        }
+    }
+
+    Ok(config)
 }
 
 // === Outline Helper ===

@@ -819,6 +819,20 @@ impl Pdf {
         }
     }
 
+    /// Extract tables from a page with custom configuration (v0.3.14).
+    pub fn extract_tables_with_config(
+        &mut self,
+        page: usize,
+        config: crate::structure::spatial_table_detector::TableDetectionConfig,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_tables_with_config(page, config)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
     /// Extract text from a specific rectangular region of a page (v0.3.14).
     pub fn extract_text_in_rect(
         &mut self,
