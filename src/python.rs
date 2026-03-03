@@ -193,11 +193,16 @@ impl PyPdfDocument {
     ///
     /// Returns:
     ///     PdfPageRegion: A region object for scoped extraction
-    fn within(&self, page: usize, bbox: (f32, f32, f32, f32)) -> PyPdfPageRegion {
-        PyPdfPageRegion {
+    fn within(
+        slf: Py<Self>,
+        page: usize,
+        bbox: (f32, f32, f32, f32),
+    ) -> PyResult<PyPdfPageRegion> {
+        Ok(PyPdfPageRegion {
+            doc: slf,
             page_index: page,
             region: crate::geometry::Rect::new(bbox.0, bbox.1, bbox.2, bbox.3),
-        }
+        })
     }
 
     /// Render a page to an image.
@@ -3056,8 +3061,8 @@ use crate::editor::{ElementId, PdfElement, PdfPage as RustPdfPage, PdfText as Ru
 
 /// A rectangular region within a PDF page for scoped extraction (v0.3.14).
 #[pyclass(name = "PdfPageRegion")]
-#[derive(Clone)]
 pub struct PyPdfPageRegion {
+    pub doc: Py<PyPdfDocument>,
     pub page_index: usize,
     pub region: crate::geometry::Rect,
 }
@@ -3073,6 +3078,56 @@ impl PyPdfPageRegion {
             self.region.width,
             self.region.height,
         )
+    }
+
+    /// Extract text from this region.
+    fn extract_text(&self, py: Python<'_>) -> PyResult<String> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        doc_bound.extract_text(self.page_index, Some(self.bbox()))
+    }
+
+    /// Extract words from this region.
+    fn extract_words(&self, py: Python<'_>) -> PyResult<Vec<PyWord>> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        doc_bound.extract_words(self.page_index, Some(self.bbox()))
+    }
+
+    /// Extract lines from this region.
+    fn extract_text_lines(&self, py: Python<'_>) -> PyResult<Vec<PyTextLine>> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        doc_bound.extract_text_lines(self.page_index, Some(self.bbox()))
+    }
+
+    /// Extract tables from this region.
+    #[pyo3(signature = (table_settings=None))]
+    fn extract_tables(
+        &self,
+        py: Python<'_>,
+        table_settings: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        doc_bound.extract_tables(py, self.page_index, Some(self.bbox()), table_settings)
+    }
+
+    /// Extract images from this region.
+    fn extract_images(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        doc_bound.extract_images(py, self.page_index, Some(self.bbox()))
+    }
+
+    /// Extract vector paths from this region.
+    fn extract_paths(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut doc_bound = self.doc.bind(py).borrow_mut();
+        let paths = doc_bound
+            .inner
+            .extract_paths_in_rect(self.page_index, self.region)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract paths: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for path in &paths {
+            py_list.append(path_to_py_dict(py, path)?)?;
+        }
+        Ok(py_list.into())
     }
 
     fn __repr__(&self) -> String {

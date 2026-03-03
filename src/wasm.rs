@@ -152,6 +152,22 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Failed to extract all text: {}", e)))
     }
 
+    /// Focus extraction on a specific rectangular region of a page (v0.3.14).
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - [x, y, width, height] in points
+    #[wasm_bindgen(js_name = "within")]
+    pub fn within(&self, page_index: usize, region: Vec<f32>) -> Result<WasmPdfPageRegion, JsValue> {
+        if region.len() < 4 {
+            return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+        }
+        Ok(WasmPdfPageRegion {
+            doc: self.clone(),
+            page_index,
+            region: crate::geometry::Rect::new(region[0], region[1], region[2], region[3]),
+        })
+    }
+
     /// Render a page to an image (PNG).
     ///
     /// Requires the `rendering` feature.
@@ -808,6 +824,104 @@ impl WasmPdfDocument {
         serde_wasm_bindgen::to_value(&lines)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
+}
+
+/// A focused view of a PDF page region for scoped extraction (v0.3.14).
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmPdfPageRegion {
+    doc: WasmPdfDocument,
+    page_index: usize,
+    region: crate::geometry::Rect,
+}
+
+#[wasm_bindgen]
+impl WasmPdfPageRegion {
+    /// Extract text from this region.
+    #[wasm_bindgen(js_name = "extractText")]
+    pub fn extract_text(&mut self) -> Result<String, JsValue> {
+        self.doc
+            .inner
+            .extract_text_in_rect(
+                self.page_index,
+                self.region,
+                crate::layout::RectFilterMode::Intersects,
+            )
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract text: {}", e)))
+    }
+
+    /// Extract words from this region.
+    #[wasm_bindgen(js_name = "extractWords")]
+    pub fn extract_words(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_words(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract text lines from this region.
+    #[wasm_bindgen(js_name = "extractTextLines")]
+    pub fn extract_text_lines(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_text_lines(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract tables from this region.
+    #[wasm_bindgen(js_name = "extractTables")]
+    pub fn extract_tables(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_tables(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract images from this region.
+    #[wasm_bindgen(js_name = "extractImages")]
+    pub fn extract_images(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_images(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+
+    /// Extract vector paths from this region.
+    #[wasm_bindgen(js_name = "extractPaths")]
+    pub fn extract_paths(&mut self) -> Result<JsValue, JsValue> {
+        self.doc.extract_paths(
+            self.page_index,
+            Some(vec![
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
+            ]),
+        )
+    }
+}
+
+impl WasmPdfDocument {
 
     // ========================================================================
     // Group 6c: Form Fields

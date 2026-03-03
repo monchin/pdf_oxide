@@ -938,6 +938,24 @@ impl Pdf {
         }
     }
 
+    /// Create a focused view of a page region for scoped extraction (v0.3.14).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("input.pdf")?;
+    /// let rect = Rect::new(0.0, 700.0, 612.0, 100.0); // Top header
+    /// let header_text = pdf.within(0, rect).extract_text()?;
+    /// ```
+    pub fn within(&mut self, page_index: usize, region: crate::geometry::Rect) -> PdfPageRegion<'_> {
+        PdfPageRegion {
+            pdf: self,
+            page_index,
+            region,
+            mode: crate::layout::RectFilterMode::Intersects,
+        }
+    }
+
     fn ensure_editor(&mut self) -> Result<()> {
         if self.editor.is_none() && !self.bytes.is_empty() {
             let editor = DocumentEditor::open_from_bytes(self.bytes.clone())?;
@@ -2261,6 +2279,80 @@ impl Default for Pdf {
 ///     .font_size(11.0)
 ///     .from_markdown("# Content")?;
 /// ```
+/// A focused view of a PDF page region for scoped extraction (v0.3.14).
+///
+/// This struct provides the same extraction methods as `Pdf` but automatically
+/// filters results to the specified rectangular area.
+pub struct PdfPageRegion<'a> {
+    pdf: &'a mut Pdf,
+    page_index: usize,
+    region: crate::geometry::Rect,
+    mode: crate::layout::RectFilterMode,
+}
+
+impl<'a> PdfPageRegion<'a> {
+    /// Set the filter mode (Intersects or FullyContained).
+    pub fn filter_mode(mut self, mode: crate::layout::RectFilterMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Extract text from this region.
+    pub fn extract_text(&mut self) -> Result<String> {
+        self.pdf
+            .extract_text_in_rect(self.page_index, self.region, self.mode)
+    }
+
+    /// Extract words from this region.
+    pub fn extract_words(&mut self) -> Result<Vec<crate::layout::Word>> {
+        self.pdf
+            .extract_words_in_rect(self.page_index, self.region, self.mode)
+    }
+
+    /// Extract lines from this region.
+    pub fn extract_text_lines(&mut self) -> Result<Vec<crate::layout::TextLine>> {
+        self.pdf
+            .extract_text_lines_in_rect(self.page_index, self.region, self.mode)
+    }
+
+    /// Extract individual characters from this region.
+    pub fn extract_chars(&mut self) -> Result<Vec<crate::layout::TextChar>> {
+        self.pdf
+            .extract_chars_in_rect(self.page_index, self.region, self.mode)
+    }
+
+    /// Extract rectangles from this region.
+    pub fn extract_rects(&mut self) -> Result<Vec<crate::elements::PathContent>> {
+        let rects = self.pdf.extract_rects(self.page_index)?;
+        Ok(rects
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&self.region))
+            .collect())
+    }
+
+    /// Extract straight lines from this region.
+    pub fn extract_lines(&mut self) -> Result<Vec<crate::elements::PathContent>> {
+        let lines = self.pdf.extract_lines(self.page_index)?;
+        Ok(lines
+            .into_iter()
+            .filter(|p| p.bbox.intersects(&self.region))
+            .collect())
+    }
+
+    /// Extract images from this region.
+    pub fn extract_images(&mut self) -> Result<Vec<crate::extractors::PdfImage>> {
+        self.pdf.extract_images_in_rect(self.page_index, self.region)
+    }
+
+    /// Extract tables from this region.
+    pub fn extract_tables(
+        &mut self,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.pdf.extract_tables_in_rect(self.page_index, self.region)
+    }
+}
+
+/// A builder for creating PDF documents with complex layouts.
 #[derive(Debug, Clone)]
 pub struct PdfBuilder {
     config: PdfConfig,

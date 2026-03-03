@@ -85,6 +85,19 @@ fn test_area_filtered_extraction() {
 }
 
 #[test]
+fn test_within_harmonized_api() {
+    let mut pdf = Pdf::from_text("Scoped Content").unwrap();
+    let rect = pdf_oxide::geometry::Rect::new(0.0, 0.0, 612.0, 792.0);
+    
+    // Test the within() fluent API
+    let text = pdf.within(0, rect).extract_text().unwrap();
+    assert!(text.contains("Scoped Content"));
+    
+    let words = pdf.within(0, rect).extract_words().unwrap();
+    assert!(!words.is_empty());
+}
+
+#[test]
 fn test_image_metadata_extraction() {
     // We'll use a real PDF with an image or just check if the fields exist
     // For now, check if extract_images returns the new fields
