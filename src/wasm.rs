@@ -152,6 +152,24 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Failed to extract all text: {}", e)))
     }
 
+    /// Render a page to an image (PNG).
+    ///
+    /// Requires the `rendering` feature.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param dpi - Dots per inch (default: 150)
+    /// @returns Uint8Array containing the PNG image data
+    #[cfg(feature = "rendering")]
+    #[wasm_bindgen(js_name = "renderPage")]
+    pub fn render_page(&mut self, page_index: usize, dpi: Option<u32>) -> Result<Vec<u8>, JsValue> {
+        let opts = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(150));
+        let img = self
+            .inner
+            .render_page(page_index, &opts)
+            .map_err(|e| JsValue::from_str(&format!("Failed to render page: {}", e)))?;
+        Ok(img.as_bytes().to_vec())
+    }
+
     // ========================================================================
     // Group 3: Format Conversion
     // ========================================================================
@@ -299,12 +317,137 @@ impl WasmPdfDocument {
     /// Returns an array of objects with: text, bbox, font_name, font_size,
     /// font_weight, is_italic, color, etc.
     #[wasm_bindgen(js_name = "extractSpans")]
-    pub fn extract_spans(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let spans = self
-            .inner
-            .extract_spans(page_index)
+    pub fn extract_spans(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let spans_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner.extract_spans(page_index).map(|list| {
+                use crate::layout::SpatialCollectionFiltering;
+                list.filter_by_rect(
+                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+            })
+        } else {
+            self.inner.extract_spans(page_index)
+        };
+
+        let spans = spans_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract spans: {}", e)))?;
         serde_wasm_bindgen::to_value(&spans)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract word-level data from a page.
+    ///
+    /// Returns an array of objects with: text, bbox, font_name, font_size,
+    /// font_weight, is_italic, is_bold.
+    #[wasm_bindgen(js_name = "extractWords")]
+    pub fn extract_words(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let words_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner.extract_words_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_words(page_index)
+        };
+
+        let words = words_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract words: {}", e)))?;
+        serde_wasm_bindgen::to_value(&words)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract text lines from a page.
+    ///
+    /// Returns an array of objects with: text, bbox, words (array of Word objects).
+    #[wasm_bindgen(js_name = "extractTextLines")]
+    pub fn extract_text_lines(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let lines_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner.extract_text_lines_in_rect(
+                page_index,
+                crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_text_lines(page_index)
+        };
+
+        let lines = lines_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract lines: {}", e)))?;
+        serde_wasm_bindgen::to_value(&lines)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract tables from a page (v0.3.14).
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    #[wasm_bindgen(js_name = "extractTables")]
+    pub fn extract_tables(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let tables_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner
+                .extract_tables_in_rect(page_index, crate::geometry::Rect::new(r[0], r[1], r[2], r[3]))
+        } else {
+            self.inner.extract_tables(page_index)
+        };
+
+        let tables = tables_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract tables: {}", e)))?;
+
+        // Convert tables to a simplified JSON-friendly format
+        let json_tables: Vec<serde_json::Value> = tables
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "col_count": t.col_count,
+                    "row_count": t.rows.len(),
+                    "bbox": t.bbox.map(|b| serde_json::json!({"x": b.x, "y": b.y, "width": b.width, "height": b.height})),
+                    "has_header": t.has_header,
+                    "rows": t.rows.iter().map(|r| {
+                        serde_json::json!({
+                            "is_header": r.is_header,
+                            "cells": r.cells.iter().map(|c| {
+                                serde_json::json!({
+                                    "text": c.text,
+                                    "bbox": c.bbox.map(|b| serde_json::json!({"x": b.x, "y": b.y, "width": b.width, "height": b.height}))
+                                })
+                            }).collect::<Vec<_>>()
+                        })
+                    }).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&json_tables)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 
@@ -375,11 +518,26 @@ impl WasmPdfDocument {
     ///
     /// Returns an array of objects with: width, height, color_space,
     /// bits_per_component, bbox (if available). Does NOT return raw image bytes.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
     #[wasm_bindgen(js_name = "extractImages")]
-    pub fn extract_images(&mut self, page_index: usize) -> Result<JsValue, JsValue> {
-        let images = self
-            .inner
-            .extract_images(page_index)
+    pub fn extract_images(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let images_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner
+                .extract_images_in_rect(page_index, crate::geometry::Rect::new(r[0], r[1], r[2], r[3]))
+        } else {
+            self.inner.extract_images(page_index)
+        };
+
+        let images = images_result
             .map_err(|e| JsValue::from_str(&format!("Failed to extract images: {}", e)))?;
 
         // Serialize image metadata (not raw bytes)
@@ -406,6 +564,11 @@ impl WasmPdfDocument {
                     });
                     obj.insert("bbox".into(), bbox_obj);
                 }
+                obj.insert(
+                    "rotation".into(),
+                    serde_json::Value::from(img.rotation_degrees()),
+                );
+                obj.insert("matrix".into(), serde_json::json!(img.matrix()));
                 serde_json::Value::Object(obj)
             })
             .collect();
@@ -575,6 +738,74 @@ impl WasmPdfDocument {
             .collect();
 
         serde_wasm_bindgen::to_value(&result)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract only rectangles from a page (v0.3.14).
+    ///
+    /// Identifies paths that form axis-aligned rectangles.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    /// @returns Array of path objects
+    #[wasm_bindgen(js_name = "extractRects")]
+    pub fn extract_rects(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let rects_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner.extract_rects(page_index).map(|list| {
+                use crate::layout::SpatialCollectionFiltering;
+                list.filter_by_rect(
+                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+            })
+        } else {
+            self.inner.extract_rects(page_index)
+        };
+
+        let rects = rects_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract rects: {}", e)))?;
+        serde_wasm_bindgen::to_value(&rects)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
+
+    /// Extract only straight lines from a page (v0.3.14).
+    ///
+    /// Identifies paths that form a single straight line segment.
+    ///
+    /// @param page_index - Zero-based page number
+    /// @param region - Optional [x, y, width, height] to filter by
+    /// @returns Array of path objects
+    #[wasm_bindgen(js_name = "extractLines")]
+    pub fn extract_lines(
+        &mut self,
+        page_index: usize,
+        region: Option<Vec<f32>>,
+    ) -> Result<JsValue, JsValue> {
+        let lines_result = if let Some(r) = region {
+            if r.len() < 4 {
+                return Err(JsValue::from_str("Region must have 4 elements [x, y, w, h]"));
+            }
+            self.inner.extract_lines(page_index).map(|list| {
+                use crate::layout::SpatialCollectionFiltering;
+                list.filter_by_rect(
+                    &crate::geometry::Rect::new(r[0], r[1], r[2], r[3]),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+            })
+        } else {
+            self.inner.extract_lines(page_index)
+        };
+
+        let lines = lines_result
+            .map_err(|e| JsValue::from_str(&format!("Failed to extract lines: {}", e)))?;
+        serde_wasm_bindgen::to_value(&lines)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
 

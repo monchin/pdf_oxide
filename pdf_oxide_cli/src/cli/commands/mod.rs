@@ -19,6 +19,8 @@ pub mod search;
 pub mod split;
 pub mod text;
 pub mod watermark;
+pub mod render;
+pub mod paths;
 
 use pdf_oxide::PdfDocument;
 use std::path::Path;

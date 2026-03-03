@@ -3,11 +3,20 @@
 All notable changes to PDFOxide are documented here.
 
 ## [0.3.14] - 2026-03-XX
-> Consolidated Text Logic, Performance, Reliability
+> Consolidated Text Logic, Performance, Reliability, Competitor Parity
+
+### Features
+
+- **High-Level Rendering API** (#185) — added `Pdf::render_page()` to Rust, Python, and WASM. Supports rendering any page to `Image` (Png/Jpeg) with custom DPI and quality settings.
+- **CLI Rendering** (#185) — new `pdf-oxide render` command for batch converting PDF pages to images.
+- **Word and Line Extraction** (#185) — added `extract_words()` and `extract_text_lines()` to all bindings. Provides semantic grouping of characters with bounding boxes, font info, and styling for easy integration with layout-aware tools (parity with `pdfplumber.extract_words()`).
+- **Geometric Primitive Extraction** (#185) — added `extract_rects()` and `extract_lines()` to identify vector graphics like table borders, separators, and background shapes.
+- **Hybrid Table Detection** (#185) — updated `SpatialTableDetector` to use vector lines as hints, significantly improving detection of "bordered" tables and header row identification.
 
 ### Refactoring
 
 - **Consolidated text decoding and positioning logic** (#187) — unified the high-level `extract_text_spans()` and low-level `extract_chars()` paths into a single shared engine to prevent logic drift and ensure consistent character handling.
+- **Fixed render_page for in-memory PDFs** — ensured that PDFs created from bytes or strings can be rendered by automatically initializing a temporary editor if needed.
 
 ## [0.3.13] - 2026-03-02
 > Character Extraction Quality, Multi-byte Encoding (Issue #186)

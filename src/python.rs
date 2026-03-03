@@ -163,10 +163,78 @@ impl PyPdfDocument {
     ///     >>> doc = PdfDocument("sample.pdf")
     ///     >>> text = doc.extract_text(0)
     ///     >>> print(text[:100])
-    fn extract_text(&mut self, page: usize) -> PyResult<String> {
-        self.inner
-            .extract_text(page)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract text: {}", e)))
+    fn extract_text(
+        &mut self,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<String> {
+        if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_text_in_rect(
+                    page,
+                    crate::geometry::Rect::new(x, y, w, h),
+                    crate::layout::RectFilterMode::Intersects,
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to extract text in region: {}", e))
+                })
+        } else {
+            self.inner
+                .extract_text(page)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract text: {}", e)))
+        }
+    }
+
+    /// Focus extraction on a specific rectangular region of a page (v0.3.14).
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     bbox (tuple): (x, y, width, height) in points
+    ///
+    /// Returns:
+    ///     PdfPageRegion: A region object for scoped extraction
+    fn within(&self, page: usize, bbox: (f32, f32, f32, f32)) -> PyPdfPageRegion {
+        PyPdfPageRegion {
+            page_index: page,
+            region: crate::geometry::Rect::new(bbox.0, bbox.1, bbox.2, bbox.3),
+        }
+    }
+
+    /// Render a page to an image.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     dpi (int): Dots per inch (default: 72)
+    ///     format (str): Output format ("png" or "jpeg", default: "png")
+    ///
+    /// Returns:
+    ///     bytes: Image data
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("sample.pdf")
+    ///     >>> image_bytes = doc.render_page(0, dpi=300)
+    ///     >>> with open("page0.png", "wb") as f:
+    ///     ...     f.write(image_bytes)
+    #[cfg(feature = "rendering")]
+    fn render_page(
+        &mut self,
+        page: usize,
+        dpi: Option<u32>,
+        format: Option<&str>,
+    ) -> PyResult<Vec<u8>> {
+        let mut options = crate::rendering::RenderOptions::with_dpi(dpi.unwrap_or(72));
+        if let Some(fmt) = format {
+            match fmt.to_lowercase().as_str() {
+                "jpeg" | "jpg" => {
+                    options = options.as_jpeg(85);
+                },
+                _ => {}, // Default is PNG
+            }
+        }
+
+        crate::rendering::render_page(&mut self.inner, page, &options)
+            .map(|img| img.data)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to render page: {}", e)))
     }
 
     /// Extract individual characters from a page.
@@ -201,6 +269,77 @@ impl PyPdfDocument {
                     .collect()
             })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract characters: {}", e)))
+    }
+
+    /// Extract words from a page (groups characters by proximity).
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[TextWord]: List of words with bounding boxes
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("sample.pdf")
+    ///     >>> words = doc.extract_words(0)
+    ///     >>> for w in words:
+    ///     ...     print(f"{w.text} at {w.bbox}")
+    fn extract_words(
+        &mut self,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Vec<PyWord>> {
+        let words_result = if let Some((x, y, w, h)) = region {
+            self.inner.extract_words_in_rect(
+                page,
+                crate::geometry::Rect::new(x, y, w, h),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_words(page)
+        };
+
+        words_result
+            .map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| PyWord { inner: w })
+                    .collect()
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract words: {}", e)))
+    }
+
+    /// Extract lines of text from a page (groups words by line).
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///
+    /// Returns:
+    ///     list[TextLine]: List of text lines with bounding boxes
+    fn extract_text_lines(
+        &mut self,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Vec<PyTextLine>> {
+        let lines_result = if let Some((x, y, w, h)) = region {
+            self.inner.extract_text_lines_in_rect(
+                page,
+                crate::geometry::Rect::new(x, y, w, h),
+                crate::layout::RectFilterMode::Intersects,
+            )
+        } else {
+            self.inner.extract_text_lines(page)
+        };
+
+        lines_result
+            .map(|lines| {
+                lines
+                    .into_iter()
+                    .map(|l| PyTextLine { inner: l })
+                    .collect()
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))
     }
 
     /// Check if document has a structure tree (Tagged PDF).
@@ -1557,10 +1696,20 @@ impl PyPdfDocument {
     ///     >>> images = doc.extract_images(0)
     ///     >>> for img in images:
     ///     ...     print(f"{img['width']}x{img['height']} {img['color_space']}")
-    fn extract_images(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
-        let images = self
-            .inner
-            .extract_images(page)
+    fn extract_images(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Py<PyAny>> {
+        let images_result = if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_images_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+        } else {
+            self.inner.extract_images(page)
+        };
+
+        let images = images_result
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract images: {}", e)))?;
 
         let py_list = pyo3::types::PyList::empty(py);
@@ -1575,6 +1724,68 @@ impl PyPdfDocument {
             } else {
                 dict.set_item("bbox", py.None())?;
             }
+            dict.set_item("rotation", img.rotation_degrees())?;
+            dict.set_item("matrix", img.matrix())?;
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    /// Extract tables from a page (v0.3.14).
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     region (tuple, optional): (x, y, width, height) to filter by
+    ///
+    /// Returns:
+    ///     list[dict]: List of detected tables
+    fn extract_tables(
+        &mut self,
+        py: Python<'_>,
+        page: usize,
+        region: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<Py<PyAny>> {
+        let tables_result = if let Some((x, y, w, h)) = region {
+            self.inner
+                .extract_tables_in_rect(page, crate::geometry::Rect::new(x, y, w, h))
+        } else {
+            self.inner.extract_tables(page)
+        };
+
+        let tables = tables_result
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract tables: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for table in &tables {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("col_count", table.col_count)?;
+            dict.set_item("row_count", table.rows.len())?;
+            if let Some(bbox) = table.bbox {
+                dict.set_item("bbox", (bbox.x, bbox.y, bbox.width, bbox.height))?;
+            } else {
+                dict.set_item("bbox", py.None())?;
+            }
+            dict.set_item("has_header", table.has_header)?;
+
+            // Convert rows/cells to simple Python structures
+            let rows_list = pyo3::types::PyList::empty(py);
+            for row in &table.rows {
+                let row_dict = pyo3::types::PyDict::new(py);
+                row_dict.set_item("is_header", row.is_header)?;
+                let cells_list = pyo3::types::PyList::empty(py);
+                for cell in &row.cells {
+                    let cell_dict = pyo3::types::PyDict::new(py);
+                    cell_dict.set_item("text", &cell.text)?;
+                    if let Some(bbox) = cell.bbox {
+                        cell_dict.set_item("bbox", (bbox.x, bbox.y, bbox.width, bbox.height))?;
+                    }
+                    cells_list.append(cell_dict)?;
+                }
+                row_dict.set_item("cells", cells_list)?;
+                rows_list.append(row_dict)?;
+            }
+            dict.set_item("rows", rows_list)?;
+
             py_list.append(dict)?;
         }
         Ok(py_list.into())
@@ -1751,6 +1962,19 @@ impl PyPdfDocument {
     ///     >>> paths = doc.extract_paths(0)
     ///     >>> for p in paths:
     ///     ...     print(f"Path at {p['bbox']}, stroke={p['stroke_color']}")
+    /// Extract vector paths from a page.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of paths with bbox, stroke, fill, and styling
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("vector.pdf")
+    ///     >>> paths = doc.extract_paths(0)
+    ///     >>> for p in paths:
+    ///     ...     print(f"Path at {p['bbox']}, stroke={p['stroke_color']}")
     fn extract_paths(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
         let paths = self
             .inner
@@ -1759,39 +1983,52 @@ impl PyPdfDocument {
 
         let py_list = pyo3::types::PyList::empty(py);
         for path in &paths {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("bbox", (path.bbox.x, path.bbox.y, path.bbox.width, path.bbox.height))?;
-            dict.set_item("stroke_width", path.stroke_width)?;
+            py_list.append(path_to_py_dict(py, path)?)?;
+        }
+        Ok(py_list.into())
+    }
 
-            if let Some(ref color) = path.stroke_color {
-                dict.set_item("stroke_color", (color.r, color.g, color.b))?;
-            } else {
-                dict.set_item("stroke_color", py.None())?;
-            }
+    /// Extract only rectangles from a page (v0.3.14).
+    ///
+    /// Identifies paths that form axis-aligned rectangles (simple 're' ops
+    /// or closed paths with 4 perpendicular lines).
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of rectangles
+    fn extract_rects(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let paths = self
+            .inner
+            .extract_rects(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract rects: {}", e)))?;
 
-            if let Some(ref color) = path.fill_color {
-                dict.set_item("fill_color", (color.r, color.g, color.b))?;
-            } else {
-                dict.set_item("fill_color", py.None())?;
-            }
+        let py_list = pyo3::types::PyList::empty(py);
+        for path in &paths {
+            py_list.append(path_to_py_dict(py, path)?)?;
+        }
+        Ok(py_list.into())
+    }
 
-            let cap_str = match path.line_cap {
-                crate::elements::LineCap::Butt => "butt",
-                crate::elements::LineCap::Round => "round",
-                crate::elements::LineCap::Square => "square",
-            };
-            dict.set_item("line_cap", cap_str)?;
+    /// Extract only straight lines from a page (v0.3.14).
+    ///
+    /// Identifies paths that form a single straight line segment.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of lines
+    fn extract_lines(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let paths = self
+            .inner
+            .extract_lines(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract lines: {}", e)))?;
 
-            let join_str = match path.line_join {
-                crate::elements::LineJoin::Miter => "miter",
-                crate::elements::LineJoin::Round => "round",
-                crate::elements::LineJoin::Bevel => "bevel",
-            };
-            dict.set_item("line_join", join_str)?;
-
-            dict.set_item("operations_count", path.operations.len())?;
-
-            py_list.append(dict)?;
+        let py_list = pyo3::types::PyList::empty(py);
+        for path in &paths {
+            py_list.append(path_to_py_dict(py, path)?)?;
         }
         Ok(py_list.into())
     }
@@ -2803,6 +3040,35 @@ impl PyOfficeConverter {
 
 use crate::editor::{ElementId, PdfElement, PdfPage as RustPdfPage, PdfText as RustPdfText};
 
+/// A rectangular region within a PDF page for scoped extraction (v0.3.14).
+#[pyclass(name = "PdfPageRegion")]
+#[derive(Clone)]
+pub struct PyPdfPageRegion {
+    pub page_index: usize,
+    pub region: crate::geometry::Rect,
+}
+
+#[pymethods]
+impl PyPdfPageRegion {
+    /// Get the bounding box of this region.
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        (
+            self.region.x,
+            self.region.y,
+            self.region.width,
+            self.region.height,
+        )
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PdfPageRegion(page={}, bbox={:?})",
+            self.page_index, self.region
+        )
+    }
+}
+
 /// Python wrapper for PDF page with DOM-like access.
 ///
 /// Provides hierarchical access to page content elements.
@@ -2906,6 +3172,31 @@ impl PyPdfPage {
         // Note: ElementId is UUID-based, this is a simplified lookup
         // In practice, users would use the ID from an existing element
         None // Simplified - would need proper ID parsing
+    }
+
+    /// Render page to an image.
+    ///
+    /// Args:
+    ///     dpi (int): Dots per inch (default: 72)
+    ///     format (str): Output format ("png" or "jpeg", default: "png")
+    ///
+    /// Returns:
+    ///     bytes: Image data
+    ///
+    /// Example:
+    ///     >>> image_bytes = page.to_image(dpi=300)
+    ///     >>> with open("page.png", "wb") as f:
+    ///     ...     f.write(image_bytes)
+    #[cfg(feature = "rendering")]
+    fn to_image(&self, _dpi: Option<u32>, _format: Option<&str>) -> PyResult<Vec<u8>> {
+        // We need mutable access to the document to render
+        // But PyPdfPage only holds a cloned RustPdfPage which doesn't have the document
+        // Ideally, rendering should happen on the Document, or Page needs a ref to Document
+        // For now, we'll raise an error pointing users to PdfDocument.render_page()
+        // which we'll add next.
+        Err(PyRuntimeError::new_err(
+            "Rendering requires document access. Use doc.render_page(page_index) instead.",
+        ))
     }
 
     /// Set text content for an element by ID.
@@ -3616,6 +3907,138 @@ impl PyTextSpan {
             preview, self.inner.font_name, self.inner.font_size
         )
     }
+}
+
+/// A word extracted from a PDF page (v0.3.14).
+#[pyclass(name = "TextWord")]
+#[derive(Clone)]
+pub struct PyWord {
+    inner: crate::layout::Word,
+}
+
+#[pymethods]
+impl PyWord {
+    #[getter]
+    fn text(&self) -> String {
+        self.inner.text.clone()
+    }
+
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        (
+            self.inner.bbox.x,
+            self.inner.bbox.y,
+            self.inner.bbox.width,
+            self.inner.bbox.height,
+        )
+    }
+
+    #[getter]
+    fn font_name(&self) -> String {
+        self.inner.dominant_font.clone()
+    }
+
+    #[getter]
+    fn font_size(&self) -> f32 {
+        self.inner.avg_font_size
+    }
+
+    #[getter]
+    fn is_bold(&self) -> bool {
+        self.inner.is_bold
+    }
+
+    #[getter]
+    fn is_italic(&self) -> bool {
+        self.inner.is_italic
+    }
+
+    fn __repr__(&self) -> String {
+        format!("TextWord({:?})", self.inner.text)
+    }
+}
+
+/// A line of text extracted from a PDF page (v0.3.14).
+#[pyclass(name = "TextLine")]
+#[derive(Clone)]
+pub struct PyTextLine {
+    inner: crate::layout::TextLine,
+}
+
+#[pymethods]
+impl PyTextLine {
+    #[getter]
+    fn text(&self) -> String {
+        self.inner.text.clone()
+    }
+
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        (
+            self.inner.bbox.x,
+            self.inner.bbox.y,
+            self.inner.bbox.width,
+            self.inner.bbox.height,
+        )
+    }
+
+    #[getter]
+    fn words(&self) -> Vec<PyWord> {
+        self.inner
+            .words
+            .iter()
+            .map(|w| PyWord { inner: w.clone() })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("TextLine({:?})", self.inner.text)
+    }
+}
+
+/// Convert PathContent to a Python dictionary.
+fn path_to_py_dict(py: Python<'_>, path: &crate::elements::PathContent) -> PyResult<Py<PyAny>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item(
+        "bbox",
+        (
+            path.bbox.x,
+            path.bbox.y,
+            path.bbox.width,
+            path.bbox.height,
+        ),
+    )?;
+    dict.set_item("stroke_width", path.stroke_width)?;
+
+    if let Some(ref color) = path.stroke_color {
+        dict.set_item("stroke_color", (color.r, color.g, color.b))?;
+    } else {
+        dict.set_item("stroke_color", py.None())?;
+    }
+
+    if let Some(ref color) = path.fill_color {
+        dict.set_item("fill_color", (color.r, color.g, color.b))?;
+    } else {
+        dict.set_item("fill_color", py.None())?;
+    }
+
+    let cap_str = match path.line_cap {
+        crate::elements::LineCap::Butt => "butt",
+        crate::elements::LineCap::Round => "round",
+        crate::elements::LineCap::Square => "square",
+    };
+    dict.set_item("line_cap", cap_str)?;
+
+    let join_str = match path.line_join {
+        crate::elements::LineJoin::Miter => "miter",
+        crate::elements::LineJoin::Round => "round",
+        crate::elements::LineJoin::Bevel => "bevel",
+    };
+    dict.set_item("line_join", join_str)?;
+
+    dict.set_item("operations_count", path.operations.len())?;
+
+    Ok(dict.into())
 }
 
 // === Outline Helper ===
@@ -4457,6 +4880,8 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Text extraction types
     m.add_class::<PyTextChar>()?;
     m.add_class::<PyTextSpan>()?;
+    m.add_class::<PyWord>()?;
+    m.add_class::<PyTextLine>()?;
 
     // Form field types
     m.add_class::<PyFormField>()?;

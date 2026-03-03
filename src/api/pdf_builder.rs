@@ -746,6 +746,272 @@ impl Pdf {
         }
     }
 
+    /// Extract text spans from a page.
+    pub fn extract_spans(&mut self, page: usize) -> Result<Vec<crate::layout::TextSpan>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_spans(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract individual characters from a page.
+    pub fn extract_chars(&mut self, page: usize) -> Result<Vec<crate::layout::TextChar>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_chars(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract words from a page (v0.3.14).
+    pub fn extract_words(&mut self, page: usize) -> Result<Vec<crate::layout::Word>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_words(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract text lines from a page (v0.3.14).
+    pub fn extract_text_lines(&mut self, page: usize) -> Result<Vec<crate::layout::TextLine>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_text_lines(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract rectangles from a page (v0.3.14).
+    pub fn extract_rects(&mut self, page: usize) -> Result<Vec<crate::elements::PathContent>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_rects(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract straight lines from a page (v0.3.14).
+    pub fn extract_lines(&mut self, page: usize) -> Result<Vec<crate::elements::PathContent>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_lines(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract tables from a page (v0.3.14).
+    pub fn extract_tables(
+        &mut self,
+        page: usize,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_tables(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract text from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_text_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<String> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_text_in_rect(page, region, mode)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract words from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_words_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::Word>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_words_in_rect(page, region, mode)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract text lines from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_text_lines_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextLine>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor
+                .source_mut()
+                .extract_text_lines_in_rect(page, region, mode)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract individual characters from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_chars_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+        mode: crate::layout::RectFilterMode,
+    ) -> Result<Vec<crate::layout::TextChar>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor
+                .source_mut()
+                .extract_chars_in_rect(page, region, mode)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract images from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_images_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::extractors::PdfImage>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_images_in_rect(page, region)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract tables from a specific rectangular region of a page (v0.3.14).
+    pub fn extract_tables_in_rect(
+        &mut self,
+        page: usize,
+        region: crate::geometry::Rect,
+    ) -> Result<Vec<crate::structure::table_extractor::ExtractedTable>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_tables_in_rect(page, region)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    /// Extract images from a page (v0.3.14).
+    pub fn extract_images(
+        &mut self,
+        page: usize,
+    ) -> Result<Vec<crate::extractors::PdfImage>> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.source_mut().extract_images(page)
+        } else {
+            Err(Error::InvalidOperation("No document loaded".to_string()))
+        }
+    }
+
+    fn ensure_editor(&mut self) -> Result<()> {
+        if self.editor.is_none() && !self.bytes.is_empty() {
+            let editor = DocumentEditor::open_from_bytes(self.bytes.clone())?;
+            self.editor = Some(editor);
+        }
+        Ok(())
+    }
+
+    /// Render a page to an image.
+    ///
+    /// Requires the `rendering` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pdf = Pdf::open("input.pdf")?;
+    /// let img = pdf.render_page(0, &RenderOptions::default())?;
+    /// img.save("page1.png")?;
+    /// ```
+    #[cfg(feature = "rendering")]
+    pub fn render_page(
+        &mut self,
+        page_index: usize,
+        options: &crate::rendering::RenderOptions,
+    ) -> Result<crate::rendering::RenderedImage> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            crate::rendering::render_page(editor.source_mut(), page_index, options)
+        } else {
+            Err(Error::InvalidOperation(
+                "No document loaded. Use Pdf::open() or create one from content.".to_string(),
+            ))
+        }
+    }
+
+    /// Render a page with custom options (alias for render_page for API compatibility).
+    #[cfg(feature = "rendering")]
+    pub fn render_page_with_options(
+        &mut self,
+        page_index: usize,
+        options: &crate::rendering::RenderOptions,
+    ) -> Result<crate::rendering::RenderedImage> {
+        self.render_page(page_index, options)
+    }
+
+    /// Render a page to a file with default options (150 DPI).
+    #[cfg(feature = "rendering")]
+    pub fn render_page_to_file(&mut self, page: usize, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+
+        let mut options = crate::rendering::RenderOptions::default();
+        if ext == "jpg" || ext == "jpeg" {
+            options.format = crate::rendering::ImageFormat::Jpeg;
+        }
+
+        let image = self.render_page(page, &options)?;
+        image.save(path)
+    }
+
+    /// Render a page to a file with custom DPI.
+    #[cfg(feature = "rendering")]
+    pub fn render_page_to_file_with_dpi(
+        &mut self,
+        page: usize,
+        path: impl AsRef<Path>,
+        dpi: u32,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+
+        let mut options = crate::rendering::RenderOptions::with_dpi(dpi);
+        if ext == "jpg" || ext == "jpeg" {
+            options.format = crate::rendering::ImageFormat::Jpeg;
+        }
+
+        let image = self.render_page(page, &options)?;
+        image.save(path)
+    }
+
     // ========================================================================
     // Text Search
     // ========================================================================
@@ -1954,126 +2220,6 @@ impl Pdf {
         } else {
             Ok(None)
         }
-    }
-
-    // =========================================================================
-    // Page Rendering (requires "rendering" feature)
-    // =========================================================================
-
-    /// Render a page to an image with default options (150 DPI, PNG format).
-    ///
-    /// Requires the "rendering" feature to be enabled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use pdf_oxide::api::Pdf;
-    ///
-    /// let mut doc = Pdf::open("input.pdf")?;
-    /// let image = doc.render_page(0)?;
-    /// image.save("page1.png")?;
-    /// ```
-    #[cfg(feature = "rendering")]
-    pub fn render_page(&mut self, page: usize) -> Result<crate::rendering::RenderedImage> {
-        self.render_page_with_options(page, &crate::rendering::RenderOptions::default())
-    }
-
-    /// Render a page to an image with custom options.
-    ///
-    /// Requires the "rendering" feature to be enabled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use pdf_oxide::api::{Pdf, RenderOptions, ImageFormat};
-    ///
-    /// let mut doc = Pdf::open("input.pdf")?;
-    /// let options = RenderOptions::with_dpi(300).as_jpeg(90);
-    /// let image = doc.render_page_with_options(0, &options)?;
-    /// image.save("page1.jpg")?;
-    /// ```
-    #[cfg(feature = "rendering")]
-    pub fn render_page_with_options(
-        &mut self,
-        page: usize,
-        options: &crate::rendering::RenderOptions,
-    ) -> Result<crate::rendering::RenderedImage> {
-        if let Some(ref mut editor) = self.editor {
-            let doc = editor.source_mut();
-            let mut renderer = crate::rendering::PageRenderer::new(options.clone());
-            renderer.render_page(doc, page)
-        } else {
-            Err(Error::InvalidOperation(
-                "No document loaded. Use Pdf::open() to load a PDF.".to_string(),
-            ))
-        }
-    }
-
-    /// Render a page to a file with default options (150 DPI).
-    ///
-    /// The format is determined by the file extension (.png, .jpg, .jpeg).
-    ///
-    /// Requires the "rendering" feature to be enabled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use pdf_oxide::api::Pdf;
-    ///
-    /// let mut doc = Pdf::open("input.pdf")?;
-    /// doc.render_page_to_file(0, "page1.png")?;
-    /// ```
-    #[cfg(feature = "rendering")]
-    pub fn render_page_to_file(&mut self, page: usize, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-
-        let mut options = crate::rendering::RenderOptions::default();
-        if ext == "jpg" || ext == "jpeg" {
-            options.format = crate::rendering::ImageFormat::Jpeg;
-        }
-
-        let image = self.render_page_with_options(page, &options)?;
-        image.save(path)
-    }
-
-    /// Render a page to a file with custom DPI.
-    ///
-    /// Requires the "rendering" feature to be enabled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use pdf_oxide::api::Pdf;
-    ///
-    /// let mut doc = Pdf::open("input.pdf")?;
-    /// doc.render_page_to_file_with_dpi(0, "page1.png", 300)?;
-    /// ```
-    #[cfg(feature = "rendering")]
-    pub fn render_page_to_file_with_dpi(
-        &mut self,
-        page: usize,
-        path: impl AsRef<Path>,
-        dpi: u32,
-    ) -> Result<()> {
-        let path = path.as_ref();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-
-        let mut options = crate::rendering::RenderOptions::with_dpi(dpi);
-        if ext == "jpg" || ext == "jpeg" {
-            options.format = crate::rendering::ImageFormat::Jpeg;
-        }
-
-        let image = self.render_page_with_options(page, &options)?;
-        image.save(path)
     }
 }
 
