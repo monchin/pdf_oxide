@@ -103,7 +103,7 @@ markdown = doc.to_markdown(0)
 print(f"Markdown:\n{markdown}")
 
 # Get page count
-print(f"Pages: {doc.page_count}")
+print(f"Pages: {doc.page_count()}")
 ```
 
 ## Builder Pattern for Advanced Creation
@@ -327,28 +327,39 @@ from pdf_oxide import PdfDocument
 
 doc = PdfDocument("document.pdf")
 
-# Text spans with font info, position, and style
+# 1. Scoped extraction from a specific area (v0.3.14)
+# Area: (x, y, width, height) in points
+header = doc.within(0, (0, 700, 612, 92)).extract_text()
+
+# 2. Text spans with font info, position, and style
 spans = doc.extract_spans(0)
 for span in spans:
-    print(f"{span.text} — {span.font_name} {span.font_size}pt, bold={span.is_bold}")
+    print(f"{span.text} — {span.font_name} {span.font_size}pt")
 
-# Image metadata
+# 3. Word-level extraction (v0.3.14)
+words = doc.extract_words(0)
+for w in words:
+    print(f"Word: {w.text} at {w.bbox}")
+    # Access character metadata for the word
+    # print(w.chars[0].font_name)
+
+# 4. Line-level extraction (v0.3.14)
+lines = doc.extract_text_lines(0)
+for line in lines:
+    print(f"Line: {line.text}")
+
+# 5. Image metadata
 images = doc.extract_images(0)
 for img in images:
     print(f"{img['width']}x{img['height']} {img['color_space']}")
 
-# Bookmarks / table of contents
+# 6. Bookmarks / table of contents
 outline = doc.get_outline()  # None if no outline
 if outline:
     for item in outline:
         print(f"{item['title']} -> page {item.get('page')}")
 
-# Annotations (links, highlights, form fields, etc.)
-annotations = doc.get_annotations(0)
-for ann in annotations:
-    print(f"{ann['subtype']} at {ann['rect']}")
-
-# Vector paths (lines, curves, shapes)
+# 7. Vector paths (lines, curves, shapes)
 paths = doc.extract_paths(0)
 for path in paths:
     print(f"bbox={path['bbox']}, stroke={path.get('stroke_color')}")
