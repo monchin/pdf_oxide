@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **Fixed `Lines` strategy false positives on plain-text pages** — `extract_tables()` with `horizontal_strategy="lines"` / `vertical_strategy="lines"` was silently falling back to text-coordinate clustering when no vector lines were present, producing spurious tables from ordinary prose. The `Lines` strategy now builds the grid purely from vector path geometry and returns empty when no lines are found.
+
 ## [0.3.14] - 2026-03-03
 > Parity in API & Bug Fixing (Issue #185, #193, #202)
 
