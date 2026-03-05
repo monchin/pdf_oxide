@@ -550,7 +550,147 @@ impl SpatialTableDetector {
     }
 }
 
-/// Hybrid table detection using text spans and vector lines (v0.3.14).
+/// Cluster a list of f32 values using a greedy tolerance-based approach.
+///
+/// Groups nearby values together and returns the running average of each cluster.
+/// Uses the same single-pass greedy strategy as `detect_columns` and `detect_rows`.
+fn cluster_values(values: &[f32], tolerance: f32) -> Vec<f32> {
+    let mut clusters: Vec<f32> = Vec::new();
+    let mut counts: Vec<u32> = Vec::new();
+
+    for &v in values {
+        if let Some(idx) = clusters.iter().position(|&c| (v - c).abs() < tolerance) {
+            counts[idx] += 1;
+            clusters[idx] += (v - clusters[idx]) / counts[idx] as f32;
+        } else {
+            clusters.push(v);
+            counts.push(1);
+        }
+    }
+
+    clusters
+}
+
+/// Detect table structure purely from vector line intersections.
+///
+/// Suitable for bordered tables (tables with explicit drawn grid lines). Extracts
+/// horizontal and vertical line positions from `PathContent`, clusters them into
+/// row/column boundaries, and assigns text spans to the resulting cells.
+///
+/// Returns empty if there are no lines, or if the lines don't form a valid grid.
+fn detect_tables_from_lines(
+    spans: &[TextSpan],
+    lines: &[crate::elements::PathContent],
+    config: &TableDetectionConfig,
+) -> Vec<ExtractedTable> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    // Minimum length to count as a meaningful boundary line.
+    const MIN_LINE_LENGTH: f32 = 10.0;
+    // Maximum perpendicular extent for a segment to be classified as axis-aligned.
+    const LINE_AXIS_TOL: f32 = 2.0;
+
+    let mut h_ys: Vec<f32> = Vec::new();
+    let mut v_xs: Vec<f32> = Vec::new();
+
+    for path in lines {
+        let bbox = &path.bbox;
+
+        if path.is_straight_line() {
+            if bbox.height < LINE_AXIS_TOL && bbox.width > MIN_LINE_LENGTH {
+                h_ys.push(bbox.center().y);
+            } else if bbox.width < LINE_AXIS_TOL && bbox.height > MIN_LINE_LENGTH {
+                v_xs.push(bbox.center().x);
+            }
+        } else if path.is_rectangle() {
+            // A rectangle contributes both horizontal and vertical edges.
+            if bbox.width > MIN_LINE_LENGTH {
+                h_ys.push(bbox.top());
+                h_ys.push(bbox.bottom());
+            }
+            if bbox.height > MIN_LINE_LENGTH {
+                v_xs.push(bbox.left());
+                v_xs.push(bbox.right());
+            }
+        }
+    }
+
+    // Cluster boundary positions.
+    let mut row_ys = cluster_values(&h_ys, config.row_tolerance);
+    let mut col_xs = cluster_values(&v_xs, config.column_tolerance);
+
+    // Need at least 2 boundaries in each dimension to form any cells.
+    if row_ys.len() < 2 || col_xs.len() < 2 {
+        return Vec::new();
+    }
+
+    // Sort: rows top-to-bottom (higher Y first in PDF coordinates), cols left-to-right.
+    row_ys.sort_by(|a, b| crate::utils::safe_float_cmp(*b, *a));
+    col_xs.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
+
+    let num_rows = row_ys.len() - 1;
+    let num_cols = col_xs.len() - 1;
+
+    if num_cols < config.min_table_columns || num_cols > config.max_table_columns {
+        return Vec::new();
+    }
+
+    // Assign each span to the grid cell whose boundaries enclose its center point.
+    let mut cells: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); num_cols]; num_rows];
+
+    for (idx, span) in spans.iter().enumerate() {
+        let cx = span.bbox.center().x;
+        let cy = span.bbox.center().y;
+
+        let row_idx = (0..num_rows).find(|&r| cy <= row_ys[r] && cy >= row_ys[r + 1]);
+        let col_idx = (0..num_cols).find(|&c| cx >= col_xs[c] && cx <= col_xs[c + 1]);
+
+        if let (Some(r), Some(c)) = (row_idx, col_idx) {
+            cells[r][c].push(idx);
+        }
+    }
+
+    // Build ColumnCluster/RowCluster from boundary midpoints.
+    // `span_indices` in these structs is not used by `grid_to_extracted_table`.
+    let columns: Vec<ColumnCluster> = (0..num_cols)
+        .map(|c| ColumnCluster {
+            x_center: (col_xs[c] + col_xs[c + 1]) / 2.0,
+            x_min: col_xs[c],
+            x_max: col_xs[c + 1],
+            span_indices: Vec::new(),
+        })
+        .collect();
+
+    let rows: Vec<RowCluster> = (0..num_rows)
+        .map(|r| RowCluster {
+            y_center: (row_ys[r] + row_ys[r + 1]) / 2.0,
+            y_min: row_ys[r + 1],
+            y_max: row_ys[r],
+            span_indices: Vec::new(),
+        })
+        .collect();
+
+    let grid = GridStructure { columns, rows, cells };
+
+    if !validate_table_structure(&grid, config) {
+        return Vec::new();
+    }
+
+    vec![grid_to_extracted_table(&grid, spans)]
+}
+
+/// Table detection using text spans and/or vector lines.
+///
+/// Routes to the appropriate detection algorithm based on `config.horizontal_strategy`
+/// and `config.vertical_strategy`:
+///
+/// - `Text/Text`: pure coordinate clustering from text span positions.
+/// - `Lines/Lines`: pure line-grid detection from vector path geometry; returns empty
+///   when no lines are present, preventing false positives on plain-text pages.
+/// - Any other combination (`Both`, or mixed): text clustering as baseline, refined
+///   by lines for header detection.
 pub fn detect_tables_with_lines(
     spans: &[TextSpan],
     lines: &[crate::elements::PathContent],
@@ -560,14 +700,24 @@ pub fn detect_tables_with_lines(
         return Vec::new();
     }
 
+    match (config.horizontal_strategy, config.vertical_strategy) {
+        // Pure text: coordinate clustering only, no line involvement.
+        (TableStrategy::Text, TableStrategy::Text) => {
+            return detect_tables_from_spans(spans, config);
+        },
+        // Pure lines: grid defined by vector geometry only.
+        // Returns empty when no lines are present rather than falling back to text detection.
+        (TableStrategy::Lines, TableStrategy::Lines) => {
+            return detect_tables_from_lines(spans, lines, config);
+        },
+        // Both/mixed: fall through to hybrid.
+        _ => {},
+    }
+
     // Use standard spatial detection as baseline
     let candidates = detect_tables_from_spans(spans, config);
 
-    // If both strategies are 'text', we skip line refinement
-    if (config.horizontal_strategy == TableStrategy::Text
-        && config.vertical_strategy == TableStrategy::Text)
-        || lines.is_empty()
-    {
+    if lines.is_empty() {
         return candidates;
     }
 
@@ -1204,5 +1354,158 @@ mod tests {
         assert!((bbox.y - 180.0).abs() < 0.01);
         assert!((bbox.width - 145.0).abs() < 0.01); // 150 - 5
         assert!((bbox.height - 30.0).abs() < 0.01); // 210 - 180
+    }
+
+    // =========================================================================
+    // detect_tables_with_lines — strategy routing
+    // =========================================================================
+
+    /// Build a simple horizontal PathContent line at the given Y.
+    fn make_h_line(x: f32, y: f32, width: f32) -> crate::elements::PathContent {
+        crate::elements::PathContent::line(x, y, x + width, y)
+    }
+
+    /// Build a simple vertical PathContent line at the given X.
+    fn make_v_line(x: f32, y: f32, height: f32) -> crate::elements::PathContent {
+        crate::elements::PathContent::line(x, y, x, y + height)
+    }
+
+    /// Build a rectangle PathContent.
+    fn make_rect_path(x: f32, y: f32, w: f32, h: f32) -> crate::elements::PathContent {
+        crate::elements::PathContent::rect(x, y, w, h)
+    }
+
+    #[test]
+    fn test_lines_strategy_no_lines_returns_empty() {
+        // A plain-text page that would match text-based detection should return
+        // empty when Lines strategy is requested and no vector lines are present.
+        let spans = vec![
+            create_test_span("A", 10.0, 100.0, 10.0, 10.0),
+            create_test_span("B", 50.0, 100.0, 10.0, 10.0),
+            create_test_span("C", 10.0, 80.0, 10.0, 10.0),
+            create_test_span("D", 50.0, 80.0, 10.0, 10.0),
+        ];
+
+        let config = TableDetectionConfig {
+            horizontal_strategy: TableStrategy::Lines,
+            vertical_strategy: TableStrategy::Lines,
+            ..TableDetectionConfig::default()
+        };
+
+        // No vector lines on the page.
+        let tables = detect_tables_with_lines(&spans, &[], &config);
+        assert!(
+            tables.is_empty(),
+            "Lines strategy with no vector lines should return empty, not text-detected tables"
+        );
+    }
+
+    #[test]
+    fn test_text_strategy_ignores_lines() {
+        // Text strategy should produce results based on span positions alone,
+        // even when lines are present (lines are irrelevant).
+        let spans = vec![
+            create_test_span("A", 10.0, 100.0, 10.0, 10.0),
+            create_test_span("B", 50.0, 100.0, 10.0, 10.0),
+            create_test_span("C", 10.0, 80.0, 10.0, 10.0),
+            create_test_span("D", 50.0, 80.0, 10.0, 10.0),
+        ];
+        // Some unrelated lines that should not affect the result.
+        let lines = vec![make_h_line(0.0, 200.0, 100.0)];
+
+        let config = TableDetectionConfig {
+            horizontal_strategy: TableStrategy::Text,
+            vertical_strategy: TableStrategy::Text,
+            ..TableDetectionConfig::default()
+        };
+
+        let tables = detect_tables_with_lines(&spans, &lines, &config);
+        assert_eq!(tables.len(), 1, "Text strategy should detect the 2x2 grid");
+    }
+
+    #[test]
+    fn test_lines_strategy_with_grid_lines_detects_table() {
+        // A 2-row x 2-column bordered table defined by 3 H-lines and 3 V-lines.
+        //
+        //  H: y=110, y=90, y=70
+        //  V: x=5,   x=55, x=105
+        //
+        //  Spans at the center of each cell:
+        //   (30, 100) → row 0, col 0    (80, 100) → row 0, col 1
+        //   (30,  80) → row 1, col 0    (80,  80) → row 1, col 1
+        let spans = vec![
+            create_test_span("A", 25.0, 95.0, 10.0, 10.0),  // center (30, 100)
+            create_test_span("B", 75.0, 95.0, 10.0, 10.0),  // center (80, 100)
+            create_test_span("C", 25.0, 75.0, 10.0, 10.0),  // center (30,  80)
+            create_test_span("D", 75.0, 75.0, 10.0, 10.0),  // center (80,  80)
+        ];
+
+        let lines = vec![
+            make_h_line(5.0, 110.0, 100.0),
+            make_h_line(5.0, 90.0, 100.0),
+            make_h_line(5.0, 70.0, 100.0),
+            make_v_line(5.0, 70.0, 40.0),
+            make_v_line(55.0, 70.0, 40.0),
+            make_v_line(105.0, 70.0, 40.0),
+        ];
+
+        let config = TableDetectionConfig {
+            horizontal_strategy: TableStrategy::Lines,
+            vertical_strategy: TableStrategy::Lines,
+            ..TableDetectionConfig::default()
+        };
+
+        let tables = detect_tables_with_lines(&spans, &lines, &config);
+        assert_eq!(tables.len(), 1, "Should detect one table from grid lines");
+        assert_eq!(tables[0].col_count, 2);
+        assert_eq!(tables[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn test_lines_strategy_with_rect_paths_detects_table() {
+        // Same 2x2 table, built from four cell-rectangles.
+        // Each cell is its own rect; shared edges get clustered together.
+        //
+        //  Col 0: x=5..55   Col 1: x=55..105
+        //  Row 0: y=90..110   Row 1: y=70..90
+        let spans = vec![
+            create_test_span("A", 25.0, 95.0, 10.0, 10.0),  // col 0, row 0
+            create_test_span("B", 75.0, 95.0, 10.0, 10.0),  // col 1, row 0
+            create_test_span("C", 25.0, 75.0, 10.0, 10.0),  // col 0, row 1
+            create_test_span("D", 75.0, 75.0, 10.0, 10.0),  // col 1, row 1
+        ];
+
+        // Four cell rectangles forming a 2x2 grid.
+        let lines = vec![
+            make_rect_path(5.0, 90.0, 50.0, 20.0),   // (0,0): x=5..55,  y=90..110
+            make_rect_path(55.0, 90.0, 50.0, 20.0),  // (0,1): x=55..105, y=90..110
+            make_rect_path(5.0, 70.0, 50.0, 20.0),   // (1,0): x=5..55,  y=70..90
+            make_rect_path(55.0, 70.0, 50.0, 20.0),  // (1,1): x=55..105, y=70..90
+        ];
+
+        let config = TableDetectionConfig {
+            horizontal_strategy: TableStrategy::Lines,
+            vertical_strategy: TableStrategy::Lines,
+            ..TableDetectionConfig::default()
+        };
+
+        let tables = detect_tables_with_lines(&spans, &lines, &config);
+        assert_eq!(tables.len(), 1, "Should detect one table from rectangle paths");
+        assert_eq!(tables[0].col_count, 2);
+        assert_eq!(tables[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn test_cluster_values_groups_nearby() {
+        let values = vec![10.0_f32, 10.2, 10.4, 50.0, 50.1];
+        let clusters = cluster_values(&values, 1.0);
+        assert_eq!(clusters.len(), 2, "Should produce 2 clusters");
+    }
+
+    #[test]
+    fn test_cluster_values_all_separate() {
+        let values = vec![10.0_f32, 20.0, 30.0];
+        let clusters = cluster_values(&values, 1.0);
+        assert_eq!(clusters.len(), 3);
     }
 }
