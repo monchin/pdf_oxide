@@ -48,9 +48,20 @@ from .pdf_oxide import (
     # Advanced Graphics
     Color,
     ExtGState,
+    # Page Templates
+    Artifact,
+    Header,
+    Footer,
+    ArtifactStyle,
     LinearGradient,
     LineCap,
     LineJoin,
+    # OCR (always available as stub if feature is off)
+    OcrConfig,
+    OcrEngine,
+    # Office (always available as stub if feature is off)
+    OfficeConverter,
+    PageTemplate,
     PatternPresets,
     # PDF Creation
     Pdf,
@@ -58,11 +69,6 @@ from .pdf_oxide import (
     RadialGradient,
     # Extraction
     TextSpan,
-    # OCR (always available as stub if feature is off)
-    OcrConfig,
-    OcrEngine,
-    # Office (always available as stub if feature is off)
-    OfficeConverter,
 )
 
 
@@ -80,6 +86,12 @@ __all__ = [
     "LineCap",
     "LineJoin",
     "PatternPresets",
+    # Page Templates
+    "ArtifactStyle",
+    "Artifact",
+    "Header",
+    "Footer",
+    "PageTemplate",
     # Extraction
     "TextSpan",
     # OCR

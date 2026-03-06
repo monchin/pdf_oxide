@@ -228,7 +228,7 @@ fn test_file_vs_bytes_extraction_identical() {
     let data = std::fs::read(path).unwrap();
 
     let mut doc_file = PdfDocument::open(path).unwrap();
-    let mut doc_bytes = PdfDocument::open_from_bytes(data).unwrap();
+    let mut doc_bytes = PdfDocument::from_bytes(data).unwrap();
 
     let pages = doc_file.page_count().unwrap();
     for p in 0..pages {

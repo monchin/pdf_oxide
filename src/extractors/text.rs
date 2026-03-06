@@ -1589,7 +1589,6 @@ fn get_byte_mode(font: Option<&FontInfo>) -> ByteMode {
                         || name.contains("KSC")
                         || name.contains("KSCms")
                     {
-                        // CIDs are typically 2-byte values in these CMaps
                         ByteMode::TwoByte
                     } else {
                         ByteMode::OneByte
@@ -1677,6 +1676,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
                 let char_str = font
                     .char_to_unicode(char_code as u32)
                     .unwrap_or_else(|| fallback_char_to_unicode(char_code as u32));
+
                 if char_str != "\u{FFFD}" {
                     result.push_str(&char_str);
                 }
@@ -1709,7 +1709,7 @@ fn decode_text_to_unicode(bytes: &[u8], font: Option<&FontInfo>) -> String {
 ///
 /// Artifacts are content that is not part of the document's logical structure,
 /// such as headers, footers, page numbers, and decorative elements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ArtifactType {
     /// Pagination artifacts (headers, footers, page numbers)
     Pagination(PaginationSubtype),
@@ -1722,7 +1722,7 @@ pub enum ArtifactType {
 }
 
 /// Pagination artifact subtypes per PDF Spec Section 14.8.2.2.1
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaginationSubtype {
     /// Page header content
     Header,
@@ -1741,7 +1741,7 @@ pub enum PaginationSubtype {
 /// Tracks nested marked content tags to implement artifact filtering.
 /// When content is marked as `/Artifact`, it should be excluded from text extraction.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct MarkedContentContext {
     tag: String,
     is_artifact: bool,
@@ -4203,7 +4203,7 @@ impl TextExtractor {
                 self.marked_content_stack.push(MarkedContentContext {
                     tag: tag.clone(),
                     is_artifact,
-                    artifact_type: None, // BMC doesn't have artifact type properties
+                    artifact_type: None, // No artifact classification; None for backward compatibility
                     actual_text: None,   // BMC doesn't have ActualText
                     expansion: None,     // BMC doesn't have expansion
                 });
@@ -4619,6 +4619,14 @@ impl TextExtractor {
         }
     }
 
+    /// Get the current artifact type from the marked content stack.
+    fn current_artifact_type(&self) -> Option<ArtifactType> {
+        self.marked_content_stack
+            .iter()
+            .rev()
+            .find_map(|ctx| ctx.artifact_type.clone())
+    }
+
     /// Flush accumulated TJ buffer into a single TextSpan.
     ///
     /// This creates one span for the entire buffer content, properly calculating
@@ -4687,7 +4695,8 @@ impl TextExtractor {
             word_spacing: buffer.word_space, // Tw - captured from PDF content stream
             horizontal_scaling: buffer.horizontal_scaling, // Tz - captured from PDF content stream
             is_italic: is_italic_span,
-            primary_detected: false, // Default to false for backward compatibility
+            primary_detected: false,
+            artifact_type: self.current_artifact_type(),
         };
         self.span_sequence_counter += 1;
 
@@ -5119,7 +5128,8 @@ impl TextExtractor {
             word_spacing: state.word_space,
             horizontal_scaling: state.horizontal_scaling,
             is_italic,
-            primary_detected: true, // Mark as created by primary detector
+            primary_detected: true,
+            artifact_type: None,
         };
 
         // Step 6: Increment sequence counter and add to spans
@@ -5585,7 +5595,8 @@ impl TextExtractor {
             word_spacing: state.word_space, // Tw - captured from PDF content stream
             horizontal_scaling: state.horizontal_scaling, // Tz - captured from PDF content stream
             is_italic: is_italic_space,
-            primary_detected: false, // Default to false for backward compatibility
+            primary_detected: false,
+            artifact_type: self.current_artifact_type(),
         };
         self.span_sequence_counter += 1;
 
@@ -5665,7 +5676,8 @@ impl TextExtractor {
                     word_spacing: 0.0, // Tw - per ISO 32000-1:2008 Section 9.3.1
                     horizontal_scaling: 100.0, // Tz - per ISO 32000-1:2008 Section 9.3.1
                     is_italic: is_italic_buf,
-                    primary_detected: false, // Default to false for backward compatibility
+                    primary_detected: false,
+                    artifact_type: None,
                 };
                 self.span_sequence_counter += 1;
 
@@ -6376,6 +6388,7 @@ mod tests {
     fn test_split_boundary_merges_with_space() {
         let spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "the".to_string(),
                 bbox: Rect {
                     x: 0.0,
@@ -6398,6 +6411,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "General".to_string(),
                 bbox: Rect {
                     x: 10.0,
@@ -7370,9 +7384,9 @@ mod tests {
     fn test_update_artifact_state_artifact_present() {
         let mut extractor = TextExtractor::new();
         extractor.marked_content_stack.push(MarkedContentContext {
+            artifact_type: None,
             tag: "Artifact".to_string(),
             is_artifact: true,
-            artifact_type: None,
             actual_text: None,
             expansion: None,
         });
@@ -7384,16 +7398,16 @@ mod tests {
     fn test_update_artifact_state_nested_non_artifact() {
         let mut extractor = TextExtractor::new();
         extractor.marked_content_stack.push(MarkedContentContext {
+            artifact_type: None,
             tag: "Artifact".to_string(),
             is_artifact: true,
-            artifact_type: None,
             actual_text: None,
             expansion: None,
         });
         extractor.marked_content_stack.push(MarkedContentContext {
+            artifact_type: None,
             tag: "Span".to_string(),
             is_artifact: false,
-            artifact_type: None,
             actual_text: None,
             expansion: None,
         });
@@ -7819,6 +7833,7 @@ mod tests {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -7836,6 +7851,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(101.0, 700.0, 30.0, 12.0), // Very close
                 font_name: "F1".to_string(),
@@ -7882,6 +7898,7 @@ mod tests {
         // Create spans all in one column
         for i in 0..10 {
             extractor.spans.push(TextSpan {
+                artifact_type: None,
                 text: format!("Line {}", i),
                 bbox: Rect::new(50.0, 700.0 - (i as f32 * 14.0), 200.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8046,6 +8063,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8063,6 +8081,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "World".to_string(),
                 bbox: Rect::new(131.0, 700.0, 30.0, 12.0), // 1pt gap
                 font_name: "F1".to_string(),
@@ -8094,6 +8113,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8111,6 +8131,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "World".to_string(),
                 bbox: Rect::new(100.0, 680.0, 30.0, 12.0), // Different line
                 font_name: "F1".to_string(),
@@ -8147,6 +8168,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Left".to_string(),
                 bbox: Rect::new(50.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8164,6 +8186,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "Right".to_string(),
                 bbox: Rect::new(300.0, 700.0, 30.0, 12.0), // Large gap (column boundary)
                 font_name: "F1".to_string(),
@@ -8193,6 +8216,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8210,6 +8234,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: " ".to_string(),
                 bbox: Rect::new(130.0, 700.0, 2.0, 12.0),
                 font_name: "F1".to_string(),
@@ -8227,6 +8252,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "World".to_string(),
                 bbox: Rect::new(132.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10375,6 +10401,7 @@ mod tests {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello World".to_string(), // >= 5 chars
                 bbox: Rect::new(100.0, 700.0, 60.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10392,6 +10419,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "Hello World".to_string(), // Same text, overlapping position
                 bbox: Rect::new(102.0, 700.0, 60.0, 12.0), // X within 5pt
                 font_name: "F1".to_string(),
@@ -10419,6 +10447,7 @@ mod tests {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello World".to_string(),
                 bbox: Rect::new(100.0, 700.0, 60.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10436,7 +10465,8 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
-                text: "Hello World".to_string(),           // Same text but far apart
+                artifact_type: None,
+                text: "Hello World".to_string(), // Same text but far apart
                 bbox: Rect::new(500.0, 700.0, 60.0, 12.0), // X > 5pt difference
                 font_name: "F1".to_string(),
                 font_size: 12.0,
@@ -10523,6 +10553,7 @@ mod tests {
     fn test_split_fused_words_camelcase() {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![TextSpan {
+            artifact_type: None,
             text: "theGeneral".to_string(),
             bbox: Rect::new(100.0, 700.0, 60.0, 12.0),
             font_name: "F1".to_string(),
@@ -10551,6 +10582,7 @@ mod tests {
     fn test_split_fused_words_no_split() {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![TextSpan {
+            artifact_type: None,
             text: "hello".to_string(),
             bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
             font_name: "F1".to_string(),
@@ -10726,6 +10758,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Right Col".to_string(),
                 bbox: Rect::new(350.0, 700.0, 100.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10743,6 +10776,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "Left Col".to_string(),
                 bbox: Rect::new(50.0, 700.0, 100.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10816,6 +10850,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello ".to_string(), // ends with space
                 bbox: Rect::new(100.0, 700.0, 35.0, 12.0),
                 font_name: "F1".to_string(),
@@ -10833,7 +10868,8 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
-                text: " World".to_string(),                // starts with space
+                artifact_type: None,
+                text: " World".to_string(), // starts with space
                 bbox: Rect::new(136.0, 700.0, 35.0, 12.0), // 1pt gap
                 font_name: "F1".to_string(),
                 font_size: 12.0,
@@ -10978,9 +11014,9 @@ mod tests {
         let mut extractor = TextExtractor::new();
         extractor.current_mcid = Some(10);
         extractor.marked_content_stack.push(MarkedContentContext {
+            artifact_type: None,
             tag: "P".to_string(),
             is_artifact: false,
-            artifact_type: None,
             actual_text: None,
             expansion: None,
         });
@@ -11122,6 +11158,7 @@ mod tests {
         let mut extractor = TextExtractor::new();
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Line2".to_string(),
                 bbox: Rect::new(50.0, 680.0, 100.0, 12.0),
                 font_name: "F1".to_string(),
@@ -11139,6 +11176,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: "Line1".to_string(),
                 bbox: Rect::new(50.0, 700.0, 100.0, 12.0),
                 font_name: "F1".to_string(),
@@ -11252,6 +11290,7 @@ mod tests {
 
         extractor.spans = vec![
             TextSpan {
+                artifact_type: None,
                 text: "Hello".to_string(),
                 bbox: Rect::new(100.0, 700.0, 30.0, 12.0),
                 font_name: "F1".to_string(),
@@ -11269,6 +11308,7 @@ mod tests {
                 primary_detected: false,
             },
             TextSpan {
+                artifact_type: None,
                 text: " ".to_string(), // offset_semantic space
                 bbox: Rect::new(130.5, 700.0, 2.0, 12.0),
                 font_name: "F1".to_string(),
@@ -11436,9 +11476,9 @@ fn test_parse_artifact_type_empty() {
 fn test_marked_content_context_with_actual_text() {
     // Verify MarkedContentContext correctly stores ActualText
     let ctx = MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: Some("fi".to_string()), // Ligature expansion
         expansion: None,
     };
@@ -11451,9 +11491,9 @@ fn test_marked_content_context_with_actual_text() {
 fn test_marked_content_context_with_expansion() {
     // Verify MarkedContentContext correctly stores /E expansion
     let ctx = MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: None,
         expansion: Some("Portable Document Format".to_string()),
     };
@@ -11483,17 +11523,17 @@ fn test_get_current_actual_text_finds_first() {
 
     // Push contexts with ActualText
     extractor.marked_content_stack.push(MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: Some("outer text".to_string()),
         expansion: None,
     });
 
     extractor.marked_content_stack.push(MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: Some("inner text".to_string()),
         expansion: None,
     });
@@ -11510,18 +11550,18 @@ fn test_get_current_actual_text_skips_none() {
 
     // Push context with ActualText
     extractor.marked_content_stack.push(MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: Some("replacement text".to_string()),
         expansion: None,
     });
 
     // Push context without ActualText
     extractor.marked_content_stack.push(MarkedContentContext {
+        artifact_type: None,
         tag: "Span".to_string(),
         is_artifact: false,
-        artifact_type: None,
         actual_text: None,
         expansion: None,
     });

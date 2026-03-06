@@ -62,6 +62,27 @@ class PdfDocument:
         """
         ...
 
+    @staticmethod
+    def from_bytes(data: bytes) -> "PdfDocument":
+        """
+        Open a PDF from bytes.
+
+        Args:
+            data: Raw PDF data
+
+        Returns:
+            PdfDocument: Opened PDF document
+
+        Raises:
+            IOError: If the data is not a valid PDF
+
+        Example:
+            >>> with open("sample.pdf", "rb") as f:
+            ...     doc = PdfDocument.from_bytes(f.read())
+            >>> print(doc.page_count())
+        """
+        ...
+
     def version(self) -> Tuple[int, int]:
         """
         Get PDF version.
@@ -134,6 +155,75 @@ class PdfDocument:
         Example:
             >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
             >>> text = doc.extract_text_ocr(0, engine)
+        """
+        ...
+
+    def remove_headers(self, threshold: float = 0.8) -> int:
+        """
+        Heuristically identify and remove repeating headers.
+
+        Args:
+            threshold: Fraction of pages (0.0-1.0) where text must repeat to be removed
+
+        Returns:
+            Number of headers removed
+        """
+        ...
+
+    def remove_footers(self, threshold: float = 0.8) -> int:
+        """
+        Heuristically identify and remove repeating footers.
+
+        Args:
+            threshold: Fraction of pages (0.0-1.0) where text must repeat to be removed
+
+        Returns:
+            Number of footers removed
+        """
+        ...
+
+    def remove_artifacts(self, threshold: float = 0.8) -> int:
+        """
+        Heuristically identify and remove both repeating headers and footers.
+
+        Args:
+            threshold: Fraction of pages (0.0-1.0) where text must repeat to be removed
+
+        Returns:
+            Total number of artifacts removed
+        """
+        ...
+
+    def erase_header(self, page: int) -> None:
+        """
+        Erase existing header content.
+
+        Heuristically identifies existing text in the header area (top 15%)
+        and marks it for erasure.
+
+        Args:
+            page: Page index (0-based)
+        """
+        ...
+
+    def erase_footer(self, page: int) -> None:
+        """
+        Erase existing footer content.
+
+        Heuristically identifies existing text in the footer area (bottom 15%)
+        and marks it for erasure.
+
+        Args:
+            page: Page index (0-based)
+        """
+        ...
+
+    def erase_artifacts(self, page: int) -> None:
+        """
+        Erase both header and footer content.
+
+        Args:
+            page: Page index (0-based)
         """
         ...
 
@@ -1022,6 +1112,31 @@ class Pdf:
         Example:
             >>> pdf = Pdf.from_markdown("# Hello\\n\\nWorld")
             >>> pdf.save("hello.pdf")
+        """
+        ...
+
+    @staticmethod
+    def from_markdown_with_template(
+        content: str,
+        template: PageTemplate,
+        title: Optional[str] = None,
+        author: Optional[str] = None,
+    ) -> Pdf:
+        """
+        Create a PDF from Markdown content with a template.
+
+        Args:
+            content: Markdown content
+            template: Page template for headers and footers
+            title: Document title (optional)
+            author: Document author (optional)
+
+        Returns:
+            Created PDF document
+
+        Example:
+            >>> template = PageTemplate().header(Artifact.center("Title"))
+            >>> pdf = Pdf.from_markdown_with_template("# Hello", template)
         """
         ...
 
@@ -2422,6 +2537,61 @@ class OfficeConverter:
             >>> pdf.save("document.pdf")
         """
         ...
+
+# ============================================================================
+# Page Templates
+# ============================================================================
+
+class ArtifactStyle:
+    """Style configuration for header/footer text."""
+    def __init__(self) -> None: ...
+    def font(self, name: str, size: float) -> ArtifactStyle: ...
+    def bold(self) -> ArtifactStyle: ...
+    def color(self, r: float, g: float, b: float) -> ArtifactStyle: ...
+
+class Artifact:
+    """A header or footer artifact definition."""
+    def __init__(self) -> None: ...
+    @staticmethod
+    def left(text: str) -> Artifact: ...
+    @staticmethod
+    def center(text: str) -> Artifact: ...
+    @staticmethod
+    def right(text: str) -> Artifact: ...
+    def with_left(self, text: str) -> Artifact: ...
+    def with_center(self, text: str) -> Artifact: ...
+    def with_right(self, text: str) -> Artifact: ...
+    def with_style(self, style: ArtifactStyle) -> Artifact: ...
+    def with_offset(self, offset: float) -> Artifact: ...
+
+class Header(Artifact):
+    """A header definition (alias for Artifact)."""
+    def __init__(self) -> None: ...
+    @staticmethod
+    def left(text: str) -> Header: ...
+    @staticmethod
+    def center(text: str) -> Header: ...
+    @staticmethod
+    def right(text: str) -> Header: ...
+
+class Footer(Artifact):
+    """A footer definition (alias for Artifact)."""
+    def __init__(self) -> None: ...
+    @staticmethod
+    def left(text: str) -> Footer: ...
+    @staticmethod
+    def center(text: str) -> Footer: ...
+    @staticmethod
+    def right(text: str) -> Footer: ...
+
+class PageTemplate:
+    """A complete page template with header and footer."""
+    def __init__(self) -> None: ...
+    def header(self, header: Artifact) -> PageTemplate: ...
+    def footer(self, footer: Artifact) -> PageTemplate: ...
+    def skip_first_page(self) -> PageTemplate: ...
+    def first_page_header(self, header: Artifact) -> PageTemplate: ...
+    def first_page_footer(self, footer: Artifact) -> PageTemplate: ...
 
 # ============================================================================
 # OCR (optional, requires ocr feature)

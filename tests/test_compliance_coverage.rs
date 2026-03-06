@@ -53,7 +53,7 @@ fn build_multi_page_pdf() -> Vec<u8> {
 
 /// Open a PdfDocument from raw bytes for validation.
 fn open_document(data: &[u8]) -> PdfDocument {
-    PdfDocument::open_from_bytes(data.to_vec()).expect("Failed to open PDF from bytes")
+    PdfDocument::from_bytes(data.to_vec()).expect("Failed to open PDF from bytes")
 }
 
 // ---------------------------------------------------------------------------

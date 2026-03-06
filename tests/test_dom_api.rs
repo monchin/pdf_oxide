@@ -11,23 +11,17 @@ mod dom_api_tests {
         let text1 = TextContent {
             text: "Hello World".to_string(),
             bbox: Rect::new(72.0, 720.0, 100.0, 12.0),
-            font: FontSpec::default(),
-            style: TextStyle::default(),
-            reading_order: Some(0),
-            origin: None,
-            rotation_degrees: None,
-            matrix: None,
+            font: FontSpec::new("Helvetica", 12.0),
+            style: TextStyle::new(),
+            ..Default::default()
         };
 
         let text2 = TextContent {
             text: "This is a test".to_string(),
             bbox: Rect::new(72.0, 700.0, 100.0, 12.0),
-            font: FontSpec::default(),
-            style: TextStyle::default(),
-            reading_order: Some(1),
-            origin: None,
-            rotation_degrees: None,
-            matrix: None,
+            font: FontSpec::new("Helvetica", 12.0),
+            style: TextStyle::new(),
+            ..Default::default()
         };
 
         let children = vec![ContentElement::Text(text1), ContentElement::Text(text2)];
@@ -499,12 +493,7 @@ mod dom_api_tests {
             let text_content = TextContent {
                 text: "New Text".to_string(),
                 bbox: Rect::new(100.0, 650.0, 80.0, 14.0),
-                font: pdf_oxide::elements::FontSpec::default(),
-                style: pdf_oxide::elements::TextStyle::default(),
-                reading_order: None,
-                origin: None,
-                rotation_degrees: None,
-                matrix: None,
+                ..Default::default()
             };
             let text_id = page.add_text(text_content);
 

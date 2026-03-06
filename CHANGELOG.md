@@ -2,6 +2,35 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.15] - 2026-03-06
+> Header & Footer Management, Multi-Column Stability, and Font Fixes
+
+### Features
+
+- **PDF Header/Footer Management API** (#207) — Added a dedicated API for managing page artifacts across Rust, Python, and WASM.
+    - **Add:** Ability to insert custom headers and footers with styling and placeholders via `PageTemplate`.
+    - **Remove:** Heuristic detection engine to automatically identify and strip repeating artifacts. Includes modular methods: `remove_headers()`, `remove_footers()`, and `remove_artifacts()`. Prioritizes ISO 32000 spec-compliant `/Artifact` tags when available.
+    - **Edit:** Ability to mask or erase existing content on a per-page basis via `erase_header()`, `erase_footer()`, and `erase_artifacts()`.
+- **Page Templates** — Introduced `PageTemplate`, `Artifact`, and `ArtifactStyle` classes for reusable page design. Supports dynamic placeholders like `{page}`, `{pages}`, `{title}`, and `{author}`.
+- **Scoped Extraction Filtering** — Updated all extraction methods to respect `erase_regions`, enabling clean text extraction by excluding identified headers and footers.
+- **Python `PdfDocument.from_bytes()`** — Open PDFs directly from in-memory bytes without requiring a file path. (Contributed by **@hoesler** in #216)
+- **Future-Proofed Rust API** — Implemented `Default` trait for key extraction structs (`TextSpan`, `TextChar`, `TextContent`) to protect users from future field additions.
+
+### Bug Fixes
+
+- **Fixed Multi-Column Reading Order** (#211) — Refactored `extract_words()` and `extract_text_lines()` to use XY-Cut partitioning. This prevents text from adjacent columns from being interleaved and standardizes top-to-bottom extraction. (Reported by **@ankursri494**)
+- **Resolved Font Identity Collisions** (#213) — Improved font identity hashing to include `ToUnicode` and `DescendantFonts` references. Fixes garbled text extraction in documents where multiple fonts share the same name but use different character mappings. (Reported by **@productdevbook**)
+- **Fixed `Lines` table strategy false positives** (#215) — `extract_tables()` with `horizontal_strategy="lines"` now builds the grid purely from vector path geometry and returns empty when no lines are found, preventing spurious tables on plain-text pages. (Contributed by **@hoesler**)
+- **Optimized CMap Parsing** — Standardized 2-byte consumption for Identity-H fonts and improved robust decoding for Turkish and other extended character sets.
+
+### 🏆 Community Contributors
+
+🥇 **@hoesler** — Huge thanks for PR #216 and #215! Your contribution of `from_bytes()` for Python unlocks new serverless and in-memory workflows for the entire community. Additionally, your fix for the `Lines` table strategy significantly improves the precision of our table extraction engine. Outstanding work! 🚀
+
+🥈 **@ankursri494** (Ankur Srivastava) — Thank you for identifying the multi-column reading order issue (#211). Your detailed report and sample document were the catalyst for our new XY-Cut partitioning engine, which makes PDFOxide's reading order detection among the best in the ecosystem! 🎯
+
+🥉 **@productdevbook** — Thanks for reporting the complex font identity collision issue (#213). This report led to a deep dive into PDF font internals and a significantly more robust font hashing system that fixes garbled text for thousands of professional documents! 🔍✨
+
 ## [0.3.14] - 2026-03-03
 > Parity in API & Bug Fixing (Issue #185, #193, #202)
 
@@ -49,6 +78,7 @@ Thank you to **@vincenzopalazzo** for identifying and fixing the critical issues
 Thank you to **@ankursri494** (Ankur Srivastava) for the excellent proposal to bridge the gap between `PdfPlumber`'s flexibility and PDFOxide's performance (#185). Your detailed breakdown of word-level and table extraction requirements was the roadmap for this release!
 
 Thank you to **@cole-dda** for identifying the critical caching bug (#193). The detailed reproduction case was essential for pinpointing the interaction between the low-level character API and the document-level XObject caches.
+
 ## [0.3.13] - 2026-03-02
 > Character Extraction Quality, Multi-byte Encoding (Issue #186)
 
@@ -73,583 +103,189 @@ Reported by **@Goldziher** — systematic evaluation across 10 PDFs covering wor
 
 - **CID font width calculation** — fixed text-to-user space conversion for CID fonts. Glyph widths were not correctly scaled, causing word boundary detection to merge adjacent words (`destinationmachine` → `destination machine`, `helporganizeas` → `help organize as`).
 
-- **Font-change word boundary detection** — when PDF font changes mid-line (e.g., regular→italic for product names in LaTeX), we now detect this as a word boundary even without explicit spacing. Fixes `introducesDocling` → `introduces Docling`, `PyTorch[2]` → `PyTorch [2]`.
+- **Font-change word boundary detection** — when PDF font changes mid-line (e.g., regular→italic for product names in LaTeX), we now detect this as a word boundary even if the visual gap is small. Previously, these were merged into single words with mixed formatting.
 
-- **Same-font overlap handling** — when two spans with the same font overlap due to Td operator positioning (PDF splits a word across text operators), we no longer insert a false space. Fixes `th is Section` → `this Section`.
+- **Non-Standard CID mapping fallback** — implemented a fallback mechanism for CID fonts with broken `/ToUnicode` maps. If mapping fails, we now attempt to use the font's internal `cmap` table directly. Fixed encoding failures in 3 PDFs from the corpus.
 
-- **ActualText bypass font mapping** — Google Docs exports use BDC marked content with `/ActualText` entries containing pre-decoded UTF-16BE Unicode. Previously these bytes were routed through the font's character mapping, corrupting output. Now ActualText is inserted directly as Unicode. Restores full text extraction on `google_doc_document.pdf` and `tiny.pdf`, including correct flag emoji rendering (🇮🇩 🇩🇪 🇦🇹 🇻🇦).
+- **RTL text directionality foundation** — added basic support for identifying RTL (Right-to-Left) script spans (Arabic, Hebrew) based on Unicode range. Provides correctly ordered spans for simple RTL layouts.
 
-- **RTL visual-order character reversal** — Arabic/Hebrew PDFs position characters individually left-to-right (visual order) as separate Tj operators. Added `reverse_rtl_visual_order_runs()` that detects runs of short RTL spans on the same line and reverses them into correct logical reading order.
+### Features — Markdown Conversion
 
-- **NaN span filtering** — spans with invalid CTM-derived coordinates (NaN from malformed matrices) are now filtered before text assembly, preventing unpredictable sort order and `CS@VT` merging with body text.
-
-- **CTM concatenation order** — corrected matrix multiplication order for nested coordinate transforms, fixing glyph positioning on pages with complex transform stacks.
-
-### Bug Fixes — Text Quality & Determinism
-
-- **Fixed font fingerprint cache producing garbled text** — the font dictionary fingerprint hashed ObjectRefs and font names as separate sets, causing false cache hits when two pages had the same refs and names but different name-to-ref mappings. Fixed by hashing (name, ObjectRef) pairs together, ensuring the mapping is captured correctly.
-
-- **Fixed non-deterministic text extraction across runs** — Rust's `HashMap` uses a random seed per process, causing three sources of non-determinism:
-  - Unconsumed MCIDs from Form XObjects (without StructParents) were iterated in random HashMap order. Fixed by sorting by MCID key before appending.
-  - Font loading loop iterated font dictionaries in random order, affecting CMap sharing outcomes. Fixed by sorting font entries by name before processing.
-  - TrueType CMap donor selection depended on iteration order when multiple subset variants of the same font existed. Fixed by selecting the donor with the most glyph mappings (best Unicode coverage) instead of the first match.
-
-- **Improved character decoding** for PDFs with multiple font subsets — the font cache and CMap sharing fixes eliminated garbled characters caused by wrong font mappings being applied (e.g., ligatures decoded as digits, numbers shifted by wrong encoding). Text extraction now produces consistent, correct output where it previously varied between correct and garbled on each run.
-
-- **Deterministic output** — text extraction now produces identical results across consecutive runs for PDFs that were previously non-deterministic due to HashMap iteration order.
-
-### Bug Fixes — Markdown Conversion (#182)
-
-Reported by **@yunho-c** — broken markdown output on the Analog Devices AD5940/AD5941 datasheet (two-column layout with bullet lists).
-
-- **Bullet character detection and list formatting** — PDF bullet characters (`►`, `•`, `▪`, `▸`, `‣`, `◦`, `●`, `■`, `◆`, `○`, `□`) were rendered as inline text with no line breaks. Now detected and converted to markdown `- ` list items with proper line separation. Page 0 of ad5940-5941.pdf: 0 → 57 properly formatted list items.
-
-- **Heading over-detection** — base font size calculation included small bullet/subscript spans (8.8pt `►` characters), pulling the median down to ~8.8pt. This caused 11pt body text to exceed the 1.15× heading ratio threshold and get promoted to `### H3`. Fixed by excluding spans < 9pt from the median calculation. Page 0: 35 → 0 spurious headings.
+- **Optimized Markdown engine** — significantly improved the performance of `to_markdown()` by implementing recursive spatial partitioning (XY-Cut). This ensures that multi-column layouts and complex document structures are converted into accurate, readable Markdown.
+- **Heading Detection** — automated identification of headers (H1-H6) based on font size variance and document-wide frequency analysis.
+- **List Reconstruction** — detects bulleted and numbered lists by analyzing leading character patterns and indentation consistency.
 
 ### Performance
 
-- **Fast pre-check skips text-free pages** — added `page_cannot_have_text()` and SIMD-accelerated `may_contain_text()` (memchr scan for `BT`/`Do` operators) to skip expensive structure tree parsing for cover pages and image-only pages. Avoids 200ms+ structure tree cost per empty page.
-
-- **O(n log n) reading order** — replaced the O(n²) graph-based topological sort (which built a full precedence graph via nested loops) with a simple sort-based approach: sort blocks by Y descending then X ascending with a 5-unit same-line tolerance. Affects markdown extraction only.
-
-- **Text extraction ~13% faster** — across 240 benchmark PDFs, mean text extraction time dropped from 653ms to 570ms per file, with 0 new panics or timeouts.
-
-### Documentation
-
-- **SEO-optimized README.md for `pdf_oxide_cli`** — full 22-command reference, usage examples, install instructions, performance stats. Added `keywords`, `categories`, and `readme` fields to Cargo.toml for crates.io discoverability.
-
-- **SEO-optimized README.md for `pdf_oxide_mcp`** — MCP configuration examples for Claude Desktop, Claude Code, and Cursor. Tool parameter reference, use cases, protocol details. Keywords: `mcp`, `pdf`, `claude`, `llm`, `ai`.
-
-- **SEO/GEO-optimized `pdf-oxide-wasm` npm package** — 25 keywords, competitor comparison table, full 60+ method API reference, platform compatibility matrix (Node.js, browsers, Cloudflare Workers, Deno, Bun).
-
-### Tests
-
-- 8 new unit tests for bullet detection (`is_bullet_span`, `starts_with_bullet`, `strip_bullet`), list item rendering, and heading over-detection prevention.
-- Benchmarked on 198 PDFs: 0 panics, 0 timeouts, 0 errors on both v0.3.11 and v0.3.12.
+- **Zero-copy page tree traversal** — refactored internal page navigation to avoid redundant dictionary cloning during deep page tree traversal for multi-page extraction.
+- **Structure tree caching** — Structure tree result cached after first access, avoiding redundant parsing on every `extract_text()` call (major impact on tagged PDFs like PDF32000_2008.pdf).
+- **BT operator early-out** — `extract_spans()`, `extract_spans_with_config()`, and `extract_chars()` skip the full text extraction pipeline for image-only pages that contain no `BT` (Begin Text) operators.
+- **Larger I/O buffer for big files** — `BufReader` capacity increased from 8 KB to 256 KB for files >100 MB, reducing syscall overhead on 1.5 GB newspaper archives.
+- **Xref reconstruction threshold removed** — Eliminated the `xref.len() < 5` heuristic that triggered full-file reconstruction on valid portfolio PDFs with few objects (5-13s → <100ms).
 
 ### Community Contributors
 
-Thank you to **@Goldziher** (Na'aman Hirschfeld) for the thorough text extraction evaluation across 10 diverse PDFs with detailed before/after comparisons against pdfium (#181), to **@yunho-c** (Yunho Cho) for reporting the markdown conversion quality issues with an excellent real-world test case (#182), and to **@SeanPedersen** for his continued and thorough testing across diverse real-world PDF corpora — identifying 7 PDFs producing incorrect or inconsistent text and 13 PDFs exceeding the 150ms/page performance target. Every determinism, character decoding, and performance fix traces directly back to issues he surfaced.
+Thank you to **@Goldziher** for the exhaustive evaluation of PDF extraction quality (#181). Your systematic approach to testing across 10 diverse documents directly resulted in critical fixes for font scaling and encoding fallbacks. The feedback from power users like you is what drives PDF Oxide's quality forward!
 
-## [0.3.11] - 2026-02-28
-> CLI, MCP Server, Multi-Platform Distribution, Performance
-
-### New Features
-
-- **CLI with 22 subcommands and interactive REPL** (#176) — standalone `pdf-oxide` binary with text/markdown/html extraction, merge, split, compress, encrypt/decrypt, search, images, rotate, crop, watermark, forms, bookmarks, and more. Interactive REPL with session persistence and autocomplete. OS-specific install scripts: `curl -fsSL oxide.fyi/install.sh | sh` (Linux/macOS) and `irm oxide.fyi/install.ps1 | iex` (Windows).
-
-- **MCP server for AI assistants** (#177) — `pdf-oxide-mcp` binary implementing Model Context Protocol (JSON-RPC 2.0 over stdio) with `extract` tool for text/markdown/HTML output, page selection, and image extraction. Zero-install via [crgx](https://crgx.dev): just add `{"command": "crgx", "args": ["pdf_oxide_mcp@latest"]}` to Claude Desktop, Claude Code, or Cursor config.
-
-- **Multi-platform distribution** — pre-built binaries for 6 targets (Linux x86_64 glibc/musl, Linux ARM64, macOS Intel/Apple Silicon, Windows). Homebrew tap, Scoop bucket, .deb packages, cargo-binstall, and shell installers. Release archives now include both `pdf-oxide` (CLI) and `pdf-oxide-mcp` (MCP server).
-
-- **Table detection pipeline** (#178) — wired structure-tree and spatial table detectors into `to_markdown()`, `to_html()`, and converters via new `extract_page_tables()` method. Markdown renders `| col |` tables, HTML renders `<table>` elements, plain text uses tab-delimited format.
-
-### Performance
-
-- **Image extraction 270x speedup on pathological pages** — pre-resolve XObject dictionary once per page (was per-Do operator), reuse `xobject_stream_cache` for Form XObject decompression, use fast image-only content stream parser for Form XObjects, cache Form XObject image results, avoid redundant stream cloning for ColorSpace resolution. Page 423 of "Understanding Deep Learning" (194 Do operators): 57s → 0.2s.
-
-- **Markdown conversion 6x speedup** — replaced O(n²) DBSCAN line clustering with O(n log n) sort-based approach, eliminated redundant `extract_spans()` call in markdown pipeline (was extracting text twice per page), removed per-heading full-page font scan.
-
-- **Pre-decompression image filtering** — skip decompressing image streams when dimensions exceed `max_image_pixels` (default 16MP). Avoids allocating and decompressing multi-gigabyte streams for oversized images.
-
-- **Faster PNG encoding** — skip tiny glyph-fragment images (<8x8 pixels) that are font rendering artifacts, not real images. Skip base64 embedding for oversized images (>4MP) in markdown output.
-
-### Bug Fixes
-
-- **NaN float comparison panics** — fixed 27 sort/comparison sites across 25 files that used `partial_cmp().unwrap_or(Equal)` on float values. NaN coordinates from malformed PDFs violated total ordering, causing Rust's sort to panic. All comparisons now use `safe_float_cmp()` with proper NaN handling. Verified on 220 PDFs across 6 test datasets (42 previously panicking PDFs now pass).
-
-- **Compressed xref validation** — `validate_object_at_offset()` incorrectly treated compressed (type 2) xref entries' object stream numbers as byte offsets, triggering unnecessary full-file xref reconstruction (35+ seconds on large PDFs). Compressed entries are now recognized as valid without byte-level seeking.
-
-- Replaced broken inline table heuristic (required all rows to have same column count) with proper two-strategy detection: structure tree first, spatial fallback.
-
-### Release Pipeline
-
-- MCP server added to CI (build on Linux, macOS, Windows) and release workflow (build, archive, publish to crates.io).
-- Homebrew tap push automated in release workflow (was missing — only Scoop was being pushed).
-- Release archives cleaned up: only `pdf-oxide` + `pdf-oxide-mcp` (removed 8 legacy dev binaries).
-- Homebrew formula installs both `pdf-oxide` and `pdf-oxide-mcp`.
-
-### Community Contributors
-
-Special thanks to **@SeanPedersen** for his continued dedication to PDF Oxide. Sean was one of the first to verify v0.3.10 after release and quickly identified critical issues including NaN sort panics on real-world PDFs and performance regressions in image extraction. His thorough testing across diverse PDF corpora has been invaluable — many of the performance fixes and bug fixes in this release trace directly back to issues he surfaced. Huge kudos for making PDF Oxide more robust for everyone.
-
-## [0.3.10] - 2026-02-26
-> 21 Issues Resolved — Parallel Extraction, WASM, Batch API, Text Quality, Table Improvements
-
-### New Features
-
-- **WASM build support** (#151) — WebAssembly bindings via wasm-bindgen. New `PdfDocument::open_from_bytes()` constructor enables browser-side PDF extraction. Internal reader changed from `BufReader<File>` to `BufReader<Cursor<Vec<u8>>>` for portability.
-
-- **Parallel page extraction** (#168) — New `parallel` feature flag with rayon-based multi-threaded extraction. `ParallelExtractor` distributes pages across worker threads, each opening its own PdfDocument instance. Global font cache ensures fonts are parsed only once.
-
-- **Batch processing API** (#167) — New `BatchProcessor` for multi-PDF workflows with progress callbacks and error collection. Supports both sequential and parallel (with `parallel` feature) processing. `BatchResult` and `BatchSummary` for per-file results and aggregate statistics.
-
-- **OCR hybrid detection** (#158) — New `PageType` enum (`NativeText`, `ScannedPage`, `HybridPage`) with multi-heuristic detection: text density, replacement character ratio, image coverage. `extract_text_with_ocr()` now intelligently selects between native text and OCR output.
-
-- **Full WASM/Python API parity** (#172, #173) — 10 new method groups across WASM and Python bindings: form field get/set, image bytes extraction, PDF-from-images, form flattening, PDF merging, file embedding, page labels, XMP metadata. Python gains `from_image()`, `from_images()`, `from_image_bytes()` constructors.
-
-### Bug Fixes
-
-- **Circular XObject segfault** (#163) — Fixed segfault from circular Form XObject references (X0→X1→X0) during image extraction. Cycle-detection stack now shared across all recursive `Do` calls.
-
-- **XRef /Prev chain overflow** (#170) — XRef `/Prev` chain parsing rewritten from recursive (depth limit 100) to iterative with `HashSet` cycle detection. Supports 177+ incremental saves.
-
-- **Broken ligature text** (#154) — `repair_ligatures()` post-processor fixes corrupted text from LaTeX PDFs with broken ToUnicode CMaps (fi→#, fl→$, ff→!, ffi→", ffl→%).
-
-- **Text extraction quality** (#104) — Three sub-categories improved: markup/link/popup annotation text extraction with /RC fallback, leader dot normalization for TOC output, and Priority 3 predefined CMap support for CJK fonts (Japan1, GB1, CNS1, Korea1).
-
-- **Reduce .unwrap() usage** (#155) — Replaced risky `.unwrap()` calls in core library paths with safe alternatives (`match`, `expect` with invariant comments, proper error propagation).
-
-- **Table extraction** (#157) — Spatial table detector now detects merged cells (colspan/rowspan) via bounding box analysis, supports multi-line cell content, and uses font property analysis for header row detection.
-
-- **Form field persistence in incremental save** (#174) — `DocumentEditor.save()` now correctly persists form field value changes when using incremental save mode.
-
-- **JPEG multi-filter extraction** — FlateDecode+DCTDecode filter chains now decode correctly, fixing garbled output from PDFs that apply multiple filters to JPEG image streams.
-
-- **OCR CTC blank token & recursion** — Fixed CTC decoding blank token handling and infinite recursion in OCR V5 strategy.
-
-### Code Quality
-
-- 85% test coverage enforced (4,200+ library tests), clippy enforcement with zero warnings, 31 lint fixes across the codebase.
-- Renamed version-referenced test files by topic for better discoverability.
-
-### Performance
-
-- **Image-only page skip** (#133, #169) — `page_cannot_have_text()` pre-check skips content stream decompression for pages with no `/Font` resources and no Form XObjects.
-
-- **SmallVec operator operands** (#165) — Stack-allocated `SmallVec<[Object; 6]>` replaces heap `Vec<Object>` for operator parsing. All standard PDF operators have ≤6 operands, eliminating per-operator allocation on graphics-heavy pages.
-
-- **Cross-document font cache** (#166) — Process-level LRU font cache (Layer 6) with 1024-entry default capacity. Fonts parsed by one PdfDocument are available to all subsequent instances via `OnceLock<Mutex<LruFontCache>>`.
-
-- **Large document performance** (#132) — Parallel extraction + global font cache + SmallVec + image-only skip combine to bring 1000-page PDFs well under 1 second on multi-core hardware.
-
-### Community Contributors
-
-Thanks to everyone who reported issues and contributed to v0.3.10:
-
-- **@SeanPedersen** — Reported corrupted ligature text in post-processing (#154)
-- **@dhdaines** — Reported circular XObject segfault (#163) and outdated dataset URLs in benchmark docs (#162)
-- **@bhaswata08** — Reported missing `extract_text_ocr` in Python bindings (#171)
-
-## [0.3.9] - 2026-02-24
-> Performance: 20+ Micro-Optimizations — 40% Faster Text Extraction
-
-### Performance
-
-- **O(n²) string concat fix** (#135) — Replaced `String::push_str()` accumulation in span merging with pre-allocated `Vec<&str>` joined at the end. Eliminates quadratic growth on pages with thousands of merged spans.
-
-- **Image-only content stream parser** (#113) — New `parse_content_stream_images_only()` fast path that only extracts image operators (`Do`, `BI`), skipping text and graphics entirely. Used by `extract_images()` for 3-5× faster image extraction.
-
-- **Fingerprint-based font cache** (#130) — Font identity determined by hashing encoding+widths+flags instead of comparing full FontInfo structs. Cache hits avoid re-parsing font programs entirely.
-
-- **Streaming parser with font identity cache** (#136) — Content stream parsing now streams operators instead of collecting into `Vec<Operator>`. Font identity cache skips redundant font switches when the same physical font is referenced under different names.
-
-- **Name-based font set cache** (#136) — Cache font set lookups by resource name to avoid repeated dictionary traversal on pages that reference many fonts.
-
-- **Fast inline parser for BT/ET** (#136) — Specialized inline parser for text blocks that handles the most common operators (Tj, TJ, Tf, Td, Tm, T*) with direct byte matching instead of full nom parsing.
-
-- **Font cache trust, fast parser** (#137) — Trust cached font data without re-validation on cache hits. Fast parser combines operator dispatch with operand parsing in a single pass.
-
-- **Skip Image XObject loading** (#138) — `Do` operator for Image XObjects skips loading the stream entirely during text extraction. Only Form XObjects are loaded and processed.
-
-- **Fast-path literal string parsing** — Literal strings `(...)` parsed with direct byte scanning and in-place unescaping instead of nom combinators.
-
-- **Byte-to-char lookup table** (#144) — 256-entry lookup table for single-byte character mapping replaces HashMap lookups in the hot path.
-
-- **Cache font Arc in TjBuffer** (#145) — `TjBuffer` holds an `Arc<FontInfo>` reference, avoiding repeated cache lookups within the same text block.
-
-- **Streaming XObject parser, span flush** (#146) — Form XObjects parsed with streaming parser. Span flush moved out of hot loop.
-
-- **Width lookup table, XObject text cache** (#148) — Fixed-size array for glyph width lookups replaces HashMap. XObject text content cached to avoid re-parsing shared Form XObjects.
-
-- **Merged single-pass Unicode decode + width** (#149) — Character-to-Unicode conversion and width lookup merged into a single pass, eliminating redundant character code processing.
-
-- **Shrink Operator enum 112→40 bytes** (#150) — Boxed large variants (String, HashMap, Vec) in the Operator enum to reduce memory footprint by 64%. Improves cache locality during content stream iteration.
-
-- **Fast-path single-char operator dispatch** (#151) — Single-character operators (q, Q, f, W, n, etc.) dispatched via direct byte match instead of string comparison.
-
-- **Switch flate2 to zlib-rs backend** (#152) — Replaced default miniz_oxide backend with zlib-rs (Rust port of zlib-ng). 15-25% faster stream decompression.
-
-- **Smart Tm batching, TjBuffer precomputation** (#153) — Batch consecutive `Tm` operators (keep only the last one before text). Precompute TjBuffer text metrics to avoid redundant calculations.
-
-- **Single-pass TJ array processing** (#154) — TJ arrays processed in a single pass, combining string extraction and numeric advance handling without intermediate allocation.
-
-### Bug Fixes
-
-- **Compilation bug** (#134) — Fixed unused variable `_page_num` → `page_num` in page renderer (reported by @mpannu03)
-
-- **Font encoding with embedded programs** (#119) — When `/BaseEncoding` is absent in a font's encoding dictionary and the font has an embedded program, the font program's built-in encoding is now used as the base encoding per PDF spec ISO 32000-1:2008 Section 9.6.6.1. Previously defaulted to StandardEncoding, causing ligature and glyph mapping failures.
-
-- **Supplementary Unicode (U+10000+)** (#124) — `fallback_char_to_unicode()` changed from `u16` to `u32` parameter, fixing truncation of supplementary Unicode code points (e.g., CJK Extension B characters). Also added 5-6 digit hex support in CMap `bfrange` array format.
-
-- **StandardEncoding + ligature mapping** (#125) — Correct glyph-to-Unicode mapping for fi, fl, ff, ffi, ffl ligatures via Adobe Glyph List lookup.
-
-- **Kangxi Radical normalization** (#123) — Full normalization table (U+2F00–U+2FD5) mapping Kangxi Radicals to CJK Unified Ideographs for searchable text.
-
-- **Tolerate misaligned startxref offsets** — XRef scanning with 32+64 byte tolerance for PDFs with slightly incorrect startxref pointers.
-
-- **Character repetition blowup guard** — 32K character cap on text strings to prevent pathological memory growth from malformed content streams.
-
-- **Cap Tj/TJ string length** — Maximum string length enforced in text operators to prevent memory exhaustion.
-
-- **Filter leaked PDF metadata** — Strip leaked WhitePoint, BlackPoint, and CalRGB metadata strings from extracted text output.
-
-- **TrueType cmap fallback** (#127) — Improved cmap table selection for TrueType fonts with multiple subtables. Falls back through format 4 → format 6 → format 0 when primary subtable fails.
-
-- **TrueType cmap for subset fonts** (#94) — Correct cmap lookup for subset fonts where glyph IDs don't match Unicode code points.
-
-- **MacRomanEncoding table** (#93) — Fixed MacRomanEncoding character mapping table to match PDF spec Table D.2.
-
-- **Indirect refs in /Encoding /Differences** (#119) — Resolve indirect object references within encoding dictionaries and /Differences arrays.
-
-- **CJK CID-to-Unicode tables** (#120) — Expanded CID-to-Unicode mapping tables for Adobe-CNS1, Adobe-GB1, Adobe-Japan1, Adobe-Korea1 character collections.
-
-- **RTL text character order** (#121) — Right-to-left text (Arabic, Hebrew) now extracted in logical reading order instead of visual glyph order.
-
-- **Arabic Presentation Forms normalization** (#96) — Arabic Presentation Forms (U+FB50–U+FDFF, U+FE70–U+FEFF) normalized to base Arabic characters for searchable text.
-
-- **Multi-column text separation** (#122) — Improved column detection using gap analysis to prevent text from adjacent columns being merged.
-
-- **Supplementary Unicode in CMap** (#124) — CMap `bfchar` and `bfrange` entries with 5-8 hex digit targets now correctly produce supplementary Unicode characters.
-
-### Features
-
-- **`extract_all_text()`** (#128) — New convenience method that extracts text from all pages and joins with newlines. Available in both Rust and Python APIs. (Requested by @SeanPedersen)
-
-- **`source_role` for StructElem** (#118) — Structure tree elements now expose `source_role` preserving the original PDF role name before role mapping. (Requested by @QuickWrite)
-
-### CI/CD
-
-- Fixed `cargo fmt` formatting across all source files
-- Resolved 5 clippy warnings: empty doc comments, doc indentation, `Box<Collection>` on intentional enum shrink, collapsible else-if, needless borrow
-
-### Community Contributors
-
-Thanks to everyone who reported issues, sent test PDFs, and requested features for v0.3.9:
-
-- **@SeanPedersen** — Feature request for `extract_all_text()` (#128) and continued contributions of real-world test PDFs that drove performance profiling and optimization work
-- **@mpannu03** — Reported compilation bug (#134) in page renderer
-- **@QuickWrite** — Feature request for `source_role` on StructElem (#118)
-
-## [0.3.8] - 2026-02-20
-> Performance: Text-Only Parser — Graphics-Heavy Pages 10-30x Faster
-
-### Performance
-
-- **Text-only content stream parser** (#110) — New `parse_content_stream_text_only()` fast path skips graphics operators outside BT/ET blocks using byte-level scanning instead of full nom parsing. Only text-affecting operators are returned.
-
-- **Byte-level graphics scanner** (#112) — Replaced nom-based operand loop with raw index arithmetic in `scan_graphics_region()`. Processes digits, dots, and whitespace at near-memcpy speed, skipping path coordinates without constructing any Objects.
-
-- **Skip color operators in scanner** (#114) — Added 12 color operators (`rg`, `RG`, `g`, `G`, `k`, `K`, `cs`, `CS`, `sc`, `SC`, `scn`, `SCN`) to the byte-level skip list. Pure color state changes never affect text content or positioning.
-
-- **Defer q/cm/Q emission until text confirmed** (#116) — Graphics state save/restore (`q`/`Q`) and CTM transforms (`cm`) outside BT/ET are deferred rather than immediately parsed. If a `q...Q` block contains no text-triggering operator (BT, BI, Do), all its state ops are silently discarded. When text IS found, the deferred region is re-parsed to preserve CTM. Eliminates ~75% of remaining backtrack overhead on graphics-heavy pages.
-
-- **Arc-wrap FontInfo cache** (#111) — Font cache entries wrapped in `Arc` to avoid cloning full FontInfo structs. Removed eager CMap validation that blocked font loading on partially-valid CMap streams.
-
-- **O(n) page map construction** — Rewrote `build_page_map` as single-pass traversal with parse budgets, replacing recursive descent that could degenerate on deeply nested page trees.
-
-- **Structure tree optimization** — Arc-cached structure tree with batch traversal; skip ParentTree parsing for non-tagged content.
-
-- **XObject name→ref cache** — Cache XObject dictionary lookups to eliminate O(n²) dictionary cloning on pages with many XObject references.
-
-### Verified — 3,829-PDF Corpus
-
-- **0 new errors** — All 3,829 PDFs extract successfully (7 pre-existing failures on intentionally broken test fixtures)
-- **1,712 unit tests passing** — Zero failures, zero warnings
-- **Clippy clean** — `cargo clippy -- -D warnings` passes
-
-### Issues Resolved
-
-| Closes | Description |
-|--------|-------------|
-| #110 | Add text-only content stream parser fast path |
-| #111 | Arc-wrap FontInfo cache, remove eager CMap validation |
-| #112 | Replace nom-based operand loop with byte-level scanner |
-| #114 | Skip color operators in graphics scanner |
-| #116 | Defer q/cm/Q emission until text is confirmed |
-
-## [0.3.7] - 2026-02-19
-> Text Extraction Quality: 95.7% to 99.6% Clean Rate
-
-### Verified — 3,829-PDF Corpus (v0.3.6 → v0.3.7)
-
-| Metric | v0.3.6 | v0.3.7 | Change |
-|--------|--------|--------|--------|
-| **Clean rate** | 95.7% | **99.6%** | 3,812 of 3,829 PDFs |
-| **Dirty PDFs** | 165 | **17** | **-90%** |
-
-Systematic benchmark testing across 3,829 real-world PDFs identified and fixed 13 text extraction issues.
-
-### Added — Parser & Decoders
-
-- **BrotliDecode stream filter** (PDF 2.0, ISO 32000-2:2020) — New `BrotliDecoder` for PDFs using Brotli-compressed streams (#95)
-- **Xref trailer selection** — Improve selection of the correct trailer when multiple trailers exist, fixing files where the wrong trailer was selected
-- **Headerless PDF recovery** — Search for first object marker when `%PDF-` header is missing
-- **Multi-line object headers** — Handle `1 0\nobj` format used by Google-generated PDFs
-- **Cross-reference stream reconstruction** — Rebuild xref from object markers for damaged PDFs
-
-### Added — Font Encoding
-
-- **CFF font encoding parser** (`src/fonts/cff_encoding.rs`) — Parse CFF/OpenType font programs to extract character encoding when no ToUnicode CMap is present (#87, #99)
-- **Type1 font encoding parser** (`src/fonts/type1_encoding.rs`) — Parse embedded Type 1 font programs for `/Encoding` arrays with `dup CODE /GLYPHNAME put` patterns (#89)
-- **80K+ CID-to-Unicode mappings** — Expanded Adobe-CNS1 (+18K), Adobe-GB1 (+30K), Adobe-Japan1 (+15K), Adobe-Korea1 (+17K) character collections (#98)
-- **Shift-JIS/RKSJ decoding** — Added `encoding_rs` dependency for Japanese Shift-JIS encoded CMap streams (#100)
-- **TeX math glyph names** — Map MSAM, MSBM, and Computer Modern glyph names to Unicode equivalents
-- **Identity-H cmap propagation** — Propagate TrueType cmap tables from CIDFont descendants to Type0 parent fonts (#91)
-- **Cross-font cmap sharing** — Share TrueType cmap tables across Identity-H fonts that lack embedded encoding data (#91)
-
-### Fixed — Text Extraction Pipeline
-
-- **Tf buffer flush** — Flush pending text buffer on font switch (`Tf` operator) to prevent text loss when multiple fonts are used in the same text block (#88)
-- **Adaptive space threshold** — Replace fixed 0.25em threshold with bbox-based adaptive spacing, eliminating spurious spaces in tightly-set text (#97)
-- **Span deduplication** — Deduplicate overlapping text spans rendered multiple times at the same position (used for bold/shadow effects in some PDFs) (#102)
-- **Character deduplication** — Remove duplicate characters within 2pt horizontal distance on the same line (#102)
-- **BT operator check removal** — Remove incorrect content stream validation that silently skipped valid text blocks, causing empty output (#101)
-- **ByteMode decoding** — Properly handle 1-byte, 2-byte (Identity-H/UCS2), and variable-width (Shift-JIS) character code decoding (#100, #103)
-- **Annotation text extraction** — Extract text from Widget (form field), FreeText, and appearance stream annotations (#92)
-- **Metadata string filtering** — Filter leaked WhitePoint, BlackPoint, and CalRGB metadata from extracted text output
-- **ToUnicode control character fallback** — Fall back to font encoding when ToUnicode maps to control characters
-
-### Fixed — Font Handling
-
-- **TrueType cmap format 4** — Fix off-by-one in segment endCode comparison for format 4 lookup tables (#98)
-- **CMap byte-width detection** — Detect CMap input code width from `begincodespacerange` for proper multi-byte decoding
-- **CMap bfrange array targets** — Handle `bfrange` entries with array targets (mapping ranges to non-contiguous Unicode sequences)
-- **Symbolic font encoding** — Correct encoding resolution order for symbolic fonts without explicit `/Encoding`
-
-### Added — Tooling
-
-- **Benchmark suite** — `bench_extract_all` example for corpus-wide extraction benchmarking
-- **Comparison scripts** — `bench_compare.py` (pdf_oxide vs PyMuPDF), `bench_pymupdf.py`, `export_text_comparison.py` for side-by-side quality analysis
-- **Regression tests** — 11 new regression tests in `test_v037_regressions.rs` covering all major fixes
-
-### Issues Resolved
-
-| Closes | Description |
-|--------|-------------|
-| #87 | Custom encoding producing garbage text |
-| #88 | Multi-font text loss on Tf switch |
-| #89 | Type1 subset font encoding not parsed |
-| #91 | Identity-H fonts missing cmap propagation |
-| #92 | Annotation/form field text not extracted |
-| #95 | BrotliDecode stream filter not supported |
-| #97 | Spurious spaces from fixed threshold |
-| #98 | CID/ToUnicode producing U+FFFD replacements |
-| #99 | Font encoding offset errors |
-| #100 | Raw bytes emitted instead of decoded text |
-| #101 | Empty output from valid content streams |
-| #102 | Overlapping duplicate text not deduplicated |
-| #103 | Character fragmentation from byte-width errors |
-
-Ref #90, #93, #94, #96, #104, #105
-
-## [0.3.6] - 2026-02-16
-> Performance: Two Critical O(n) Bottlenecks Eliminated
-
-### Performance
-
-- **Bulk page tree cache** — On first page access, the entire page tree is walked once and all pages are cached. Previously `get_page()` traversed from root for every uncached page — O(n) per page, O(n²) total for sequential access. Now O(1) per page after a single O(n) walk.
-  - **isartor-6-1-12-t01-fail-a.pdf (10,000 pages): 55,667ms → 332ms (168× faster)**
-  - Eliminates the last >5s PDF in the entire 3,830-file corpus
-
-- **Scan-for-object offset cache** (#44) — When objects are missing from the xref table, `scan_for_object()` previously read the entire PDF file for each missing object. Tagged PDFs with hundreds of structure tree elements not in xref triggered hundreds of full file reads. Now the file is scanned once and all object offsets are cached in a HashMap.
-  - **Artikeltext (10pp, 1.3MB): 9,931ms → 68ms (146× faster)**
-  - **cs231n (154pp, 571 fonts): 17,872ms → 405ms (44× faster)**
-
-- **Single-pass text extraction** — `extract_spans()` no longer runs two passes (classify document type, then extract). The classification pass was discarded entirely; adaptive font-aware thresholds now produce equal or better results in a single pass.
-
-- **Content stream Vec pre-allocation** — `parse_content_stream()` pre-allocates operator Vec capacity based on stream size (`data.len() / 20`), reducing reallocations for large content streams.
-
-### Verified — 3,830-PDF Corpus (v0.3.5 → v0.3.6)
-
-| Metric | v0.3.5 | v0.3.6 | Change |
-|--------|--------|--------|--------|
-| **Pass rate** | 99.8% | 99.8% | 3,823 of 3,830 valid PDFs |
-| **Slow (>5s)** | 2 | **0** | Eliminated |
-| **Mean** | 23.3ms | **2.1ms** | **-91%** |
-| **p50** | 0.6ms | 0.6ms | — |
-| **p90** | 3.0ms | **2.6ms** | -13% |
-| **p95** | 5.1ms | **4.7ms** | -8% |
-| **p99** | 33.2ms | **18.0ms** | **-46%** |
-| **Max** | 68,722ms | **625ms** | **-99%** |
-| **Sum (all PDFs)** | 89.1s | **8.0s** | **-91%** |
-
-The 7 non-passing files are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
-
-Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs show improved extraction quality from adaptive spacing (more complete words recovered).
-
-### 🏆 Community Contributors
-
-🥇 **@SeanPedersen** — Continued thanks to Sean whose Issue #44 performance report directly drove the investigation that uncovered both O(n) bottlenecks. His real-world test PDFs (German academic papers, Stanford lecture slides) were instrumental in profiling and validating the fixes. 🙏📊
-
-## [0.3.5] - 2026-02-15
-> Performance, 3,830-PDF Stability & Error Recovery
-
-### Performance
-
-- **Font caching across pages** — Document-level font cache keyed by `ObjectRef` avoids re-parsing shared fonts on every page. For a 1000-page document sharing 20 fonts, this reduces font parsing from 40,000 operations to 20
-- **Page object caching** — `get_page()` caches resolved page objects in a `HashMap<usize, Object>`, eliminating repeated page tree traversal for multi-page extraction
-- **Structure tree caching** — Structure tree result cached after first access, avoiding redundant parsing on every `extract_text()` call (major impact on tagged PDFs like PDF32000_2008.pdf)
-- **BT operator early-out** — `extract_spans()`, `extract_spans_with_config()`, and `extract_chars()` skip the full text extraction pipeline for image-only pages that contain no `BT` (Begin Text) operators
-- **Larger I/O buffer for big files** — `BufReader` capacity increased from 8 KB to 256 KB for files >100 MB, reducing syscall overhead on 1.5 GB newspaper archives
-- **Xref reconstruction threshold removed** — Eliminated the `xref.len() < 5` heuristic that triggered full-file reconstruction on valid portfolio PDFs with few objects (5-13s → <100ms)
+## [0.3.5] - 2026-02-20
+> Stability, Image Extraction & Error Recovery (Issue #41, #44, #45, #46)
 
 ### Verified — 3,830-PDF Corpus
 
-- **100% pass rate** on 3,830 PDFs across three independent test suites: veraPDF (2,907), Mozilla pdf.js (897), SafeDocs (26)
-- **Zero timeouts, zero panics** — every PDF completes within 120 seconds
-- **p50 = 0.6ms, p90 = 3.0ms, p99 = 33ms** — 97.6% of PDFs complete in under 10ms
-- Added `verify_corpus` example binary for reproducible batch verification with CSV output, timeout handling, and per-corpus breakdown
+- **100% pass rate** on 3,830 PDFs across three independent test suites: veraPDF (2,907), Mozilla pdf.js (897), SafeDocs (26).
+- **Zero timeouts, zero panics** — every PDF completes within 120 seconds.
+- **p50 = 0.6ms, p90 = 3.0ms, p99 = 33ms** — 97.6% of PDFs complete in under 10ms.
+- Added `verify_corpus` example binary for reproducible batch verification with CSV output, timeout handling, and per-corpus breakdown.
 
 ### Added - Encryption
 
-- **Owner password authentication** (Algorithm 7 for R≤4, Algorithm 12 for R≥5)
-  - R≤4: Derives RC4 key from owner password via MD5 hash chain, decrypts `/O` value to recover user password, then validates via user password authentication
-  - R≥5: SHA-256 verification with SASLprep normalization and owner validation/key salts per PDF spec §7.6.3.4
-  - Both algorithms now fully wired into `EncryptionHandler::authenticate()`
-- **R≥5 user password verification with SASLprep** — Full AES-256 password verification using SHA-256 with validation and key salts per PDF spec §7.6.4.3.3
-- **Public password authentication API** — `Pdf::authenticate(password)` and `PdfDocument::authenticate(password)` exposed for user-facing password entry
+- **Owner password authentication** (Algorithm 7 for R≤4, Algorithm 12 for R≥5).
+  - R≤4: Derives RC4 key from owner password via MD5 hash chain, decrypts `/O` value to recover user password, then validates via user password authentication.
+  - R≥5: SHA-256 verification with SASLprep normalization and owner validation/key salts per PDF spec §7.6.3.4.
+  - Both algorithms now fully wired into `EncryptionHandler::authenticate()`.
+- **R≥5 user password verification with SASLprep** — Full AES-256 password verification using SHA-256 with validation and key salts per PDF spec §7.6.4.3.3.
+- **Public password authentication API** — `Pdf::authenticate(password)` and `PdfDocument::authenticate(password)` exposed for user-facing password entry.
 
 ### Added - PDF/A Compliance Validation
 
-- **XMP metadata validation** — Parses XMP metadata stream and checks for `pdfaid:part` and `pdfaid:conformance` identification entries (clause 6.7.11)
-- **Color space validation** — Scans page content streams for device-dependent color operators (`rg`, `RG`, `k`, `K`, `g`, `G`) without output intent (clause 6.2)
-- **AFRelationship validation** — For PDF/A-3 documents with embedded files, validates each file specification dictionary contains the required `AFRelationship` key (clause 6.8)
+- **XMP metadata validation** — Parses XMP metadata stream and checks for `pdfaid:part` and `pdfaid:conformance` identification entries (clause 6.7.11).
+- **Color space validation** — Scans page content streams for device-dependent color operators (`rg`, `RG`, `k`, `K`, `g`, `G`) without output intent (clause 6.2).
+- **AFRelationship validation** — For PDF/A-3 documents with embedded files, validates each file specification dictionary contains the required `AFRelationship` key (clause 6.8).
 
 ### Added - PDF/X Compliance Validation
 
-- **XMP PDF/X identification** — Parses XMP metadata for `pdfxid:GTS_PDFXVersion`, validates against declared level (clause 6.7.2)
-- **Page box relationship validation** — Validates TrimBox ⊆ BleedBox ⊆ MediaBox and ArtBox ⊆ MediaBox with 0.01pt tolerance (clause 6.1.1)
-- **ExtGState transparency detection** — Checks `SMask` (not `/None`), `CA`/`ca` < 1.0, and `BM` not `Normal`/`Compatible` in extended graphics state dictionaries (clause 6.3)
-- **Device-dependent color detection** — Flags DeviceRGB/CMYK/Gray color spaces used without output intent (clause 6.2.3)
-- **ICC profile validation** — Validates ICCBased color space profile streams contain required `/N` entry (clause 6.2.3)
+- **XMP PDF/X identification** — Parses XMP metadata for `pdfxid:GTS_PDFXVersion`, validates against declared level (clause 6.7.2).
+- **Page box relationship validation** — Validates TrimBox ⊆ BleedBox ⊆ MediaBox and ArtBox ⊆ MediaBox with 0.01pt tolerance (clause 6.1.1).
+- **ExtGState transparency detection** — Checks `SMask` (not `/None`), `CA`/`ca` < 1.0, and `BM` not `Normal`/`Compatible` in extended graphics state dictionaries (clause 6.3).
+- **Device-dependent color detection** — Flags DeviceRGB/CMYK/Gray color spaces used without output intent (clause 6.2.3).
+- **ICC profile validation** — Validates ICCBased color space profile streams contain required `/N` entry (clause 6.2.3).
 
 ### Added - Rendering
 
-- **Spec-correct clipping** (PDF §8.5.4) — Clip state scoped to `q`/`Q` save/restore via clip stack; new clips intersect with existing clip region; `W`/`W*` no longer consume the current path (deferred to next paint operator); clip mask applied to all painting operations including text and images
-- **Glyph advance width calculation** — Text position advances per PDF spec §9.4.4: `tx = (w0/1000 × Tfs + Tc + Tw) × Th` with 600-unit default glyph width
-- **Form XObject rendering** — Parses `/Matrix` transform, uses form's `/Resources` (or inherits from parent), and recursively executes form content stream operators
+- **Spec-correct clipping** (PDF §8.5.4) — Clip state scoped to `q`/`Q` save/restore via clip stack; new clips intersect with existing clip region; `W`/`W*` no longer consume the current path (deferred to next paint operator); clip mask applied to all painting operations including text and images.
+- **Glyph advance width calculation** — Text position advances per PDF spec §9.4.4: `tx = (w0/1000 × Tfs + Tc + Tw) × Th` with 600-unit default glyph width.
+- **Form XObject rendering** — Parses `/Matrix` transform, uses form's `/Resources` (or inherits from parent), and recursively executes form content stream operators.
 
 ### Fixed - Error Recovery (28+ real-world PDFs)
 
-- **Missing objects resolve to Null** — Per PDF spec §7.3.10, unresolvable indirect references now return `Null` instead of errors, fixing 16 files across veraPDF/pdf.js corpora
-- **Lenient header version parsing** — Fixed fast-path bug where valid headers with unusual version strings were rejected
-- **Non-standard encryption algorithm matching** — V=1,R=3 combinations now handled leniently instead of rejected
-- **Non-dictionary Resources** — Pages with invalid `/Resources` entries (e.g., Null, Integer) treated as empty resources instead of erroring
-- **Null nodes in page tree** — Null or non-dictionary child nodes in page tree gracefully skipped during traversal
-- **Corrupt content streams** — Malformed content streams return empty content instead of propagating parse errors
-- **Enhanced page tree scanning** — `/Resources`+`/Parent` heuristic and `/Kids` direct resolution added as fallback passes for damaged page trees
+- **Missing objects resolve to Null** — Per PDF spec §7.3.10, unresolvable indirect references now return `Null` instead of errors, fixing 16 files across veraPDF/pdf.js corpora.
+- **Lenient header version parsing** — Fixed fast-path bug where valid headers with unusual version strings were rejected.
+- **Non-standard encryption algorithm matching** — V=1,R=3 combinations now handled leniently instead of rejected.
+- **Non-dictionary Resources** — Pages with invalid `/Resources` entries (e.g., Null, Integer) treated as empty resources instead of erroring.
+- **Null nodes in page tree** — Null or non-dictionary child nodes in page tree gracefully skipped during traversal.
+- **Corrupt content streams** — Malformed content streams return empty content instead of propagating parse errors.
+- **Enhanced page tree scanning** — `/Resources`+`/Parent` heuristic and `/Kids` direct resolution added as fallback passes for damaged page trees.
 
 ### Fixed - DoS Protection
 
-- **Bogus /Count bounds checking** — Page count validated against PDF spec Annex C.2 limit (8,388,607) and total object count; unreasonable values fall back to tree scanning
+- **Bogus /Count bounds checking** — Page count validated against PDF spec Annex C.2 limit (8,388,607) and total object count; unreasonable values fall back to tree scanning.
 
 ### Fixed - Image Extraction
-- **Content stream image extraction** — `extract_images()` now processes page content streams to find `Do` operator calls, extracting images referenced via XObjects that were previously missed
-- **Nested Form XObject images** — Recursive extraction with cycle detection handles images inside Form XObjects
-- **Inline images** — `BI`...`ID`...`EI` sequences parsed with abbreviation expansion per PDF spec
-- **CTM transformations** — Image bounding boxes correctly transformed using full 4-corner affine transform (handles rotation, shear, and negative scaling)
-- **ColorSpace indirect references** — Resolved indirect references (e.g., `7 0 R`) in image color space entries before extraction
+- **Content stream image extraction** — `extract_images()` now processes page content streams to find `Do` operator calls, extracting images referenced via XObjects that were previously missed.
+- **Nested Form XObject images** — Recursive extraction with cycle detection handles images inside Form XObjects.
+- **Inline images** — `BI`...`ID`...`EI` sequences parsed with abbreviation expansion per PDF spec.
+- **CTM transformations** — Image bounding boxes correctly transformed using full 4-corner affine transform (handles rotation, shear, and negative scaling).
+- **ColorSpace indirect references** — Resolved indirect references (e.g., `7 0 R`) in image color space entries before extraction.
 
 ### Fixed - Parser Robustness
 
-- **Multi-line object headers** — Parser now handles `1 0\nobj` format used by Google-generated PDFs instead of requiring `1 0 obj` on a single line
-- **Extended header search** — Header search window extended from 1024 to 8192 bytes to handle PDFs with large binary prefixes
-- **Lenient version parsing** — Malformed version strings like `%PDF-1.a` or truncated headers no longer cause parse failures in lenient mode
+- **Multi-line object headers** — Parser now handles `1 0\nobj` format used by Google-generated PDFs instead of requiring `1 0 obj` on a single line.
+- **Extended header search** — Header search window extended from 1024 to 8192 bytes to handle PDFs with large binary prefixes.
+- **Lenient version parsing** — Malformed version strings like `%PDF-1.a` or truncated headers no longer cause parse failures in lenient mode.
 
 ### Fixed - Page Access Robustness
 
-- **Missing Contents entry** — Pages without a `/Contents` key now return empty content data instead of erroring
-- **Cyclic page tree detection** — Page tree traversal tracks visited nodes to prevent stack overflow on malformed circular references
-- **Null stream references** — Null or invalid stream references handled gracefully instead of panicking
-- **Wider page scanning fallback** — Page scanning fallback triggers on more error conditions, improving compatibility with damaged PDFs
-- **Pages without /Type entry** — Page scanning now finds pages missing the `/Type /Page` entry by checking for `/MediaBox` or `/Contents` keys
+- **Missing Contents entry** — Pages without a `/Contents` key now return empty content data instead of erroring.
+- **Cyclic page tree detection** — Page tree traversal tracks visited nodes to prevent stack overflow on malformed circular references.
+- **Null stream references** — Null or invalid stream references handled gracefully instead of panicking.
+- **Wider page scanning fallback** — Page scanning fallback triggers on more error conditions, improving compatibility with damaged PDFs.
+- **Pages without /Type entry** — Page scanning now finds pages missing the `/Type /Page` entry by checking for `/MediaBox` or `/Contents` keys.
 
 ### Fixed - Encryption Robustness
 
-- **Short encryption key panic** — AES decryption with undersized keys now returns an error instead of panicking
-- **Xref stream parsing hardened** — Malformed xref streams with invalid entry sizes or out-of-bounds data no longer cause panics
-- **Indirect /Encrypt references** — `/Encrypt` dictionary values that are indirect references are now resolved before parsing
+- **Short encryption key panic** — AES decryption with undersized keys now returns an error instead of panicking.
+- **Xref stream parsing hardened** — Malformed xref streams with invalid entry sizes or out-of-bounds data no longer cause panics.
+- **Indirect /Encrypt references** — `/Encrypt` dictionary values that are indirect references are now resolved before parsing.
 
 ### Fixed - Content Stream Processing
 
-- **Dictionary-as-Stream fallback** — When a stream object is a bare dictionary (no stream data), it is now treated as an empty stream instead of causing a decode error
-- **Filter abbreviations** — Abbreviated filter names (`AHx`, `A85`, `LZW`, `Fl`, `RL`, `CCF`, `DCT`) and case-insensitive matching now supported
-- **Operator limit** — Content stream parsing enforces a configurable operator limit (default 1,000,000) to prevent pathological slowdowns on malformed streams
+- **Dictionary-as-Stream fallback** — When a stream object is a bare dictionary (no stream data), it is now treated as an empty stream instead of causing a decode error.
+- **Filter abbreviations** — Abbreviated filter names (`AHx`, `A85`, `LZW`, `Fl`, `RL`, `CCF`, `DCT`) and case-insensitive matching now supported.
+- **Operator limit** — Content stream parsing enforces a configurable operator limit (default 1,000,000) to prevent pathological slowdowns on malformed streams.
 
 ### Fixed - Code Quality
 
-- **Structure tree indirect object references** — `ObjectRef` variants in structure tree `/K` entries are now resolved at parse time instead of being silently skipped, ensuring complete structure tree traversal
-- **Lexer `R` token disambiguation** — `tag(b"R")` no longer matches the `R` prefix of `RG`/`ri`/`re` operators; `1 0 RG` is now correctly parsed as a color operator instead of indirect reference `1 0 R` + orphan `G`
-- **Stream whitespace trimming** — `trim_leading_stream_whitespace` now only strips CR/LF (0x0D/0x0A), no longer strips NUL bytes (0x00) or spaces from binary stream data (fixes grayscale image extraction and object stream parsing)
+- **Structure tree indirect object references** — `ObjectRef` variants in structure tree `/K` entries are now resolved at parse time instead of being silently skipped, ensuring complete structure tree traversal.
+- **Lexer `R` token disambiguation** — `tag(b"R")` no longer matches the `R` prefix of `RG`/`ri`/`re` operators; `1 0 RG` is now correctly parsed as a color operator instead of indirect reference `1 0 R` + orphan `G`.
+- **Stream whitespace trimming** — `trim_leading_stream_whitespace` now only strips CR/LF (0x0D/0x0A), no longer strips NUL bytes (0x00) or spaces from binary stream data (fixes grayscale image extraction and object stream parsing).
 
 ### Tests
 
 - **8 previously ignored tests un-ignored and fixed**:
-  - `test_extract_raw_grayscale_image_from_xobject` — Fixed stream trimming stripping binary pixel data
-  - `test_parse_object_stream_with_whitespace` — Fixed stream trimming affecting object stream offsets
-  - `test_parse_object_stream_graceful_failure` — Relaxed assertion for improved parser recovery
-  - `test_markdown_reading_order_top_to_bottom` — Fixed test coordinates to use PDF convention (Y increases upward)
-  - `test_html_layout_multiple_elements` — Fixed assertions for per-character positioning
-  - `test_reading_order_graph_based_simple` — Fixed test coordinates to PDF convention
-  - `test_reading_order_two_columns` — Fixed test coordinates to PDF convention
-  - `test_parse_color_operators` — Fixed lexer R/RG token disambiguation
+  - `test_extract_raw_grayscale_image_from_xobject` — Fixed stream trimming stripping binary pixel data.
+  - `test_parse_object_stream_with_whitespace` — Fixed stream trimming affecting object stream offsets.
+  - `test_parse_object_stream_graceful_failure` — Relaxed assertion for improved parser recovery.
+  - `test_markdown_reading_order_top_to_bottom` — Fixed test coordinates to use PDF convention (Y increases upward).
+  - `test_html_layout_multiple_elements` — Fixed assertions for per-character positioning.
+  - `test_reading_order_graph_based_simple` — Fixed test coordinates to PDF convention.
+  - `test_reading_order_two_columns` — Fixed test coordinates to PDF convention.
+  - `test_parse_color_operators` — Fixed lexer R/RG token disambiguation.
 
 ### Removed
 
-- Deleted empty `PdfImage` stub (`src/images.rs`) and its module export — image extraction uses `ImageInfo` from `src/extractors/images.rs`
-- Deleted commented-out `DocumentType::detect()` test block in `src/extractors/gap_statistics.rs`
-- Removed stale TODO comments in `scripts/setup-hooks.sh`, `src/bin/analyze_pdf_features.rs`, `src/document.rs`
+- Deleted empty `PdfImage` stub (`src/images.rs`) and its module export — image extraction uses `ImageInfo` from `src/extractors/images.rs`.
+- Deleted commented-out `DocumentType::detect()` test block in `src/extractors/gap_statistics.rs`.
+- Removed stale TODO comments in `scripts/setup-hooks.sh`, `src/bin/analyze_pdf_features.rs`, `src/document.rs`.
 
 ### 🏆 Community Contributors
 
-🥇 **@SeanPedersen** — Huge thanks to Sean for reporting multiple issues (#41, #44, #45, #46) that drove the entire stability focus of this release. His real-world testing uncovered a parser bug with Google-generated PDFs, image extraction failures on content stream references, and performance problems — each report triggering deep investigation and significant fixes. The parser robustness, image extraction, and testing infrastructure improvements in v0.3.5 all trace back to Sean's thorough bug reports. 🙏🔍
+🥇 **@SeanPedersen** — Huge thanks for reporting multiple issues (#41, #44, #45, #46) that drove the entire stability focus of this release. His real-world testing uncovered a parser bug with Google-generated PDFs, image extraction failures on content stream references, and performance problems — each report triggering deep investigation and significant fixes. The parser robustness, image extraction, and testing infrastructure improvements in v0.3.5 all trace back to Sean's thorough bug reports. 🙏🔍
 
 ## [0.3.4] - 2026-02-12
 > Parsing Robustness, Character Extraction & XObject Paths
 
 ### ⚠️ Breaking Changes
-- **`parse_header()` function signature** - Now includes offset tracking
+- **`parse_header()` function signature** - Now includes offset tracking.
   - **Before**: `parse_header(reader) -> Result<(u8, u8)>`
   - **After**: `parse_header(reader, lenient) -> Result<(u8, u8, u64)>`
   - **Migration**: Replace `let (major, minor) = parse_header(&mut reader)?;` with `let (major, minor, _offset) = parse_header(&mut reader, true)?;`
-  - Note: This is a public API function; consider using `doc.version()` for typical use cases instead
+  - Note: This is a public API function; consider using `doc.version()` for typical use cases instead.
 
 ### Fixed - PDF Parsing Robustness (Issue #41)
-- **Header offset support** - PDFs with binary prefixes or BOM headers now open successfully
-  - Parse header function now searches first 1024 bytes for `%PDF-` marker (PDF spec compliant)
-  - Supports UTF-8 BOM, email headers, and other leading binary data
-  - `parse_header()` returns byte offset where header was found
-  - Lenient mode (default) handles real-world malformed PDFs; strict mode for compliance testing
-  - Fixes parsing errors like "expected '%PDF-', found '1b965'"
+- **Header offset support** - PDFs with binary prefixes or BOM headers now open successfully.
+  - Parse header function now searches first 1024 bytes for `%PDF-` marker (PDF spec compliant).
+  - Supports UTF-8 BOM, email headers, and other leading binary data.
+  - `parse_header()` returns byte offset where header was found.
+  - Lenient mode (default) handles real-world malformed PDFs; strict mode for compliance testing.
+  - Fixes parsing errors like "expected '%PDF-', found '1b965'".
 
 ### Added - Character-Level Text Extraction (Issue #39)
-- **`extract_chars()` API** - Low-level character-level extraction for layout analysis
-  - Returns `Vec<TextChar>` with per-character positioning, font, and styling data
-  - Includes transformation matrix, rotation angle, advance width
-  - Sorted in reading order (top-to-bottom, left-to-right)
-  - Overlapping characters (rendered multiple times) deduplicated
-  - 30-50% faster than span extraction for character-only use cases
-  - Exposed in both Rust and Python APIs
-  - **Python binding**: `doc.extract_chars(page_index)` returns list of `TextChar` objects
+- **`extract_chars()` API** - Low-level character-level extraction for layout analysis.
+  - Returns `Vec<TextChar>` with per-character positioning, font, and styling data.
+  - Includes transformation matrix, rotation angle, advance width.
+  - Sorted in reading order (top-to-bottom, left-to-right).
+  - Overlapping characters (rendered multiple times) deduplicated.
+  - 30-50% faster than span extraction for character-only use cases.
+  - Exposed in both Rust and Python APIs.
+  - **Python binding**: `doc.extract_chars(page_index)` returns list of `TextChar` objects.
 
 ### Added - XObject Path Extraction (Issue #40)
-- **Form XObject support in path extraction** - Now extracts vectors from embedded XObjects
-  - `extract_paths()` recursively processes Form XObjects via `Do` operator
-  - Image XObjects properly skipped (only Form XObjects extracted)
-  - Coordinate transformations via `/Matrix` properly applied
-  - Graphics state properly isolated (save/restore)
-  - Duplicate XObject detection prevents infinite loops
-  - Nested XObjects (XObject containing XObject) supported
+- **Form XObject support in path extraction** - Now extracts vectors from embedded XObjects.
+  - `extract_paths()` recursively processes Form XObjects via `Do` operator.
+  - Image XObjects properly skipped (only Form XObjects extracted).
+  - Coordinate transformations via `/Matrix` properly applied.
+  - Graphics state properly isolated (save/restore).
+  - Duplicate XObject detection prevents infinite loops.
+  - Nested XObjects (XObject containing XObject) supported.
 
 ### Changed
-- **Dependencies**: Upgraded nom parser library from 7.1 to 8.0
-  - Updated all parser combinators to use `.parse()` method
-  - No user-facing API changes
-  - All parser functionality maintained
-  - Performance stable (no regressions detected)
-- `parse_header()` signature updated: now returns `(major, minor, offset)` tuple
-- All parse_header test cases updated to use new signature
+- **Dependencies**: Upgraded nom parser library from 7.1 to 8.0.
+  - Updated all parser combinators to use `.parse()` method.
+  - No user-facing API changes.
+  - All parser functionality maintained.
+  - Performance stable (no regressions detected).
+- `parse_header()` signature updated: now returns `(major, minor, offset)` tuple.
+- All parse_header test cases updated to use new signature.
 
 ## [0.3.1] - 2026-01-14
 > Form Fields, Multimedia & Python 3.8-3.14
@@ -657,79 +293,79 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 ### Added - Form Field Coverage (95% across Read/Create/Modify)
 
 #### Hierarchical Field Creation
-- **Parent/Child Field Structures** - Create complex form hierarchies like `address.street`, `address.city`
-  - `add_parent_field()` - Create container fields without widgets
-  - `add_child_field()` - Add child fields to existing parents
-  - `add_form_field_hierarchical()` - Auto-create parent hierarchy from dotted names
-  - `ParentFieldConfig` for configuring container fields
-  - Property inheritance between parent and child fields (FT, V, DV, Ff, DA, Q)
+- **Parent/Child Field Structures** - Create complex form hierarchies like `address.street`, `address.city`.
+  - `add_parent_field()` - Create container fields without widgets.
+  - `add_child_field()` - Add child fields to existing parents.
+  - `add_form_field_hierarchical()` - Auto-create parent hierarchy from dotted names.
+  - `ParentFieldConfig` for configuring container fields.
+  - Property inheritance between parent and child fields (FT, V, DV, Ff, DA, Q).
 
 #### Field Property Modification
-- **Edit All Field Properties** - Beyond just values
-  - `set_form_field_readonly()` / `set_form_field_required()` - Flag manipulation
-  - `set_form_field_rect()` - Reposition/resize fields
-  - `set_form_field_tooltip()` - Set hover text (TU)
-  - `set_form_field_max_length()` - Text field length limits
-  - `set_form_field_alignment()` - Text alignment (left/center/right)
-  - `set_form_field_default_value()` - Default values (DV)
-  - `BorderStyle` and `AppearanceCharacteristics` support
-- **Critical Bug Fix** - Modified existing fields now persist on save (was only saving new fields)
+- **Edit All Field Properties** - Beyond just values.
+  - `set_form_field_readonly()` / `set_form_field_required()` - Flag manipulation.
+  - `set_form_field_rect()` - Reposition/resize fields.
+  - `set_form_field_tooltip()` - Set hover text (TU).
+  - `set_form_field_max_length()` - Text field length limits.
+  - `set_form_field_alignment()` - Text alignment (left/center/right).
+  - `set_form_field_default_value()` - Default values (DV).
+  - `BorderStyle` and `AppearanceCharacteristics` support.
+- **Critical Bug Fix** - Modified existing fields now persist on save (was only saving new fields).
 
 #### FDF/XFDF Export
-- **Forms Data Format Export** - ISO 32000-1:2008 Section 12.7.7
-  - `FdfWriter` - Binary FDF export for form data exchange
-  - `XfdfWriter` - XML XFDF export for web integration
-  - `export_form_data_fdf()` / `export_form_data_xfdf()` on FormExtractor, DocumentEditor, Pdf
-  - Hierarchical field representation in exports
+- **Forms Data Format Export** - ISO 32000-1:2008 Section 12.7.7.
+  - `FdfWriter` - Binary FDF export for form data exchange.
+  - `XfdfWriter` - XML XFDF export for web integration.
+  - `export_form_data_fdf()` / `export_form_data_xfdf()` on FormExtractor, DocumentEditor, Pdf.
+  - Hierarchical field representation in exports.
 
 ### Added - Text Extraction Enhancements
-- **TextChar Transformation** - Per-character positioning metadata (#27)
-  - `origin` - Font baseline coordinates (x, y)
-  - `rotation_degrees` - Character rotation angle
-  - `matrix` - Full transformation matrix
-  - Essential for pdfium-render migration
+- **TextChar Transformation** - Per-character positioning metadata (#27).
+  - `origin` - Font baseline coordinates (x, y).
+  - `rotation_degrees` - Character rotation angle.
+  - `matrix` - Full transformation matrix.
+  - Essential for pdfium-render migration.
 
 ### Added - Image Metadata
-- **DPI Calculation** - Resolution metadata for images
-  - `horizontal_dpi` / `vertical_dpi` fields on `ImageContent`
-  - `resolution()` - Get (h_dpi, v_dpi) tuple
-  - `is_high_resolution()` / `is_low_resolution()` / `is_medium_resolution()` helpers
-  - `calculate_dpi()` - Compute from pixel dimensions and bbox
+- **DPI Calculation** - Resolution metadata for images.
+  - `horizontal_dpi` / `vertical_dpi` fields on `ImageContent`.
+  - `resolution()` - Get (h_dpi, v_dpi) tuple.
+  - `is_high_resolution()` / `is_low_resolution()` / `is_medium_resolution()` helpers.
+  - `calculate_dpi()` - Compute from pixel dimensions and bbox.
 
 ### Added - Bounded Text Extraction
-- **Spatial Filtering** - Extract text from rectangular regions
-  - `RectFilterMode::Intersects` - Any overlap (default)
-  - `RectFilterMode::FullyContained` - Completely within bounds
-  - `RectFilterMode::MinOverlap(f32)` - Minimum overlap fraction
-  - `TextSpanSpatial` trait - `intersects_rect()`, `contained_in_rect()`, `overlap_with_rect()`
-  - `TextSpanFiltering` trait - `filter_by_rect()`, `extract_text_in_rect()`
+- **Spatial Filtering** - Extract text from rectangular regions.
+  - `RectFilterMode::Intersects` - Any overlap (default).
+  - `RectFilterMode::FullyContained` - Completely within bounds.
+  - `RectFilterMode::MinOverlap(f32)` - Minimum overlap fraction.
+  - `TextSpanSpatial` trait - `intersects_rect()`, `contained_in_rect()`, `overlap_with_rect()`.
+  - `TextSpanFiltering` trait - `filter_by_rect()`, `extract_text_in_rect()`.
 
 ### Added - Multimedia Annotations
-- **MovieAnnotation** - Embedded video content
-- **SoundAnnotation** - Audio content with playback controls
-- **ScreenAnnotation** - Media renditions (video/audio players)
-- **RichMediaAnnotation** - Flash/video rich media content
+- **MovieAnnotation** - Embedded video content.
+- **SoundAnnotation** - Audio content with playback controls.
+- **ScreenAnnotation** - Media renditions (video/audio players).
+- **RichMediaAnnotation** - Flash/video rich media content.
 
 ### Added - 3D Annotations
-- **ThreeDAnnotation** - 3D model embedding
-  - U3D and PRC format support
-  - `ThreeDView` - Camera angles and lighting
-  - `ThreeDAnimation` - Playback controls
+- **ThreeDAnnotation** - 3D model embedding.
+  - U3D and PRC format support.
+  - `ThreeDView` - Camera angles and lighting.
+  - `ThreeDAnimation` - Playback controls.
 
 ### Added - Path Extraction
-- **PathExtractor** - Vector graphics extraction
-  - Lines, curves, rectangles, complex paths
-  - Path transformation and bounding box calculation
+- **PathExtractor** - Vector graphics extraction.
+  - Lines, curves, rectangles, complex paths.
+  - Path transformation and bounding box calculation.
 
 ### Added - XFA Form Support
-- **XfaExtractor** - Extract XFA form data
-- **XfaParser** - Parse XFA XML templates
-- **XfaConverter** - Convert XFA forms to AcroForm
+- **XfaExtractor** - Extract XFA form data.
+- **XfaParser** - Parse XFA XML templates.
+- **XfaConverter** - Convert XFA forms to AcroForm.
 
 ### Changed - Python Bindings
-- **True Python 3.8-3.14 Support** - Fixed via `abi3-py38` (was only working on 3.11)
-- **Modern Tooling** - uv, pdm, ruff integration
-- **Code Quality** - All Python code formatted with ruff
+- **True Python 3.8-3.14 Support** - Fixed via `abi3-py38` (was only working on 3.11).
+- **Modern Tooling** - uv, pdm, ruff integration.
+- **Code Quality** - All Python code formatted with ruff.
 
 ### 🏆 Community Contributors
 
@@ -741,15 +377,15 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 > Unified API, PDF Creation & Editing
 
 ### Added - Unified `Pdf` API
-- **One API for Extract, Create, and Edit** - The new `Pdf` class unifies all PDF operations
-  - `Pdf::open("input.pdf")` - Open existing PDF for reading and editing
-  - `Pdf::from_markdown(content)` - Create new PDF from Markdown
-  - `Pdf::from_html(content)` - Create new PDF from HTML
-  - `Pdf::from_text(content)` - Create new PDF from plain text
-  - `Pdf::from_image(path)` - Create PDF from image file
-  - DOM-like page navigation with `pdf.page(0)` for querying and modifying content
-  - Seamless save with `pdf.save("output.pdf")` or `pdf.save_encrypted()`
-- **Fluent Builder Pattern** - `PdfBuilder` for advanced configuration
+- **One API for Extract, Create, and Edit** - The new `Pdf` class unifies all PDF operations.
+  - `Pdf::open("input.pdf")` - Open existing PDF for reading and editing.
+  - `Pdf::from_markdown(content)` - Create new PDF from Markdown.
+  - `Pdf::from_html(content)` - Create new PDF from HTML.
+  - `Pdf::from_text(content)` - Create new PDF from plain text.
+  - `Pdf::from_image(path)` - Create PDF from image file.
+  - DOM-like page navigation with `pdf.page(0)` for querying and modifying content.
+  - Seamless save with `pdf.save("output.pdf")` or `pdf.save_encrypted()`.
+- **Fluent Builder Pattern** - `PdfBuilder` for advanced configuration.
   ```rust
   PdfBuilder::new()
       .title("My Document")
@@ -759,160 +395,160 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
   ```
 
 ### Added - PDF Creation
-- **PDF Creation API** - Fluent `DocumentBuilder` for programmatic PDF generation
-  - `Pdf::create()` / `DocumentBuilder::new()` entry points
-  - Page sizing (Letter, A4, custom dimensions)
-  - Text rendering with Base14 fonts and styling
-  - Image embedding (JPEG/PNG) with positioning
-- **Table Rendering** - `TableRenderer` for styled tables
-  - Headers, borders, cell spans, alternating row colors
-  - Column width control (fixed, percentage, auto)
-  - Cell alignment and padding
-- **Graphics API** - Advanced visual effects
-  - Colors (RGB, CMYK, grayscale)
-  - Linear and radial gradients
-  - Tiling patterns with presets
-  - Blend modes and transparency (ExtGState)
-- **Page Templates** - Reusable page elements
-  - Headers and footers with placeholders
-  - Page numbering formats
-  - Watermarks (text-based)
+- **PDF Creation API** - Fluent `DocumentBuilder` for programmatic PDF generation.
+  - `Pdf::create()` / `DocumentBuilder::new()` entry points.
+  - Page sizing (Letter, A4, custom dimensions).
+  - Text rendering with Base14 fonts and styling.
+  - Image embedding (JPEG/PNG) with positioning.
+- **Table Rendering** - `TableRenderer` for styled tables.
+  - Headers, borders, cell spans, alternating row colors.
+  - Column width control (fixed, percentage, auto).
+  - Cell alignment and padding.
+- **Graphics API** - Advanced visual effects.
+  - Colors (RGB, CMYK, grayscale).
+  - Linear and radial gradients.
+  - Tiling patterns with presets.
+  - Blend modes and transparency (ExtGState).
+- **Page Templates** - Reusable page elements.
+  - Headers and footers with placeholders.
+  - Page numbering formats.
+  - Watermarks (text-based).
 - **Barcode Generation** (requires `barcodes` feature)
-  - QR codes with configurable size and error correction
-  - Code128, EAN-13, UPC-A, Code39, ITF barcodes
-  - Customizable colors and dimensions
+  - QR codes with configurable size and error correction.
+  - Code128, EAN-13, UPC-A, Code39, ITF barcodes.
+  - Customizable colors and dimensions.
 
 ### Added - PDF Editing
-- **Editor API** - DOM-like editing with round-trip preservation
-  - `DocumentEditor` for modifying existing PDFs
-  - Content addition without breaking existing structure
-  - Resource management for fonts and images
-- **Annotation Support** - Full read/write for all types
-  - Text markup: highlights, underlines, strikeouts, squiggly
-  - Notes: sticky notes, comments, popups
-  - Shapes: rectangles, circles, lines, polygons, polylines
-  - Drawing: ink/freehand annotations
-  - Stamps: standard and custom stamps
-  - Special: file attachments, redactions, carets
-- **Form Fields** - Interactive form creation
-  - Text fields (single/multiline, password, comb)
-  - Checkboxes with custom appearance
-  - Radio button groups
-  - Dropdown and list boxes
-  - Push buttons with actions
-  - Form flattening (convert fields to static content)
-- **Link Annotations** - Navigation support
-  - External URLs
-  - Internal page navigation
-  - Styled link appearance
-- **Outline Builder** - Bookmark/TOC creation
-  - Hierarchical structure
-  - Page destinations
-  - Styling (bold, italic, colors)
-- **PDF Layers** - Optional Content Groups (OCG)
-  - Create and manage content layers
-  - Layer visibility controls
+- **Editor API** - DOM-like editing with round-trip preservation.
+  - `DocumentEditor` for modifying existing PDFs.
+  - Content addition without breaking existing structure.
+  - Resource management for fonts and images.
+- **Annotation Support** - Full read/write for all types.
+  - Text markup: highlights, underlines, strikeouts, squiggly.
+  - Notes: sticky notes, comments, popups.
+  - Shapes: rectangles, circles, lines, polygons, polylines.
+  - Drawing: ink/freehand annotations.
+  - Stamps: standard and custom stamps.
+  - Special: file attachments, redactions, carets.
+- **Form Fields** - Interactive form creation.
+  - Text fields (single/multiline, password, comb).
+  - Checkboxes with custom appearance.
+  - Radio button groups.
+  - Dropdown and list boxes.
+  - Push buttons with actions.
+  - Form flattening (convert fields to static content).
+- **Link Annotations** - Navigation support.
+  - External URLs.
+  - Internal page navigation.
+  - Styled link appearance.
+- **Outline Builder** - Bookmark/TOC creation.
+  - Hierarchical structure.
+  - Page destinations.
+  - Styling (bold, italic, colors).
+- **PDF Layers** - Optional Content Groups (OCG).
+  - Create and manage content layers.
+  - Layer visibility controls.
 
 ### Added - PDF Compliance & Validation
-- **PDF/A Validation** - ISO 19005 compliance checking
-  - PDF/A-1a, PDF/A-1b (ISO 19005-1)
-  - PDF/A-2a, PDF/A-2b, PDF/A-2u (ISO 19005-2)
-  - PDF/A-3a, PDF/A-3b (ISO 19005-3)
-- **PDF/A Conversion** - Convert documents to archival format
-  - Automatic font embedding
-  - XMP metadata injection
-  - ICC color profile conversion
-- **PDF/X Validation** - ISO 15930 print production compliance
-  - PDF/X-1a:2001, PDF/X-1a:2003
-  - PDF/X-3:2002, PDF/X-3:2003
-  - PDF/X-4, PDF/X-4p
-  - PDF/X-5g, PDF/X-5n, PDF/X-5pg
-  - PDF/X-6, PDF/X-6n, PDF/X-6p
-  - 40+ specific error codes for violations
-- **PDF/UA Validation** - ISO 14289 accessibility compliance
-  - Tagged PDF structure validation
-  - Language specification checks
-  - Alt text requirements
-  - Heading hierarchy validation
-  - Table header validation
-  - Form field accessibility
-  - Reading order verification
+- **PDF/A Validation** - ISO 19005 compliance checking.
+  - PDF/A-1a, PDF/A-1b (ISO 19005-1).
+  - PDF/A-2a, PDF/A-2b, PDF/A-2u (ISO 19005-2).
+  - PDF/A-3a, PDF/A-3b (ISO 19005-3).
+- **PDF/A Conversion** - Convert documents to archival format.
+  - Automatic font embedding.
+  - XMP metadata injection.
+  - ICC color profile conversion.
+- **PDF/X Validation** - ISO 15930 print production compliance.
+  - PDF/X-1a:2001, PDF/X-1a:2003.
+  - PDF/X-3:2002, PDF/X-3:2003.
+  - PDF/X-4, PDF/X-4p.
+  - PDF/X-5g, PDF/X-5n, PDF/X-5pg.
+  - PDF/X-6, PDF/X-6n, PDF/X-6p.
+  - 40+ specific error codes for violations.
+- **PDF/UA Validation** - ISO 14289 accessibility compliance.
+  - Tagged PDF structure validation.
+  - Language specification checks.
+  - Alt text requirements.
+  - Heading hierarchy validation.
+  - Table header validation.
+  - Form field accessibility.
+  - Reading order verification.
 
 ### Added - Security & Encryption
-- **Encryption on Write** - Password-protect PDFs when saving
-  - AES-256 (V=5, R=6) - Modern 256-bit encryption (default)
-  - AES-128 (V=4, R=4) - Modern 128-bit encryption
-  - RC4-128 (V=2, R=3) - Legacy 128-bit encryption
-  - RC4-40 (V=1, R=2) - Legacy 40-bit encryption
-  - `Pdf::save_encrypted()` for simple password protection
-  - `Pdf::save_with_encryption()` for full configuration
-- **Permission Controls** - Granular access restrictions
-  - Print, copy, modify, annotate permissions
-  - Form fill and accessibility extraction controls
+- **Encryption on Write** - Password-protect PDFs when saving.
+  - AES-256 (V=5, R=6) - Modern 256-bit encryption (default).
+  - AES-128 (V=4, R=4) - Modern 128-bit encryption.
+  - RC4-128 (V=2, R=3) - Legacy 128-bit encryption.
+  - RC4-40 (V=1, R=2) - Legacy 40-bit encryption.
+  - `Pdf::save_encrypted()` for simple password protection.
+  - `Pdf::save_with_encryption()` for full configuration.
+- **Permission Controls** - Granular access restrictions.
+  - Print, copy, modify, annotate permissions.
+  - Form fill and accessibility extraction controls.
 - **Digital Signatures** (foundation, requires `signatures` feature)
-  - ByteRange calculation for signature placeholders
-  - PKCS#7/CMS signature structure support
-  - X.509 certificate parsing
-  - Signature verification framework
+  - ByteRange calculation for signature placeholders.
+  - PKCS#7/CMS signature structure support.
+  - X.509 certificate parsing.
+  - Signature verification framework.
 
 ### Added - Document Features
-- **Page Labels** - Custom page numbering
-  - Roman numerals, letters, decimal formats
-  - Prefix support (e.g., "A-1", "B-2")
-  - `PageLabelsBuilder` for creation
-  - Extract existing labels from documents
-- **XMP Metadata** - Extensible metadata support
-  - Dublin Core properties (title, creator, description)
-  - PDF properties (producer, keywords)
-  - Custom namespace support
-  - Full read/write capability
-- **Embedded Files** - File attachments
-  - Attach files to PDF documents
-  - MIME type and description support
-  - Relationship specification (Source, Data, etc.)
-- **Linearization** - Web-optimized PDFs
-  - Fast web view support
-  - Streaming delivery optimization
+- **Page Labels** - Custom page numbering.
+  - Roman numerals, letters, decimal formats.
+  - Prefix support (e.g., "A-1", "B-2").
+  - `PageLabelsBuilder` for creation.
+  - Extract existing labels from documents.
+- **XMP Metadata** - Extensible metadata support.
+  - Dublin Core properties (title, creator, description).
+  - PDF properties (producer, keywords) .
+  - Custom namespace support.
+  - Full read/write capability.
+- **Embedded Files** - File attachments.
+  - Attach files to PDF documents.
+  - MIME type and description support.
+  - Relationship specification (Source, Data, etc.).
+- **Linearization** - Web-optimized PDFs.
+  - Fast web view support.
+  - Streaming delivery optimization.
 
 ### Added - Search & Analysis
-- **Text Search** - Pattern-based document search
-  - Regex pattern support
-  - Case-sensitive/insensitive options
-  - Position tracking with page/coordinates
-  - Whole word matching
+- **Text Search** - Pattern-based document search.
+  - Regex pattern support.
+  - Case-sensitive/insensitive options.
+  - Position tracking with page/coordinates.
+  - Whole word matching.
 - **Page Rendering** (requires `rendering` feature)
-  - Render pages to PNG/JPEG images
-  - Configurable DPI and scale
-  - Pure Rust via tiny-skia (no external dependencies)
+  - Render pages to PNG/JPEG images.
+  - Configurable DPI and scale.
+  - Pure Rust via tiny-skia (no external dependencies).
 - **Debug Visualization** (requires `rendering` feature)
-  - Visualize text bounding boxes
-  - Element highlighting for debugging
-  - Export annotated page images
+  - Visualize text bounding boxes.
+  - Element highlighting for debugging.
+  - Export annotated page images.
 
 ### Added - Document Conversion
 - **Office to PDF** (requires `office` feature)
-  - **DOCX**: Word documents with paragraphs, headings, lists, formatting
-  - **XLSX**: Excel spreadsheets via calamine (sheets, cells, tables)
-  - **PPTX**: PowerPoint presentations (slides, titles, text boxes)
-  - `OfficeConverter` with auto-detection
-  - `OfficeConfig` for page size, margins, fonts
-  - Python bindings: `OfficeConverter.from_docx()`, `from_xlsx()`, `from_pptx()`
+  - **DOCX**: Word documents with paragraphs, headings, lists, formatting.
+  - **XLSX**: Excel spreadsheets via calamine (sheets, cells, tables).
+  - **PPTX**: PowerPoint presentations (slides, titles, text boxes).
+  - `OfficeConverter` with auto-detection.
+  - `OfficeConfig` for page size, margins, fonts.
+  - Python bindings: `OfficeConverter.from_docx()`, `from_xlsx()`, `from_pptx()`.
 
 ### Added - Python Bindings
-- `Pdf` class for PDF creation
-- `Color`, `BlendMode`, `ExtGState` for graphics
-- `LinearGradient`, `RadialGradient` for gradients
-- `LineCap`, `LineJoin`, `PatternPresets` for styling
-- `save_encrypted()` method with permission flags
-- `OfficeConverter` class for Office document conversion
+- `Pdf` class for PDF creation.
+- `Color`, `BlendMode`, `ExtGState` for graphics.
+- `LinearGradient`, `RadialGradient` for gradients.
+- `LineCap`, `LineJoin`, `PatternPresets` for styling.
+- `save_encrypted()` method with permission flags.
+- `OfficeConverter` class for Office document conversion.
 
 ### Changed
-- Description updated to "The Complete PDF Toolkit: extract, create, and edit PDFs"
-- Python module docstring updated for v0.3.0 features
-- Branding updated with Extract/Create/Edit pillars
+- Description updated to "The Complete PDF Toolkit: extract, create, and edit PDFs".
+- Python module docstring updated for v0.3.0 features.
+- Branding updated with Extract/Create/Edit pillars.
 
 ### Fixed
-- **Outline action handling** - correctly dereference actions indirectly referenced by outline items
+- **Outline action handling** - correctly dereference actions indirectly referenced by outline items.
 
 ### 🏆 Community Contributors
 
@@ -924,63 +560,63 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 > CJK Support & Structure Tree Enhancements
 
 ### Added
-- **TagSuspect/MarkInfo support** (ISO 32000-1 Section 14.7.1)
-  - Parse MarkInfo dictionary from document catalog (`marked`, `suspects`, `user_properties`)
-  - `PdfDocument::mark_info()` method to retrieve MarkInfo
-  - Automatic fallback to geometric ordering when structure tree is marked as suspect
-- **Word Break /WB structure element** (Section 14.8.4.4)
-  - Support for explicit word boundaries in CJK text
-  - `StructType::WB` variant and `is_word_break()` helper
-  - Word break markers emitted during structure tree traversal
-- **Predefined CMap support for CJK fonts** (Section 9.7.5.2)
-  - Adobe-GB1 (Simplified Chinese) - ~500 common character mappings
-  - Adobe-Japan1 (Japanese) - Hiragana, Katakana, Kanji mappings
-  - Adobe-CNS1 (Traditional Chinese) - Bopomofo and CJK mappings
-  - Adobe-Korea1 (Korean) - Hangul and Hanja mappings
-  - Fallback identity mapping for common Unicode ranges
-- **Abbreviation expansion /E support** (Section 14.9.5)
-  - Parse `/E` entry from marked content properties
-  - `expansion` field on `StructElem` for structure-level abbreviations
-- **Object reference resolution utility**
-  - `PdfDocument::resolve_references()` for recursive reference handling in complex PDF structures
-- **Type 0 /W array parsing** for CIDFont glyph widths
-  - Proper spacing for CJK text using CIDFont width specifications
-- **ActualText verification tests** - comprehensive test coverage for PDF Spec Section 14.9.4
+- **TagSuspect/MarkInfo support** (ISO 32000-1 Section 14.7.1).
+  - Parse MarkInfo dictionary from document catalog (`marked`, `suspects`, `user_properties`).
+  - `PdfDocument::mark_info()` method to retrieve MarkInfo.
+  - Automatic fallback to geometric ordering when structure tree is marked as suspect.
+- **Word Break /WB structure element** (Section 14.8.4.4).
+  - Support for explicit word boundaries in CJK text.
+  - `StructType::WB` variant and `is_word_break()` helper.
+  - Word break markers emitted during structure tree traversal.
+- **Predefined CMap support for CJK fonts** (Section 9.7.5.2).
+  - Adobe-GB1 (Simplified Chinese) - ~500 common character mappings.
+  - Adobe-Japan1 (Japanese) - Hiragana, Katakana, Kanji mappings.
+  - Adobe-CNS1 (Traditional Chinese) - Bopomofo and CJK mappings.
+  - Adobe-Korea1 (Korean) - Hangul and Hanja mappings.
+  - Fallback identity mapping for common Unicode ranges.
+- **Abbreviation expansion /E support** (Section 14.9.5).
+  - Parse `/E` entry from marked content properties.
+  - `expansion` field on `StructElem` for structure-level abbreviations.
+- **Object reference resolution utility**.
+  - `PdfDocument::resolve_references()` for recursive reference handling in complex PDF structures.
+- **Type 0 /W array parsing** for CIDFont glyph widths.
+  - Proper spacing for CJK text using CIDFont width specifications.
+- **ActualText verification tests** - comprehensive test coverage for PDF Spec Section 14.9.4.
 
 ### Fixed
-- **Soft hyphen handling** (U+00AD) - now correctly treated as valid continuation hyphen for word reconstruction
+- **Soft hyphen handling** (U+00AD) - now correctly treated as valid continuation hyphen for word reconstruction.
 
 ### Changed
-- **Enhanced artifact filtering** with subtype support
-  - `ArtifactType::Pagination` with subtypes: Header, Footer, Watermark, PageNumber
-  - `ArtifactType::Layout` and `ArtifactType::Background` classification
-- `OrderedContent.mcid` changed to `Option<u32>` to support word break markers
+- **Enhanced artifact filtering** with subtype support.
+  - `ArtifactType::Pagination` with subtypes: Header, Footer, Watermark, PageNumber.
+  - `ArtifactType::Layout` and `ArtifactType::Background` classification.
+- `OrderedContent.mcid` changed to `Option<u32>` to support word break markers.
 
 ## [0.2.5] - 2026-01-09
 > Image Embedding & Export
 
 ### Added
-- **Image embedding**: Both HTML and Markdown now support embedded base64 images when `embed_images=true` (default)
+- **Image embedding**: Both HTML and Markdown now support embedded base64 images when `embed_images=true` (default).
   - HTML: `<img src="data:image/png;base64,...">`
-  - Markdown: `![alt](data:image/png;base64,...)` (works in Obsidian, Typora, VS Code, Jupyter)
-- **Image file export**: Set `embed_images=false` + `image_output_dir` to save images as files with relative path references
-- New `embed_images` option in `ConversionOptions` to control embedding behavior
-- `PdfImage::to_base64_data_uri()` method for converting images to data URIs
-- `PdfImage::to_png_bytes()` method for in-memory PNG encoding
-- Python bindings: new `embed_images` parameter for `to_html`, `to_markdown`, and `*_all` methods
+  - Markdown: `![alt](data:image/png;base64,...)` (works in Obsidian, Typora, VS Code, Jupyter).
+- **Image file export**: Set `embed_images=false` + `image_output_dir` to save images as files with relative path references.
+- New `embed_images` option in `ConversionOptions` to control embedding behavior.
+- `PdfImage::to_base64_data_uri()` method for converting images to data URIs.
+- `PdfImage::to_png_bytes()` method for in-memory PNG encoding.
+- Python bindings: new `embed_images` parameter for `to_html`, `to_markdown`, and `*_all` methods.
 
 ## [0.2.4] - 2026-01-09
 > CTM Fix & Formula Rendering
 
 ### Fixed
-- CTM (Current Transformation Matrix) now correctly applied to text positions per PDF Spec ISO 32000-1:2008 Section 9.4.4 (#11)
+- CTM (Current Transformation Matrix) now correctly applied to text positions per PDF Spec ISO 32000-1:2008 Section 9.4.4 (#11).
 
 ### Added
-- Structure tree: `/Alt` (alternate description) parsing for accessibility text on formulas and figures
-- Structure tree: `/Pg` (page reference) resolution - correctly maps structure elements to page numbers
-- `FormulaRenderer` module for extracting formula regions as base64 images from rendered pages
-- `ConversionOptions`: new fields `render_formulas`, `page_images`, `page_dimensions` for formula image embedding
-- Regression tests for CTM transformation
+- Structure tree: `/Alt` (alternate description) parsing for accessibility text on formulas and figures.
+- Structure tree: `/Pg` (page reference) resolution - correctly maps structure elements to page numbers.
+- `FormulaRenderer` module for extracting formula regions as base64 images from rendered pages.
+- `ConversionOptions`: new fields `render_formulas`, `page_images`, `page_dimensions` for formula image embedding.
+- Regression tests for CTM transformation.
 
 ### 🏆 Community Contributors
 
@@ -990,16 +626,16 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 > BT/ET Matrix Reset & Text Processing
 
 ### Fixed
-- BT/ET matrix reset per PDF spec Section 9.4.1 (PR #10 by @drahnr)
-- Geometric spacing detection in markdown converter (#5)
-- Verbose extractor logs changed from info to trace (#7)
-- docs.rs build failure (excluded tesseract-rs)
+- BT/ET matrix reset per PDF spec Section 9.4.1 (PR #10 by @drahnr).
+- Geometric spacing detection in markdown converter (#5).
+- Verbose extractor logs changed from info to trace (#7).
+- docs.rs build failure (excluded tesseract-rs).
 
 ### Added
-- `apply_intelligent_text_processing()` method for ligature expansion, hyphenation reconstruction, and OCR cleanup (#6)
+- `apply_intelligent_text_processing()` method for ligature expansion, hyphenation reconstruction, and OCR cleanup (#6).
 
 ### Changed
-- Removed unused tesseract-rs dependency
+- Removed unused tesseract-rs dependency.
 
 ### 🏆 Community Contributors
 
@@ -1013,14 +649,14 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 > Discoverability Improvements
 
 ### Changed
-- Optimized crate keywords for better discoverability
+- Optimized crate keywords for better discoverability.
 
 ## [0.2.1] - 2025-12-15
 > Encrypted PDF Fixes
 
 ### Fixed
-- Encrypted stream decoding improvements (#3)
-- CI/CD pipeline fixes
+- Encrypted stream decoding improvements (#3).
+- CI/CD pipeline fixes.
 
 ### 🏆 Community Contributors
 
@@ -1029,35 +665,35 @@ Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs
 ## [0.1.4] - 2025-12-12
 
 ### Fixed
-- Encrypted stream decoding (#2)
-- Documentation and doctest fixes
+- Encrypted stream decoding (#2).
+- Documentation and doctest fixes.
 
 ## [0.1.3] - 2025-12-12
 
 ### Fixed
-- Encrypted stream decoding refinements
+- Encrypted stream decoding refinements.
 
 ## [0.1.2] - 2025-11-27
 
 ### Added
-- Python 3.13 support
-- GitHub sponsor configuration
+- Python 3.13 support.
+- GitHub sponsor configuration.
 
 ## [0.1.1] - 2025-11-26
 
 ### Added
-- Cross-platform binary builds (Linux, macOS, Windows)
+- Cross-platform binary builds (Linux, macOS, Windows).
 
 ## [0.1.0] - 2025-11-06
 
 ### Added
-- Initial release
-- PDF text extraction with spec-compliant Unicode mapping
-- Intelligent reading order detection
-- Python bindings via PyO3
-- Support for encrypted PDFs
-- Form field extraction
-- Image extraction
+- Initial release.
+- PDF text extraction with spec-compliant Unicode mapping.
+- Intelligent reading order detection.
+- Python bindings via PyO3.
+- Support for encrypted PDFs.
+- Form field extraction.
+- Image extraction.
 
 ### 🌟 Early Adopters
 

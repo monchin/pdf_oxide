@@ -25,13 +25,13 @@ use std::sync::Arc;
 /// Reader enum that dispatches between file-backed (native) and memory-backed (WASM) I/O.
 ///
 /// On native builds, `open()` uses `BufReader<File>` to avoid reading the entire file
-/// into memory up front. On WASM (or when using `open_from_bytes()`), uses
+/// into memory up front. On WASM (or when using `from_bytes()`), uses
 /// `BufReader<Cursor<Vec<u8>>>` for in-memory access.
 enum PdfReader {
     /// File-backed reader for native builds — avoids reading entire file into memory.
     #[cfg(not(target_arch = "wasm32"))]
     File(BufReader<File>),
-    /// Memory-backed reader for WASM or `open_from_bytes()`.
+    /// Memory-backed reader for WASM or `from_bytes()`.
     Memory(BufReader<Cursor<Vec<u8>>>),
 }
 
@@ -108,6 +108,8 @@ pub struct PageInfo {
 pub struct PdfDocument {
     /// PDF reader — file-backed on native, memory-backed on WASM.
     reader: PdfReader,
+    /// Raw bytes of the document (kept for duplication/editing)
+    pub source_bytes: Vec<u8>,
     /// PDF version (major, minor)
     version: (u8, u8),
     /// Cross-reference table mapping object IDs to byte offsets
@@ -182,6 +184,8 @@ pub struct PdfDocument {
     /// Cache of extracted images from Form XObjects (keyed by ObjectRef).
     /// Images are stored without CTM applied — caller applies its own CTM.
     pub(crate) form_xobject_images_cache: HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>,
+    /// Regions marked for erasure per page
+    pub(crate) erase_regions: HashMap<usize, Vec<crate::geometry::Rect>>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -243,6 +247,15 @@ impl ImageExtractFilter {
     }
 }
 
+/// Area of a page for targeted header/footer operations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PageArea {
+    /// Top region (Header)
+    Header,
+    /// Bottom region (Footer)
+    Footer,
+}
+
 impl PdfDocument {
     /// Open a PDF document from a file path.
     ///
@@ -277,9 +290,18 @@ impl PdfDocument {
     /// # Errors
     ///
     /// Returns an error if the PDF data is invalid or cannot be parsed.
-    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let source_bytes = data.clone();
         let reader = PdfReader::Memory(BufReader::new(Cursor::new(data)));
-        Self::open_from_reader(reader)
+        let mut doc = Self::open_from_reader(reader)?;
+        doc.source_bytes = source_bytes;
+        Ok(doc)
+    }
+
+    /// Deprecated alias for `from_bytes`.
+    #[deprecated(since = "0.3.15", note = "Use `from_bytes` instead")]
+    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
+        Self::from_bytes(data)
     }
 
     /// Open a PDF document from a file path.
@@ -384,6 +406,7 @@ impl PdfDocument {
         // We now initialize eagerly to ensure the handler is ready when needed.
         let mut document = Self {
             reader,
+            source_bytes: Vec::new(),
             version,
             xref,
             trailer,
@@ -409,6 +432,7 @@ impl PdfDocument {
             xobject_stream_cache_bytes: 0,
             xobject_spans_cache: HashMap::new(),
             form_xobject_images_cache: HashMap::new(),
+            erase_regions: HashMap::new(),
         };
 
         // Initialize encryption immediately
@@ -3022,6 +3046,218 @@ impl PdfDocument {
         Ok(result)
     }
 
+    /// Mark a specific rectangular region on a page for erasure.
+    ///
+    /// Content in this region will be excluded from all subsequent text extractions.
+    pub fn erase_region(&mut self, page_index: usize, rect: crate::geometry::Rect) -> Result<()> {
+        self.erase_regions.entry(page_index).or_default().push(rect);
+        Ok(())
+    }
+
+    /// Clear all erase regions for a page.
+    pub fn clear_erase_regions(&mut self, page_index: usize) -> Result<()> {
+        self.erase_regions.remove(&page_index);
+        Ok(())
+    }
+
+    /// Identify and remove headers.
+    ///
+    /// Uses spec-compliant /Artifact tags when available (100% accuracy), or
+    /// falls back to heuristic analysis of the top 15% of pages.
+    pub fn remove_headers(&mut self, threshold: f32) -> Result<usize> {
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(crate::error::Error::InvalidOperation(
+                "Threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        self.remove_repeated_text(PageArea::Header, threshold)
+    }
+
+    /// Identify and remove footers.
+    ///
+    /// Uses spec-compliant /Artifact tags when available (100% accuracy), or
+    /// falls back to heuristic analysis of the bottom 15% of pages.
+    pub fn remove_footers(&mut self, threshold: f32) -> Result<usize> {
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(crate::error::Error::InvalidOperation(
+                "Threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        self.remove_repeated_text(PageArea::Footer, threshold)
+    }
+
+    /// Identify and remove both headers and footers.
+    ///
+    /// Prioritizes ISO 32000 spec-compliant /Artifact tags, with a heuristic
+    /// fallback for untagged PDFs.
+    ///
+    /// # Arguments
+    /// * `threshold` - Fraction of pages (0.0-1.0) where text must repeat to be removed (heuristic mode only).
+    pub fn remove_artifacts(&mut self, threshold: f32) -> Result<usize> {
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(crate::error::Error::InvalidOperation(
+                "Threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        let h = self.remove_headers(threshold)?;
+        let f = self.remove_footers(threshold)?;
+        Ok(h + f)
+    }
+
+    /// Helper to remove repeated text in a specific page area.
+    fn remove_repeated_text(&mut self, area: PageArea, threshold: f32) -> Result<usize> {
+        use crate::extractors::text::{ArtifactType, PaginationSubtype};
+        use std::collections::{HashMap, HashSet};
+
+        let page_count = self.page_count()?;
+        if page_count < 1 {
+            return Ok(0);
+        }
+
+        let mut removed_count = 0;
+
+        // 1. Spec-Compliant Removal (Priority)
+        // If the PDF uses /Artifact tags (Tagged PDF), we use those directly as they are 100% accurate.
+        for page_idx in 0..page_count {
+            let spans = self.extract_spans(page_idx)?;
+            for span in spans {
+                if let Some(ArtifactType::Pagination(subtype)) = span.artifact_type {
+                    let is_match = match (area, subtype) {
+                        (PageArea::Header, PaginationSubtype::Header) => true,
+                        (PageArea::Footer, PaginationSubtype::Footer) => true,
+                        _ => false,
+                    };
+
+                    if is_match {
+                        self.erase_region(page_idx, span.bbox)?;
+                        removed_count += 1;
+                    }
+                }
+            }
+        }
+
+        // If we found and removed spec-compliant artifacts, we return early
+        if removed_count > 0 {
+            log::info!(
+                "Removed {} spec-compliant artifacts from {}",
+                removed_count,
+                if area == PageArea::Header {
+                    "headers"
+                } else {
+                    "footers"
+                }
+            );
+            return Ok(removed_count);
+        }
+
+        // 2. Heuristic Removal (Fallback for Untagged PDFs)
+        // Only run if no spec-compliant tags were found.
+        if page_count < 2 {
+            return Ok(0);
+        }
+
+        let mut occurrences: HashMap<String, HashSet<usize>> = HashMap::new();
+
+        // Sanitize threshold to avoid min_occurrences becoming 0 for invalid inputs.
+        let clamped_threshold = if threshold.is_finite() {
+            threshold.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let raw_min = (page_count as f32 * clamped_threshold).ceil();
+        let min_occurrences = if raw_min < 1.0 { 1 } else { raw_min as usize };
+
+        // Cache spans per page to avoid redundant extraction in Pass 2
+        let mut page_spans: HashMap<usize, Vec<crate::layout::TextSpan>> = HashMap::new();
+
+        for page_idx in 0..page_count {
+            let height = self.get_page_media_box(page_idx)?.3;
+            let zone = match area {
+                PageArea::Header => height * 0.85,
+                PageArea::Footer => height * 0.15,
+            };
+
+            let spans = self.extract_spans(page_idx)?;
+            for span in spans.iter() {
+                let is_in_zone = match area {
+                    PageArea::Header => span.bbox.y > zone,
+                    PageArea::Footer => (span.bbox.y + span.bbox.height) < zone,
+                };
+
+                if is_in_zone {
+                    let text = span.text.trim().to_string();
+                    if text.len() > 3 && !text.chars().all(|c| c.is_numeric()) {
+                        occurrences.entry(text).or_default().insert(page_idx);
+                    }
+                }
+            }
+            page_spans.insert(page_idx, spans);
+        }
+
+        for (text, pages) in occurrences {
+            if pages.len() >= min_occurrences {
+                for page_idx in pages {
+                    // Reuse cached spans
+                    if let Some(spans) = page_spans.get(&page_idx) {
+                        for span in spans {
+                            if span.text.trim() == text {
+                                self.erase_region(page_idx, span.bbox)?;
+                                removed_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(removed_count)
+    }
+
+    /// Erase existing header content.
+    ///
+    /// Identifies existing text in the header area (top 15%) and marks it for erasure.
+    pub fn erase_header(&mut self, page_index: usize) -> Result<()> {
+        self.erase_page_area_content(page_index, PageArea::Header)
+    }
+
+    /// Erase existing footer content.
+    ///
+    /// Identifies existing text in the footer area (bottom 15%) and marks it for erasure.
+    pub fn erase_footer(&mut self, page_index: usize) -> Result<()> {
+        self.erase_page_area_content(page_index, PageArea::Footer)
+    }
+
+    /// Erase both header and footer content.
+    ///
+    /// This is a convenience method that calls both erase_header and erase_footer.
+    pub fn erase_artifacts(&mut self, page_index: usize) -> Result<()> {
+        self.erase_header(page_index)?;
+        self.erase_footer(page_index)?;
+        Ok(())
+    }
+
+    /// Helper to erase content in a specific page area.
+    fn erase_page_area_content(&mut self, page_index: usize, area: PageArea) -> Result<()> {
+        let height = self.get_page_media_box(page_index)?.3;
+        let zone = match area {
+            PageArea::Header => height * 0.85,
+            PageArea::Footer => height * 0.15,
+        };
+
+        let spans = self.extract_spans(page_index)?;
+        for span in spans {
+            let is_in_zone = match area {
+                PageArea::Header => span.bbox.y > zone,
+                PageArea::Footer => (span.bbox.y + span.bbox.height) < zone,
+            };
+
+            if is_in_zone {
+                self.erase_region(page_index, span.bbox)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Extract text from a page with automatic OCR fallback for scanned pages.
     ///
     /// This method automatically detects scanned pages and applies OCR when needed,
@@ -3701,6 +3937,7 @@ impl PdfDocument {
             };
 
             spans.push(TextSpan {
+                artifact_type: None,
                 text,
                 bbox: rect,
                 font_name: String::new(),
@@ -4807,7 +5044,25 @@ impl PdfDocument {
             }
         }
 
-        extractor.extract_text_spans(&content_data)
+        let mut spans = extractor.extract_text_spans(&content_data)?;
+
+        // Sort spans by reading order (Y-descending, then X-ascending)
+        spans.sort_by(|a, b| {
+            // Y-descending (top-to-bottom)
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
+            }
+            // X-ascending (left-to-right)
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+        });
+
+        // Filter out spans in erase regions
+        if let Some(regions) = self.erase_regions.get(&page_index) {
+            spans.retain(|span| !regions.iter().any(|r| r.intersects(&span.bbox)));
+        }
+
+        Ok(spans)
     }
 
     /// Extract text spans from a page with custom configuration.
@@ -4983,7 +5238,21 @@ impl PdfDocument {
         }
 
         // Extract characters directly (single-pass, no document classification)
-        extractor.extract(&content_data)
+        let mut chars = extractor.extract(&content_data)?;
+
+        // Sort characters by reading order (Y-descending, then X-ascending)
+        // This ensures extract_words and extract_text_lines process them in logical order.
+        chars.sort_by(|a, b| {
+            // Y-descending (top-to-bottom)
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
+            }
+            // X-ascending (left-to-right)
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
+        });
+
+        Ok(chars)
     }
 
     /// Extract words from a page.
@@ -5001,43 +5270,67 @@ impl PdfDocument {
     /// ```
     pub fn extract_words(&mut self, page_index: usize) -> Result<Vec<crate::layout::Word>> {
         use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, Word};
+        use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        let chars = self.extract_chars(page_index)?;
-        if chars.is_empty() {
+        let spans = self.extract_spans(page_index)?;
+        if spans.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Compute adaptive parameters
+        // Step 1: Partition page into logical blocks (columns/paragraphs) using XY-Cut
+        let strategy = XYCutStrategy::new();
+        let blocks = strategy.partition_region(&spans);
+
+        // Step 2: Compute adaptive parameters from all characters for consistent thresholds
         let media_box = self
             .get_page_media_box(page_index)
             .unwrap_or((0.0, 0.0, 612.0, 792.0));
         let page_bbox =
             crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
 
+        let all_chars: Vec<_> = spans.iter().flat_map(|s| s.to_chars()).collect();
+        if all_chars.is_empty() {
+            return Ok(Vec::new());
+        }
         let props =
-            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
+            DocumentProperties::analyze(&all_chars, page_bbox).map_err(Error::LayoutAnalysis)?;
         let params = AdaptiveLayoutParams::from_properties(&props);
 
-        let clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
-
+        // Step 3: Extract words from each block independently
         let mut words = Vec::new();
-        for cluster_indices in clusters {
-            let cluster_chars: Vec<_> = cluster_indices.iter().map(|&i| chars[i].clone()).collect();
+        for block_spans in blocks {
+            for span in block_spans {
+                let span_chars = span.to_chars();
+                if span_chars.is_empty() {
+                    continue;
+                }
 
-            // Further split clusters by whitespace characters (semantic words)
-            let mut current_word_chars = Vec::new();
-            for c in cluster_chars {
-                if c.char.is_whitespace() {
+                // Group characters within THIS SPAN. Since PDF spans are often words or line fragments,
+                // this is much safer than global or block-level character clustering.
+                let clusters =
+                    clustering::cluster_chars_into_words(&span_chars, params.word_gap_threshold);
+
+                for cluster_indices in clusters {
+                    let cluster_chars: Vec<_> = cluster_indices
+                        .iter()
+                        .map(|&i| span_chars[i].clone())
+                        .collect();
+
+                    let mut current_word_chars = Vec::new();
+                    for c in cluster_chars {
+                        if c.char.is_whitespace() || c.char == '\n' || c.char == '\r' {
+                            if !current_word_chars.is_empty() {
+                                words.push(Word::from_chars(current_word_chars));
+                                current_word_chars = Vec::new();
+                            }
+                        } else {
+                            current_word_chars.push(c);
+                        }
+                    }
                     if !current_word_chars.is_empty() {
                         words.push(Word::from_chars(current_word_chars));
-                        current_word_chars = Vec::new();
                     }
-                } else {
-                    current_word_chars.push(c);
                 }
-            }
-            if !current_word_chars.is_empty() {
-                words.push(Word::from_chars(current_word_chars));
             }
         }
 
@@ -5061,42 +5354,84 @@ impl PdfDocument {
         page_index: usize,
     ) -> Result<Vec<crate::layout::TextLine>> {
         use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine, Word};
+        use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        let chars = self.extract_chars(page_index)?;
-        if chars.is_empty() {
+        let spans = self.extract_spans(page_index)?;
+        if spans.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Step 1: Partition page into logical blocks (columns/paragraphs) using XY-Cut
+        let strategy = XYCutStrategy::new();
+        let blocks = strategy.partition_region(&spans);
+
+        // Step 2: Compute adaptive parameters
         let media_box = self
             .get_page_media_box(page_index)
             .unwrap_or((0.0, 0.0, 612.0, 792.0));
         let page_bbox =
             crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
 
+        let all_chars: Vec<_> = spans.iter().flat_map(|s| s.to_chars()).collect();
         let props =
-            DocumentProperties::analyze(&chars, page_bbox).map_err(Error::LayoutAnalysis)?;
+            DocumentProperties::analyze(&all_chars, page_bbox).map_err(Error::LayoutAnalysis)?;
         let params = AdaptiveLayoutParams::from_properties(&props);
 
-        // 1. Cluster chars -> words
-        let word_clusters = clustering::cluster_chars_into_words(&chars, params.word_gap_threshold);
-        let words: Vec<_> = word_clusters
-            .into_iter()
-            .map(|indices| {
-                let cluster_chars: Vec<_> = indices.iter().map(|&i| chars[i].clone()).collect();
-                Word::from_chars(cluster_chars)
-            })
-            .collect();
+        // Step 3: Process each block independently
+        let mut all_lines = Vec::new();
 
-        // 2. Cluster words -> lines
-        let line_clusters = clustering::cluster_words_into_lines(&words, params.line_gap_threshold);
+        for block_spans in blocks {
+            let mut block_words = Vec::new();
 
-        let mut lines = Vec::new();
-        for cluster_indices in line_clusters {
-            let cluster_words: Vec<_> = cluster_indices.iter().map(|&i| words[i].clone()).collect();
-            lines.push(TextLine::new(cluster_words));
+            // Extract words for this block (same logic as extract_words)
+            for span in block_spans {
+                let span_chars = span.to_chars();
+                if span_chars.is_empty() {
+                    continue;
+                }
+
+                let clusters =
+                    clustering::cluster_chars_into_words(&span_chars, params.word_gap_threshold);
+                for cluster_indices in clusters {
+                    let cluster_chars: Vec<_> = cluster_indices
+                        .iter()
+                        .map(|&i| span_chars[i].clone())
+                        .collect();
+                    let mut current_word_chars = Vec::new();
+                    for c in cluster_chars {
+                        if c.char.is_whitespace() || c.char == '\n' || c.char == '\r' {
+                            if !current_word_chars.is_empty() {
+                                block_words.push(Word::from_chars(current_word_chars));
+                                current_word_chars = Vec::new();
+                            }
+                        } else {
+                            current_word_chars.push(c);
+                        }
+                    }
+                    if !current_word_chars.is_empty() {
+                        block_words.push(Word::from_chars(current_word_chars));
+                    }
+                }
+            }
+
+            if block_words.is_empty() {
+                continue;
+            }
+
+            // Cluster words -> lines WITHIN THIS BLOCK
+            let line_clusters =
+                clustering::cluster_words_into_lines(&block_words, params.line_gap_threshold);
+
+            for cluster_indices in line_clusters {
+                let cluster_words: Vec<_> = cluster_indices
+                    .iter()
+                    .map(|&i| block_words[i].clone())
+                    .collect();
+                all_lines.push(TextLine::new(cluster_words));
+            }
         }
 
-        Ok(lines)
+        Ok(all_lines)
     }
 
     /// Apply intelligent text post-processing to extracted text spans.
@@ -5638,6 +5973,7 @@ impl PdfDocument {
         let spans: Vec<_> = words
             .into_iter()
             .map(|w| crate::layout::TextSpan {
+                artifact_type: None,
                 text: w.text,
                 bbox: w.bbox,
                 font_name: w.dominant_font,
@@ -6309,18 +6645,27 @@ impl PdfDocument {
                     _ => {},
                 }
             }
-            // ToUnicode: hash presence (BaseFont already differentiates content)
-            if d.get("ToUnicode").is_some() {
+            // ToUnicode: hash content via reference or inline presence
+            if let Some(to_unicode) = d.get("ToUnicode") {
                 4u8.hash(&mut hasher);
+                if let Some(r) = to_unicode.as_reference() {
+                    r.id.hash(&mut hasher);
+                    r.gen.hash(&mut hasher);
+                }
             }
             // FontDescriptor: hash presence
             if d.get("FontDescriptor").is_some() {
                 5u8.hash(&mut hasher);
             }
-            // DescendantFonts: hash count for Type0 fonts
+            // DescendantFonts: hash references for Type0 fonts
             if let Some(Object::Array(arr)) = d.get("DescendantFonts") {
                 6u8.hash(&mut hasher);
-                arr.len().hash(&mut hasher);
+                for item in arr {
+                    if let Some(r) = item.as_reference() {
+                        r.id.hash(&mut hasher);
+                        r.gen.hash(&mut hasher);
+                    }
+                }
             }
         }
         hasher.finish()
@@ -6634,6 +6979,7 @@ impl PdfDocument {
         let word_spans: Vec<crate::layout::TextSpan> = words
             .into_iter()
             .map(|w| crate::layout::TextSpan {
+                artifact_type: None,
                 text: w.text,
                 bbox: w.bbox,
                 font_name: w.dominant_font,
@@ -8809,7 +9155,7 @@ mod tests {
     // ========================================================================
 
     /// Build a minimal PDF in memory with given content stream bytes.
-    /// Returns the raw PDF bytes suitable for `PdfDocument::open_from_bytes`.
+    /// Returns the raw PDF bytes suitable for `PdfDocument::from_bytes`.
     fn build_minimal_pdf(content: &[u8]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.4\n".to_vec();
 
@@ -8900,30 +9246,30 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_open_from_bytes_minimal_pdf() {
+    fn test_from_bytes_minimal_pdf() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.version(), (1, 4));
         assert!(doc.trailer().as_dict().is_some());
     }
 
     #[test]
-    fn test_open_from_bytes_invalid_data() {
-        let result = PdfDocument::open_from_bytes(b"not a pdf".to_vec());
+    fn test_from_bytes_invalid_data() {
+        let result = PdfDocument::from_bytes(b"not a pdf".to_vec());
         // Should error out -- no valid xref
         assert!(result.is_err() || result.is_ok()); // lenient mode may fall back
     }
 
     #[test]
-    fn test_open_from_bytes_empty() {
-        let result = PdfDocument::open_from_bytes(vec![]);
+    fn test_from_bytes_empty() {
+        let result = PdfDocument::from_bytes(vec![]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_version_accessor() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let (major, minor) = doc.version();
         assert_eq!(major, 1);
         assert_eq!(minor, 4);
@@ -8932,7 +9278,7 @@ mod tests {
     #[test]
     fn test_trailer_accessor() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let trailer = doc.trailer();
         let dict = trailer.as_dict().unwrap();
         assert!(dict.contains_key("Root"));
@@ -8942,7 +9288,7 @@ mod tests {
     #[test]
     fn test_debug_impl() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let debug_str = format!("{:?}", doc);
         assert!(debug_str.contains("PdfDocument"));
         assert!(debug_str.contains("version"));
@@ -8956,7 +9302,7 @@ mod tests {
     #[test]
     fn test_catalog_returns_dictionary() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let catalog = doc.catalog().unwrap();
         let dict = catalog.as_dict().unwrap();
         assert_eq!(dict.get("Type").unwrap().as_name(), Some("Catalog"));
@@ -8969,14 +9315,14 @@ mod tests {
     #[test]
     fn test_page_count_single_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 1);
     }
 
     #[test]
     fn test_page_count_multiple_pages() {
         let pdf = build_multi_page_pdf(5);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 5);
     }
 
@@ -9001,7 +9347,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 0);
     }
 
@@ -9012,7 +9358,7 @@ mod tests {
     #[test]
     fn test_load_object_from_cache() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Load catalog (object 1 0 R)
         let obj_ref = ObjectRef::new(1, 0);
@@ -9027,7 +9373,7 @@ mod tests {
     #[test]
     fn test_load_object_missing_returns_null() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Try to load a non-existent object
         let obj_ref = ObjectRef::new(999, 0);
@@ -9043,7 +9389,7 @@ mod tests {
     #[test]
     fn test_resolve_references_integer() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let obj = Object::Integer(42);
         let resolved = doc.resolve_references(&obj, 3).unwrap();
@@ -9053,7 +9399,7 @@ mod tests {
     #[test]
     fn test_resolve_references_null() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let obj = Object::Null;
         let resolved = doc.resolve_references(&obj, 3).unwrap();
@@ -9063,7 +9409,7 @@ mod tests {
     #[test]
     fn test_resolve_references_max_depth_zero() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // With depth 0, references should not be resolved
         let obj = Object::Reference(ObjectRef::new(1, 0));
@@ -9075,7 +9421,7 @@ mod tests {
     #[test]
     fn test_resolve_references_reference() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Resolve a reference to object 1 (catalog)
         let obj = Object::Reference(ObjectRef::new(1, 0));
@@ -9087,7 +9433,7 @@ mod tests {
     #[test]
     fn test_resolve_references_array() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let arr = Object::Array(vec![Object::Integer(1), Object::Integer(2)]);
         let resolved = doc.resolve_references(&arr, 3).unwrap();
@@ -9098,7 +9444,7 @@ mod tests {
     #[test]
     fn test_resolve_references_dictionary() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let mut dict = std::collections::HashMap::new();
         dict.insert("Key".to_string(), Object::Integer(42));
@@ -9111,7 +9457,7 @@ mod tests {
     #[test]
     fn test_resolve_references_bad_reference() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // A reference to a non-existent object
         let obj = Object::Reference(ObjectRef::new(999, 0));
@@ -9128,7 +9474,7 @@ mod tests {
     #[test]
     fn test_authenticate_unencrypted_pdf() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Unencrypted PDF should always authenticate successfully
         let result = doc.authenticate(b"anypassword").unwrap();
         assert!(result);
@@ -9141,7 +9487,7 @@ mod tests {
     #[test]
     fn test_get_page_content_data_empty_content() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let data = doc.get_page_content_data(0).unwrap();
         // Empty content stream still returns data (may be empty or have a newline)
         assert!(data.len() <= 2);
@@ -9151,7 +9497,7 @@ mod tests {
     fn test_get_page_content_data_with_content() {
         let content = b"BT /F1 12 Tf (Hello) Tj ET";
         let pdf = build_minimal_pdf(content);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let data = doc.get_page_content_data(0).unwrap();
         assert!(!data.is_empty());
         // The content should contain the original text
@@ -9163,7 +9509,7 @@ mod tests {
     fn test_get_page_content_data_blank_page() {
         // Build a PDF where page has no /Contents at all
         let pdf = build_multi_page_pdf(1);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let data = doc.get_page_content_data(0).unwrap();
         assert!(data.is_empty()); // No contents = empty
     }
@@ -9175,7 +9521,7 @@ mod tests {
     #[test]
     fn test_extract_text_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let text = doc.extract_text(0).unwrap();
         assert!(text.is_empty());
     }
@@ -9185,7 +9531,7 @@ mod tests {
         // Content stream has text operators but no fonts loaded
         let content = b"BT /F1 12 Tf (Hello) Tj ET";
         let pdf = build_minimal_pdf(content);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Should not crash, may return empty or partial text
         let _text = doc.extract_text(0).unwrap();
     }
@@ -9197,7 +9543,7 @@ mod tests {
     #[test]
     fn test_extract_all_text_multiple_pages() {
         let pdf = build_multi_page_pdf(3);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let text = doc.extract_all_text().unwrap();
         // Should have form feed separators between pages
         let page_count = text.matches('\x0c').count();
@@ -9207,7 +9553,7 @@ mod tests {
     #[test]
     fn test_extract_all_text_single_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let text = doc.extract_all_text().unwrap();
         // No form feed separators for single page
         assert!(!text.contains('\x0c'));
@@ -9220,7 +9566,7 @@ mod tests {
     #[test]
     fn test_extract_spans_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let spans = doc.extract_spans(0).unwrap();
         assert!(spans.is_empty());
     }
@@ -9230,7 +9576,7 @@ mod tests {
         // Graphics-only content (just rectangle drawing)
         let content = b"100 200 300 400 re S";
         let pdf = build_minimal_pdf(content);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let spans = doc.extract_spans(0).unwrap();
         assert!(spans.is_empty());
     }
@@ -9242,7 +9588,7 @@ mod tests {
     #[test]
     fn test_extract_chars_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let chars = doc.extract_chars(0).unwrap();
         assert!(chars.is_empty());
     }
@@ -9315,6 +9661,7 @@ mod tests {
     /// Helper to create a TextSpan with minimal required fields for testing.
     fn make_test_span(text: &str, x: f32, y: f32, width: f32, font_size: f32) -> TextSpan {
         TextSpan {
+            artifact_type: None,
             text: text.to_string(),
             bbox: crate::geometry::Rect {
                 x,
@@ -9794,7 +10141,7 @@ mod tests {
     #[test]
     fn test_parse_matrix_from_object_valid() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let arr = Object::Array(vec![
             Object::Real(1.0),
@@ -9813,7 +10160,7 @@ mod tests {
     #[test]
     fn test_parse_matrix_from_object_integers() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let arr = Object::Array(vec![
             Object::Integer(2),
@@ -9831,7 +10178,7 @@ mod tests {
     #[test]
     fn test_parse_matrix_from_object_too_short() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let arr = Object::Array(vec![Object::Real(1.0), Object::Real(0.0)]);
         let result = doc.parse_matrix_from_object(&arr);
@@ -9841,7 +10188,7 @@ mod tests {
     #[test]
     fn test_parse_matrix_from_object_not_array() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let result = doc.parse_matrix_from_object(&Object::Integer(42));
         assert!(result.is_none());
@@ -9850,7 +10197,7 @@ mod tests {
     #[test]
     fn test_parse_matrix_from_object_invalid_elements() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let arr = Object::Array(vec![
             Object::Real(1.0),
@@ -9871,7 +10218,7 @@ mod tests {
     #[test]
     fn test_transform_bbox_identity() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let rect = crate::geometry::Rect {
             x: 10.0,
@@ -9890,7 +10237,7 @@ mod tests {
     #[test]
     fn test_transform_bbox_translation() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let rect = crate::geometry::Rect {
             x: 0.0,
@@ -9914,7 +10261,7 @@ mod tests {
     #[test]
     fn test_transform_bbox_scaling() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let rect = crate::geometry::Rect {
             x: 0.0,
@@ -9984,7 +10331,7 @@ mod tests {
         // so we just verify the function runs without panicking and
         // returns a list (which may include the Page<->Pages backreference).
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let cycles = doc.check_for_circular_references();
         // Returns a Vec of (from, to) pairs - may or may not be empty
         let _ = cycles;
@@ -9997,7 +10344,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_nonexistent_ref() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Non-existent object should return true (conservative)
         let result = doc.is_form_xobject(ObjectRef::new(999, 0));
         assert!(result);
@@ -10006,7 +10353,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_catalog_not_form() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Load catalog into cache first
         let _ = doc.load_object(ObjectRef::new(1, 0));
         // Catalog is not a Form XObject
@@ -10015,11 +10362,11 @@ mod tests {
     }
 
     // ========================================================================
-    // open_from_bytes with various PDF structures
+    // from_bytes with various PDF structures
     // ========================================================================
 
     #[test]
-    fn test_open_from_bytes_with_v2_header() {
+    fn test_from_bytes_with_v2_header() {
         let mut pdf = b"%PDF-2.0\n".to_vec();
 
         let off1 = pdf.len();
@@ -10038,7 +10385,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.version(), (2, 0));
     }
 
@@ -10169,7 +10516,7 @@ mod tests {
     #[test]
     fn test_decode_stream_with_encryption_null_object() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let result = doc
             .decode_stream_with_encryption(&Object::Null, ObjectRef::new(1, 0))
             .unwrap();
@@ -10183,7 +10530,7 @@ mod tests {
     #[test]
     fn test_page_cannot_have_text_no_resources() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Empty resources dict
         let page_dict = std::collections::HashMap::new();
@@ -10193,7 +10540,7 @@ mod tests {
     #[test]
     fn test_page_cannot_have_text_with_font_resources() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let mut font_dict = std::collections::HashMap::new();
         font_dict.insert("F1".to_string(), Object::Reference(ObjectRef::new(10, 0)));
@@ -10211,7 +10558,7 @@ mod tests {
     #[test]
     fn test_page_cannot_have_text_empty_font_dict() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
 
         let font_dict = std::collections::HashMap::new();
 
@@ -10232,7 +10579,7 @@ mod tests {
     #[test]
     fn test_extract_images_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let images = doc.extract_images(0).unwrap();
         assert!(images.is_empty());
     }
@@ -10241,7 +10588,7 @@ mod tests {
     fn test_extract_images_graphics_only() {
         let content = b"100 200 300 400 re S";
         let pdf = build_minimal_pdf(content);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let images = doc.extract_images(0).unwrap();
         assert!(images.is_empty());
     }
@@ -10253,7 +10600,7 @@ mod tests {
     #[test]
     fn test_extract_paths_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let paths = doc.extract_paths(0).unwrap();
         assert!(paths.is_empty());
     }
@@ -10262,7 +10609,7 @@ mod tests {
     fn test_extract_paths_rectangle() {
         let content = b"100 200 300 400 re S";
         let pdf = build_minimal_pdf(content);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let paths = doc.extract_paths(0).unwrap();
         assert!(!paths.is_empty());
     }
@@ -10274,7 +10621,7 @@ mod tests {
     #[test]
     fn test_mark_info_untagged_pdf() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mark_info = doc.mark_info().unwrap();
         // Untagged PDF should have default MarkInfo
         assert!(!mark_info.marked);
@@ -10330,7 +10677,7 @@ mod tests {
     #[test]
     fn test_apply_intelligent_text_processing_empty() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let spans: Vec<TextSpan> = vec![];
         let result = doc.apply_intelligent_text_processing(spans);
         assert!(result.is_empty());
@@ -10339,7 +10686,7 @@ mod tests {
     #[test]
     fn test_apply_intelligent_text_processing_ligature_expansion() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let spans = vec![make_test_span("\u{FB01}nd", 0.0, 0.0, 50.0, 12.0)]; // fi-ligature + "nd" = "find"
         let result = doc.apply_intelligent_text_processing(spans);
         assert_eq!(result.len(), 1);
@@ -10353,7 +10700,7 @@ mod tests {
     #[test]
     fn test_get_page_caching() {
         let pdf = build_multi_page_pdf(3);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Access page 0 twice -- second should come from cache
         let _page1 = doc.get_page(0).unwrap();
         let _page2 = doc.get_page(0).unwrap();
@@ -10363,7 +10710,7 @@ mod tests {
     #[test]
     fn test_get_page_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         // Page 99 doesn't exist
         let result = doc.get_page(99);
         assert!(result.is_err());
@@ -10377,7 +10724,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_page_count_u32_returns_correct_value() {
         let pdf = build_multi_page_pdf(3);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count_u32(), 3);
     }
 
@@ -10388,7 +10735,7 @@ mod tests {
     #[test]
     fn test_structure_tree_untagged_pdf() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let tree = doc.structure_tree().unwrap();
         assert!(tree.is_none()); // Untagged PDF has no structure tree
     }
@@ -10400,7 +10747,7 @@ mod tests {
     #[test]
     fn test_to_plain_text_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let text = doc.to_plain_text(0, &options).unwrap();
         assert!(text.is_empty() || text.trim().is_empty());
@@ -10409,7 +10756,7 @@ mod tests {
     #[test]
     fn test_to_markdown_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let md = doc.to_markdown(0, &options).unwrap();
         assert!(md.is_empty() || md.trim().is_empty());
@@ -10418,7 +10765,7 @@ mod tests {
     #[test]
     fn test_to_html_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let html = doc.to_html(0, &options).unwrap();
         // HTML may have structure tags even for empty content
@@ -10428,7 +10775,7 @@ mod tests {
     #[test]
     fn test_to_markdown_all_multiple_pages() {
         let pdf = build_multi_page_pdf(2);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let md = doc.to_markdown_all(&options).unwrap();
         // Should have a separator between pages
@@ -10438,7 +10785,7 @@ mod tests {
     #[test]
     fn test_to_plain_text_all_multiple_pages() {
         let pdf = build_multi_page_pdf(2);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let text = doc.to_plain_text_all(&options).unwrap();
         let _ = text; // Should not crash
@@ -10447,7 +10794,7 @@ mod tests {
     #[test]
     fn test_to_html_all_multiple_pages() {
         let pdf = build_multi_page_pdf(2);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let options = crate::converters::ConversionOptions::default();
         let html = doc.to_html_all(&options).unwrap();
         assert!(html.contains("data-page=\"1\""));
@@ -10476,7 +10823,7 @@ mod tests {
     #[test]
     fn test_get_page_for_debug() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let page = doc.get_page_for_debug(0).unwrap();
         assert!(page.as_dict().is_some());
     }
@@ -10518,7 +10865,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 1);
         // The page should inherit the MediaBox from its parent
         let page = doc.get_page(0).unwrap();
@@ -10575,7 +10922,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let data = doc.get_page_content_data(0).unwrap();
         let text = String::from_utf8_lossy(&data);
         assert!(text.contains("q"));
@@ -10589,7 +10936,7 @@ mod tests {
     #[test]
     fn test_extract_hierarchical_content_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let result = doc.extract_hierarchical_content(0);
         // Should not crash, may return Ok(Some) or Ok(None)
         assert!(result.is_ok());
@@ -10602,7 +10949,7 @@ mod tests {
     #[test]
     fn test_extract_paths_in_rect_empty_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let region = crate::geometry::Rect {
             x: 0.0,
             y: 0.0,
@@ -10657,7 +11004,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 2);
     }
 
@@ -10687,7 +11034,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mark_info = doc.mark_info().unwrap();
         assert!(mark_info.marked);
         assert!(!mark_info.suspects);
@@ -10700,7 +11047,7 @@ mod tests {
     #[test]
     fn test_extract_spans_with_config_blank_page() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let config = crate::extractors::SpanMergingConfig::default();
         let spans = doc.extract_spans_with_config(0, config).unwrap();
         assert!(spans.is_empty());
@@ -10713,7 +11060,7 @@ mod tests {
     #[test]
     fn test_get_page_ref_valid() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let page_ref = doc.get_page_ref(0).unwrap();
         // Page should be object 3 (catalog=1, pages=2, page=3)
         assert_eq!(page_ref.id, 3);
@@ -10722,7 +11069,7 @@ mod tests {
     #[test]
     fn test_get_page_ref_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let result = doc.get_page_ref(99);
         assert!(result.is_err());
     }
@@ -11171,7 +11518,7 @@ mod tests {
     fn test_annotation_freetext() {
         let annot = b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /Contents (Hello from annotation) >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let text = doc.extract_text(0).unwrap();
         assert!(text.contains("Hello from annotation"));
     }
@@ -11181,7 +11528,7 @@ mod tests {
         let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Text /Contents (Sticky note) >>\nendobj\n"
             .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Sticky note"));
     }
 
@@ -11190,7 +11537,7 @@ mod tests {
         let annot =
             b"4 0 obj\n<< /Type /Annot /Subtype /Stamp /Contents (APPROVED) >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("APPROVED"));
     }
 
@@ -11199,7 +11546,7 @@ mod tests {
         let annot =
             b"4 0 obj\n<< /Type /Annot /Subtype /Link /Contents (Click here) >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Click here"));
     }
 
@@ -11209,7 +11556,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /Highlight /Contents (Highlighted) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Highlighted"));
     }
 
@@ -11219,7 +11566,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /F 2 /Contents (Hidden) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_text(0).unwrap().contains("Hidden"));
     }
 
@@ -11229,7 +11576,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /F 1 /Contents (Invisible) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_text(0).unwrap().contains("Invisible"));
     }
 
@@ -11239,7 +11586,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /Text /F 32 /Contents (NoView) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_text(0).unwrap().contains("NoView"));
     }
 
@@ -11249,7 +11596,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /CustomType /Contents (Custom) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Custom"));
     }
 
@@ -11260,7 +11607,7 @@ mod tests {
         let a2 =
             b"5 0 obj\n<< /Type /Annot /Subtype /Text /Contents (Second) >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, a1), (5, a2)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let text = doc.extract_text(0).unwrap();
         assert!(text.contains("First"));
         assert!(text.contains("Second"));
@@ -11270,7 +11617,7 @@ mod tests {
     fn test_annotation_no_subtype() {
         let annot = b"4 0 obj\n<< /Type /Annot /Contents (No subtype) >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_text(0).unwrap().contains("No subtype"));
     }
 
@@ -11278,7 +11625,7 @@ mod tests {
     fn test_annotation_widget_with_value() {
         let annot = b"4 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Tx /V (Field value) /Rect [72 700 272 720] >>\nendobj\n".to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Field value"));
     }
 
@@ -11289,7 +11636,7 @@ mod tests {
     #[test]
     fn test_resolve_references_boolean() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let resolved = doc.resolve_references(&Object::Boolean(true), 5).unwrap();
         assert!(matches!(resolved, Object::Boolean(true)));
     }
@@ -11297,7 +11644,7 @@ mod tests {
     #[test]
     fn test_resolve_references_nested_dict_with_refs() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mut dict = std::collections::HashMap::new();
         dict.insert("CatalogRef".to_string(), Object::Reference(ObjectRef::new(1, 0)));
         dict.insert("Direct".to_string(), Object::Integer(42));
@@ -11312,7 +11659,7 @@ mod tests {
     #[test]
     fn test_resolve_references_array_with_refs() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let arr = Object::Array(vec![Object::Reference(ObjectRef::new(1, 0)), Object::Integer(99)]);
         let resolved = doc.resolve_references(&arr, 3).unwrap();
         let ra = resolved.as_array().unwrap();
@@ -11330,7 +11677,7 @@ mod tests {
         // Pages (2 0 R) -> Kids -> Page (3 0 R) -> Parent -> Pages (2 0 R)
         // The DFS cycle detector reports this as a cycle.
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let cycles = doc.check_for_circular_references();
         // Verify the function runs without panicking and returns results.
         // The minimal PDF's parent-child relationship is detected as a cycle.
@@ -11344,14 +11691,14 @@ mod tests {
     #[test]
     fn test_extract_text_graphics_only() {
         let pdf = build_minimal_pdf(b"q 1 0 0 1 0 0 cm 100 200 300 400 re S Q");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().is_empty());
     }
 
     #[test]
     fn test_extract_text_page_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(100).is_err());
     }
 
@@ -11371,35 +11718,35 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_all_text().unwrap().is_empty());
     }
 
     #[test]
     fn test_extract_spans_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_spans(999).is_err());
     }
 
     #[test]
     fn test_extract_chars_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_chars(999).is_err());
     }
 
     #[test]
     fn test_get_page_content_data_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.get_page_content_data(999).is_err());
     }
 
     #[test]
     fn test_to_html_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc
             .to_html(999, &crate::converters::ConversionOptions::default())
             .is_err());
@@ -11408,7 +11755,7 @@ mod tests {
     #[test]
     fn test_to_markdown_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc
             .to_markdown(999, &crate::converters::ConversionOptions::default())
             .is_err());
@@ -11417,7 +11764,7 @@ mod tests {
     #[test]
     fn test_to_plain_text_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc
             .to_plain_text(999, &crate::converters::ConversionOptions::default())
             .is_err());
@@ -11426,35 +11773,35 @@ mod tests {
     #[test]
     fn test_extract_paths_line() {
         let pdf = build_minimal_pdf(b"0 0 m 100 100 l S");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_paths(0).unwrap().is_empty());
     }
 
     #[test]
     fn test_extract_paths_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_paths(999).is_err());
     }
 
     #[test]
     fn test_extract_paths_curve() {
         let pdf = build_minimal_pdf(b"0 0 m 25 50 75 50 100 0 c S");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_paths(0).unwrap().is_empty());
     }
 
     #[test]
     fn test_extract_paths_filled_rect() {
         let pdf = build_minimal_pdf(b"50 50 200 100 re f");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(!doc.extract_paths(0).unwrap().is_empty());
     }
 
     #[test]
     fn test_extract_paths_in_rect_with_content() {
         let pdf = build_minimal_pdf(b"100 200 300 400 re S");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let region = crate::geometry::Rect {
             x: 0.0,
             y: 0.0,
@@ -11467,7 +11814,7 @@ mod tests {
     #[test]
     fn test_extract_images_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_images(999).is_err());
     }
 
@@ -11493,7 +11840,7 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mi = doc.mark_info().unwrap();
         assert!(mi.marked);
         assert!(mi.suspects);
@@ -11525,7 +11872,7 @@ mod tests {
             format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 1);
     }
 
@@ -11557,7 +11904,7 @@ mod tests {
             format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert_eq!(doc.page_count().unwrap(), 1);
         let page = doc.get_page(0).unwrap();
         assert!(page.as_dict().unwrap().contains_key("MediaBox"));
@@ -11566,7 +11913,7 @@ mod tests {
     #[test]
     fn test_populate_page_cache_sequential() {
         let pdf = build_multi_page_pdf(5);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         for i in 0..5 {
             assert!(doc.get_page(i).unwrap().as_dict().is_some());
         }
@@ -11575,7 +11922,7 @@ mod tests {
     #[test]
     fn test_get_page_ref_multi_page() {
         let pdf = build_multi_page_pdf(3);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let r0 = doc.get_page_ref(0).unwrap();
         let r1 = doc.get_page_ref(1).unwrap();
         let r2 = doc.get_page_ref(2).unwrap();
@@ -11621,7 +11968,7 @@ mod tests {
             format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let data = doc.get_page_content_data(0).unwrap();
         let text = String::from_utf8_lossy(&data);
         assert!(text.contains("q"));
@@ -11647,7 +11994,7 @@ mod tests {
             format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.get_page_content_data(0).unwrap().is_empty());
     }
 
@@ -11678,7 +12025,7 @@ mod tests {
             format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let obj = doc.load_object(ObjectRef::new(5, 0)).unwrap();
         assert!(obj.as_dict().is_some());
     }
@@ -11686,14 +12033,14 @@ mod tests {
     #[test]
     fn test_load_object_missing_returns_null_simple() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(matches!(doc.load_object(ObjectRef::new(999, 0)).unwrap(), Object::Null));
     }
 
     #[test]
     fn test_decode_stream_with_encryption_non_null() {
         let pdf = build_minimal_pdf(b"BT (Hello) Tj ET");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let stream_obj = doc.load_object(ObjectRef::new(4, 0)).unwrap();
         assert!(doc
             .decode_stream_with_encryption(&stream_obj, ObjectRef::new(4, 0))
@@ -11703,7 +12050,7 @@ mod tests {
     #[test]
     fn test_load_fonts_public_empty_resources() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mut ext = crate::extractors::TextExtractor::new();
         assert!(doc
             .load_fonts_public(&Object::Dictionary(std::collections::HashMap::new()), &mut ext)
@@ -11713,7 +12060,7 @@ mod tests {
     #[test]
     fn test_load_fonts_public_resources_not_dict() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let mut ext = crate::extractors::TextExtractor::new();
         assert!(doc
             .load_fonts_public(&Object::Integer(42), &mut ext)
@@ -11723,7 +12070,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_from_cache() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let _ = doc.load_object(ObjectRef::new(1, 0)).unwrap();
         assert!(!doc.is_form_xobject(ObjectRef::new(1, 0)));
     }
@@ -11764,7 +12111,7 @@ mod tests {
     #[test]
     fn test_apply_intelligent_text_processing_fl_ligature() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let spans = vec![make_test_span("\u{FB02}oor", 0.0, 0.0, 50.0, 12.0)];
         let result = doc.apply_intelligent_text_processing(spans);
         assert!(result[0].text.contains("floor"));
@@ -11773,7 +12120,7 @@ mod tests {
     #[test]
     fn test_apply_intelligent_text_processing_ocr_font() {
         let pdf = build_minimal_pdf(b"");
-        let doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let mut span = make_test_span("Test  Text", 0.0, 0.0, 100.0, 12.0);
         span.font_name = "OCR".to_string();
         let result = doc.apply_intelligent_text_processing(vec![span]);
@@ -11783,7 +12130,7 @@ mod tests {
     #[test]
     fn test_extract_spans_with_config_adaptive() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc
             .extract_spans_with_config(0, crate::extractors::SpanMergingConfig::adaptive())
             .unwrap()
@@ -11793,7 +12140,7 @@ mod tests {
     #[test]
     fn test_extract_spans_with_config_out_of_bounds() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc
             .extract_spans_with_config(999, crate::extractors::SpanMergingConfig::default())
             .is_err());
@@ -11841,7 +12188,7 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.catalog().unwrap().as_dict().is_some());
     }
 
@@ -11861,7 +12208,7 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.catalog().unwrap().as_dict().is_some());
     }
 
@@ -11881,7 +12228,7 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().version(), (2, 0));
+        assert_eq!(PdfDocument::from_bytes(pdf).unwrap().version(), (2, 0));
     }
 
     #[test]
@@ -11890,7 +12237,7 @@ mod tests {
             b"4 0 obj\n<< /Type /Annot /Subtype /FreeText /Contents (Only annotation) >>\nendobj\n"
                 .to_vec();
         let pdf = build_pdf_with_annotations(vec![(4, annot)]);
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(doc.extract_text(0).unwrap().contains("Only annotation"));
     }
 
@@ -11921,7 +12268,7 @@ mod tests {
             format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().page_count_u32(), 0);
+        assert_eq!(PdfDocument::from_bytes(pdf).unwrap().page_count_u32(), 0);
     }
 
     /// Regression test: validate_object_at_offset must return true for

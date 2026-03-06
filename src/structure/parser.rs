@@ -654,7 +654,7 @@ mod tests {
         let obj = Object::Integer(42);
         let mut doc = {
             let pdf = build_test_pdf();
-            PdfDocument::open_from_bytes(pdf).unwrap()
+            PdfDocument::from_bytes(pdf).unwrap()
         };
         let result = resolve_object(&mut doc, &obj).unwrap();
         assert_eq!(result, Object::Integer(42));
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn test_parse_structure_tree_untagged_pdf() {
         let pdf = build_test_pdf();
-        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
         let result = parse_structure_tree(&mut doc).unwrap();
         assert!(result.is_none()); // No StructTreeRoot in minimal PDF
     }

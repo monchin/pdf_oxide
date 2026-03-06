@@ -12,29 +12,23 @@
 use pdf_oxide::converters::{ConversionOptions, MarkdownConverter};
 use pdf_oxide::extractors::{SpanMergingConfig, TextExtractionConfig};
 use pdf_oxide::geometry::Rect;
-use pdf_oxide::layout::{Color, FontWeight, TextChar};
+use pdf_oxide::layout::{FontWeight, TextChar};
 
 // Helper: Create a mock character
 fn mock_char(c: char, x: f32, y: f32, width: f32, font_size: f32, bold: bool) -> TextChar {
     TextChar {
         char: c,
         bbox: Rect::new(x, y, width, font_size),
-        font_name: "Times".to_string(),
         font_size,
         font_weight: if bold {
             FontWeight::Bold
         } else {
             FontWeight::Normal
         },
-        is_italic: false,
-        color: Color::black(),
-        mcid: None,
-        // v0.3.1 transformation properties
         origin_x: x,
         origin_y: y,
-        rotation_degrees: 0.0,
         advance_width: width,
-        matrix: None,
+        ..Default::default()
     }
 }
 

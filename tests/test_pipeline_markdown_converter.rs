@@ -10,7 +10,7 @@
 //! - Whitespace normalization
 
 use pdf_oxide::geometry::Rect;
-use pdf_oxide::layout::{Color, FontWeight, TextSpan};
+use pdf_oxide::layout::{FontWeight, TextSpan};
 use pdf_oxide::pipeline::config::{BoldMarkerBehavior, OutputConfig, TextPipelineConfig};
 use pdf_oxide::pipeline::converters::{MarkdownOutputConverter, OutputConverter};
 use pdf_oxide::pipeline::OrderedTextSpan;
@@ -41,19 +41,10 @@ fn make_span_with_order(
         TextSpan {
             text: text.to_string(),
             bbox: Rect::new(x, y, 100.0, font_size),
-            font_name: "TestFont".to_string(),
             font_size,
             font_weight: weight,
             is_italic,
-            color: Color::black(),
-            mcid: None,
-            sequence: 0,
-            offset_semantic: false,
-            split_boundary_before: false,
-            char_spacing: 0.0,
-            word_spacing: 0.0,
-            horizontal_scaling: 100.0,
-            primary_detected: false,
+            ..Default::default()
         },
         reading_order,
     )

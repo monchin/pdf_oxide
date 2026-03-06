@@ -64,7 +64,7 @@ impl WasmPdfDocument {
     /// Ensure the editor is initialized, creating it from the raw bytes if needed.
     fn ensure_editor(&mut self) -> Result<Arc<Mutex<DocumentEditor>>, JsValue> {
         if self.editor.is_none() {
-            let editor = DocumentEditor::open_from_bytes(self.raw_bytes.to_vec())
+            let editor = DocumentEditor::from_bytes(self.raw_bytes.to_vec())
                 .map_err(|e| JsValue::from_str(&format!("Failed to open editor: {}", e)))?;
             self.editor = Some(Arc::new(Mutex::new(editor)));
         }
@@ -92,7 +92,7 @@ impl WasmPdfDocument {
         console_error_panic_hook::set_once();
 
         let bytes = data.to_vec();
-        let inner = PdfDocument::open_from_bytes(bytes.clone())
+        let inner = PdfDocument::from_bytes(bytes.clone())
             .map_err(|e| JsValue::from_str(&format!("Failed to open PDF: {}", e)))?;
 
         Ok(WasmPdfDocument {
@@ -197,6 +197,91 @@ impl WasmPdfDocument {
             .map_err(|_| JsValue::from_str("Mutex lock failed"))?
             .extract_all_text()
             .map_err(|e| JsValue::from_str(&format!("Failed to extract all text: {}", e)))
+    }
+
+    /// Identify and remove headers.
+    ///
+    /// Uses spec-compliant /Artifact tags when available (100% accuracy), or
+    /// falls back to heuristic analysis of the top 15% of pages.
+    ///
+    /// @param threshold - Fraction of pages (0.0-1.0) where text must repeat (heuristic mode)
+    #[wasm_bindgen(js_name = "removeHeaders")]
+    pub fn remove_headers(&mut self, threshold: f32) -> Result<usize, JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .remove_headers(threshold)
+            .map_err(|e| JsValue::from_str(&format!("Header removal failed: {}", e)))
+    }
+
+    /// Identify and remove footers.
+    ///
+    /// Uses spec-compliant /Artifact tags when available (100% accuracy), or
+    /// falls back to heuristic analysis of the bottom 15% of pages.
+    ///
+    /// @param threshold - Fraction of pages (0.0-1.0) where text must repeat (heuristic mode)
+    #[wasm_bindgen(js_name = "removeFooters")]
+    pub fn remove_footers(&mut self, threshold: f32) -> Result<usize, JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .remove_footers(threshold)
+            .map_err(|e| JsValue::from_str(&format!("Footer removal failed: {}", e)))
+    }
+
+    /// Identify and remove both headers and footers.
+    ///
+    /// Prioritizes ISO 32000 spec-compliant /Artifact tags, with a heuristic
+    /// fallback for untagged PDFs.
+    ///
+    /// @param threshold - Fraction of pages (0.0-1.0) where text must repeat (heuristic mode)
+    #[wasm_bindgen(js_name = "removeArtifacts")]
+    pub fn remove_artifacts(&mut self, threshold: f32) -> Result<usize, JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .remove_artifacts(threshold)
+            .map_err(|e| JsValue::from_str(&format!("Artifact removal failed: {}", e)))
+    }
+
+    /// Erase existing header content.
+    ///
+    /// Identifies existing text in the header area (top 15%) and marks it for erasure.
+    ///
+    /// @param page_index - Zero-based page number
+    #[wasm_bindgen(js_name = "eraseHeader")]
+    pub fn erase_header(&mut self, page_index: usize) -> Result<(), JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .erase_header(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase header: {}", e)))
+    }
+
+    /// Erase existing footer content.
+    ///
+    /// Identifies existing text in the footer area (bottom 15%) and marks it for erasure.
+    ///
+    /// @param page_index - Zero-based page number
+    #[wasm_bindgen(js_name = "eraseFooter")]
+    pub fn erase_footer(&mut self, page_index: usize) -> Result<(), JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .erase_footer(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase footer: {}", e)))
+    }
+
+    /// Erase both header and footer content.
+    ///
+    /// @param page_index - Zero-based page number
+    #[wasm_bindgen(js_name = "eraseArtifacts")]
+    pub fn erase_artifacts(&mut self, page_index: usize) -> Result<(), JsValue> {
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .erase_artifacts(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase artifacts: {}", e)))
     }
 
     /// Focus extraction on a specific rectangular region of a page (v0.3.14).
@@ -1779,6 +1864,13 @@ impl WasmPdfDocument {
         urx: f32,
         ury: f32,
     ) -> Result<(), JsValue> {
+        // Mark in inner document for extraction filtering
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .erase_region(page_index, crate::geometry::Rect::new(llx, lly, urx - llx, ury - lly))
+            .map_err(|e| JsValue::from_str(&format!("Failed to mark region: {}", e)))?;
+
         let editor_arc = self.ensure_editor()?;
         let mut editor = editor_arc
             .lock()
@@ -1797,6 +1889,23 @@ impl WasmPdfDocument {
         if !rects.len().is_multiple_of(4) {
             return Err(JsValue::from_str("rects must have a length that is a multiple of 4"));
         }
+
+        // Mark all regions in inner document
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?;
+        for chunk in rects.chunks_exact(4) {
+            let (llx, lly, urx, ury) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            inner
+                .erase_region(
+                    page_index,
+                    crate::geometry::Rect::new(llx, lly, urx - llx, ury - lly),
+                )
+                .map_err(|e| JsValue::from_str(&format!("Failed to mark region: {}", e)))?;
+        }
+        drop(inner);
+
         let rect_arrays: Vec<[f32; 4]> = rects
             .chunks_exact(4)
             .map(|c| [c[0], c[1], c[2], c[3]])
@@ -1813,6 +1922,13 @@ impl WasmPdfDocument {
     /// Clear all pending erase operations for a page.
     #[wasm_bindgen(js_name = "clearEraseRegions")]
     pub fn clear_erase_regions(&mut self, page_index: usize) -> Result<(), JsValue> {
+        // Clear inner document regions
+        self.inner
+            .lock()
+            .map_err(|_| JsValue::from_str("Mutex lock failed"))?
+            .clear_erase_regions(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to clear regions: {}", e)))?;
+
         let editor_arc = self.ensure_editor()?;
         let mut editor = editor_arc
             .lock()
@@ -1876,7 +1992,201 @@ impl WasmPdfDocument {
             .apply_all_redactions()
             .map_err(|e| JsValue::from_str(&format!("Failed to apply redactions: {}", e)))
     }
+}
 
+/// Style configuration for header/footer text.
+#[wasm_bindgen(js_name = "ArtifactStyle")]
+#[derive(Clone)]
+pub struct WasmArtifactStyle {
+    inner: crate::writer::ArtifactStyle,
+}
+
+#[wasm_bindgen(js_name = "ArtifactStyle")]
+impl WasmArtifactStyle {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::ArtifactStyle::new(),
+        }
+    }
+
+    pub fn font(mut self, name: &str, size: f32) -> Self {
+        self.inner = self.inner.font(name, size);
+        self
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.inner = self.inner.bold();
+        self
+    }
+
+    pub fn color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.inner = self.inner.color(r, g, b);
+        self
+    }
+}
+
+/// A header or footer artifact definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmArtifact {
+    inner: crate::writer::Artifact,
+}
+
+#[wasm_bindgen]
+impl WasmArtifact {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::Artifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmArtifact)]
+    pub fn left(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmArtifact)]
+    pub fn center(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmArtifact)]
+    pub fn right(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::right(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "withStyle")]
+    pub fn with_style(mut self, style: &WasmArtifactStyle) -> Self {
+        self.inner = self.inner.with_style(style.inner.clone());
+        self
+    }
+
+    #[wasm_bindgen(js_name = "withOffset")]
+    pub fn with_offset(mut self, offset: f32) -> Self {
+        self.inner = self.inner.with_offset(offset);
+        self
+    }
+}
+
+/// A header definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmHeader {
+    inner: WasmArtifact,
+}
+
+#[wasm_bindgen]
+impl WasmHeader {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: WasmArtifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmHeader)]
+    pub fn left(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmHeader)]
+    pub fn center(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmHeader)]
+    pub fn right(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::right(text),
+        }
+    }
+}
+
+/// A footer definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmFooter {
+    inner: WasmArtifact,
+}
+
+#[wasm_bindgen]
+impl WasmFooter {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: WasmArtifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmFooter)]
+    pub fn left(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmFooter)]
+    pub fn center(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmFooter)]
+    pub fn right(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::right(text),
+        }
+    }
+}
+
+/// A complete page template with header and footer.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmPageTemplate {
+    inner: crate::writer::PageTemplate,
+}
+
+#[wasm_bindgen]
+impl WasmPageTemplate {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::PageTemplate::new(),
+        }
+    }
+
+    pub fn header(mut self, header: &WasmArtifact) -> Self {
+        self.inner = self.inner.header(header.inner.clone());
+        self
+    }
+
+    pub fn footer(mut self, footer: &WasmArtifact) -> Self {
+        self.inner = self.inner.footer(footer.inner.clone());
+        self
+    }
+
+    #[wasm_bindgen(js_name = "skipFirstPage")]
+    pub fn skip_first_page(mut self) -> Self {
+        self.inner = self.inner.skip_first_page();
+        self
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPdfDocument {
     // ========================================================================
     // Group 7: Editing — Image Manipulation
     // ========================================================================

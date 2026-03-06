@@ -6,11 +6,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use pdf_oxide::writer::{PageTemplate, HeaderFooter, Placeholder};
+//! use pdf_oxide::writer::{PageTemplate, Artifact, Placeholder};
 //!
 //! let template = PageTemplate::new()
-//!     .header(HeaderFooter::center("My Document"))
-//!     .footer(HeaderFooter::right("{page} of {pages}"));
+//!     .header(Artifact::center("My Document"))
+//!     .footer(Artifact::right("{page} of {pages}"));
 //! ```
 
 use super::font_manager::FontWeight;
@@ -73,7 +73,7 @@ impl Placeholder {
 
 /// Text alignment for header/footer content.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum HFAlignment {
+pub enum ArtifactAlignment {
     /// Align to the left margin
     Left,
     /// Center horizontally
@@ -85,7 +85,7 @@ pub enum HFAlignment {
 
 /// Style configuration for header/footer text.
 #[derive(Debug, Clone)]
-pub struct HFStyle {
+pub struct ArtifactStyle {
     /// Font name
     pub font_name: String,
     /// Font size in points
@@ -100,7 +100,7 @@ pub struct HFStyle {
     pub separator_width: f32,
 }
 
-impl Default for HFStyle {
+impl Default for ArtifactStyle {
     fn default() -> Self {
         Self {
             font_name: "Helvetica".to_string(),
@@ -113,7 +113,7 @@ impl Default for HFStyle {
     }
 }
 
-impl HFStyle {
+impl ArtifactStyle {
     /// Create a new default style.
     pub fn new() -> Self {
         Self::default()
@@ -148,21 +148,21 @@ impl HFStyle {
 
 /// A single positioned text element in a header or footer.
 #[derive(Debug, Clone)]
-pub struct HFElement {
+pub struct ArtifactElement {
     /// The text content (may include placeholders)
     pub text: String,
     /// Horizontal alignment
-    pub alignment: HFAlignment,
+    pub alignment: ArtifactAlignment,
     /// Style for this element
-    pub style: Option<HFStyle>,
+    pub style: Option<ArtifactStyle>,
 }
 
-impl HFElement {
+impl ArtifactElement {
     /// Create a new element with default center alignment.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            alignment: HFAlignment::Center,
+            alignment: ArtifactAlignment::Center,
             style: None,
         }
     }
@@ -171,7 +171,7 @@ impl HFElement {
     pub fn left(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            alignment: HFAlignment::Left,
+            alignment: ArtifactAlignment::Left,
             style: None,
         }
     }
@@ -180,7 +180,7 @@ impl HFElement {
     pub fn center(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            alignment: HFAlignment::Center,
+            alignment: ArtifactAlignment::Center,
             style: None,
         }
     }
@@ -189,13 +189,13 @@ impl HFElement {
     pub fn right(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            alignment: HFAlignment::Right,
+            alignment: ArtifactAlignment::Right,
             style: None,
         }
     }
 
     /// Set the style for this element.
-    pub fn with_style(mut self, style: HFStyle) -> Self {
+    pub fn with_style(mut self, style: ArtifactStyle) -> Self {
         self.style = Some(style);
         self
     }
@@ -215,23 +215,28 @@ impl HFElement {
     }
 }
 
-/// A header or footer definition.
+/// A header or footer artifact definition.
 #[derive(Debug, Clone, Default)]
-pub struct HeaderFooter {
+pub struct Artifact {
     /// Left-aligned element
-    pub left: Option<HFElement>,
+    pub left: Option<ArtifactElement>,
     /// Center-aligned element
-    pub center: Option<HFElement>,
+    pub center: Option<ArtifactElement>,
     /// Right-aligned element
-    pub right: Option<HFElement>,
+    pub right: Option<ArtifactElement>,
     /// Default style for all elements
-    pub style: HFStyle,
+    pub style: ArtifactStyle,
     /// Vertical offset from page edge (points)
     pub offset: f32,
 }
 
-impl HeaderFooter {
-    /// Create a new empty header/footer.
+/// Alias for Header
+pub type Header = Artifact;
+/// Alias for Footer
+pub type Footer = Artifact;
+
+impl Artifact {
+    /// Create a new empty artifact.
     pub fn new() -> Self {
         Self {
             offset: 36.0, // Half inch from edge
@@ -242,44 +247,44 @@ impl HeaderFooter {
     /// Create with a single left-aligned element.
     pub fn left(text: impl Into<String>) -> Self {
         let mut hf = Self::new();
-        hf.left = Some(HFElement::left(text));
+        hf.left = Some(ArtifactElement::left(text));
         hf
     }
 
     /// Create with a single centered element.
     pub fn center(text: impl Into<String>) -> Self {
         let mut hf = Self::new();
-        hf.center = Some(HFElement::center(text));
+        hf.center = Some(ArtifactElement::center(text));
         hf
     }
 
     /// Create with a single right-aligned element.
     pub fn right(text: impl Into<String>) -> Self {
         let mut hf = Self::new();
-        hf.right = Some(HFElement::right(text));
+        hf.right = Some(ArtifactElement::right(text));
         hf
     }
 
     /// Set the left element.
     pub fn with_left(mut self, text: impl Into<String>) -> Self {
-        self.left = Some(HFElement::left(text));
+        self.left = Some(ArtifactElement::left(text));
         self
     }
 
     /// Set the center element.
     pub fn with_center(mut self, text: impl Into<String>) -> Self {
-        self.center = Some(HFElement::center(text));
+        self.center = Some(ArtifactElement::center(text));
         self
     }
 
     /// Set the right element.
     pub fn with_right(mut self, text: impl Into<String>) -> Self {
-        self.right = Some(HFElement::right(text));
+        self.right = Some(ArtifactElement::right(text));
         self
     }
 
     /// Set the default style.
-    pub fn with_style(mut self, style: HFStyle) -> Self {
+    pub fn with_style(mut self, style: ArtifactStyle) -> Self {
         self.style = style;
         self
     }
@@ -296,7 +301,7 @@ impl HeaderFooter {
     }
 
     /// Get all elements as positioned items.
-    pub fn elements(&self) -> Vec<&HFElement> {
+    pub fn elements(&self) -> Vec<&ArtifactElement> {
         let mut elements = Vec::new();
         if let Some(ref e) = self.left {
             elements.push(e);
@@ -365,15 +370,15 @@ impl Default for PlaceholderContext {
 #[derive(Debug, Clone, Default)]
 pub struct PageTemplate {
     /// Header definition
-    pub header: Option<HeaderFooter>,
+    pub header: Option<Artifact>,
     /// Footer definition
-    pub footer: Option<HeaderFooter>,
+    pub footer: Option<Artifact>,
     /// Whether to skip header/footer on first page
     pub skip_first_page: bool,
     /// Optional different template for first page
-    pub first_page_header: Option<HeaderFooter>,
+    pub first_page_header: Option<Artifact>,
     /// Optional different footer for first page
-    pub first_page_footer: Option<HeaderFooter>,
+    pub first_page_footer: Option<Artifact>,
     /// Left margin (points)
     pub margin_left: f32,
     /// Right margin (points)
@@ -391,13 +396,13 @@ impl PageTemplate {
     }
 
     /// Set the header.
-    pub fn header(mut self, header: HeaderFooter) -> Self {
+    pub fn header(mut self, header: Artifact) -> Self {
         self.header = Some(header);
         self
     }
 
     /// Set the footer.
-    pub fn footer(mut self, footer: HeaderFooter) -> Self {
+    pub fn footer(mut self, footer: Artifact) -> Self {
         self.footer = Some(footer);
         self
     }
@@ -409,13 +414,13 @@ impl PageTemplate {
     }
 
     /// Set a different header for the first page.
-    pub fn first_page_header(mut self, header: HeaderFooter) -> Self {
+    pub fn first_page_header(mut self, header: Artifact) -> Self {
         self.first_page_header = Some(header);
         self
     }
 
     /// Set a different footer for the first page.
-    pub fn first_page_footer(mut self, footer: HeaderFooter) -> Self {
+    pub fn first_page_footer(mut self, footer: Artifact) -> Self {
         self.first_page_footer = Some(footer);
         self
     }
@@ -428,7 +433,7 @@ impl PageTemplate {
     }
 
     /// Get the header for a specific page.
-    pub fn get_header(&self, page_number: usize) -> Option<&HeaderFooter> {
+    pub fn get_header(&self, page_number: usize) -> Option<&Artifact> {
         if page_number == 1 {
             if self.skip_first_page && self.first_page_header.is_none() {
                 return None;
@@ -440,7 +445,7 @@ impl PageTemplate {
     }
 
     /// Get the footer for a specific page.
-    pub fn get_footer(&self, page_number: usize) -> Option<&HeaderFooter> {
+    pub fn get_footer(&self, page_number: usize) -> Option<&Artifact> {
         if page_number == 1 {
             if self.skip_first_page && self.first_page_footer.is_none() {
                 return None;
@@ -513,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_hf_element_resolve() {
-        let element = HFElement::center("Page {page} of {pages}");
+        let element = ArtifactElement::center("Page {page} of {pages}");
         let context = PlaceholderContext::new(5, 10);
 
         let resolved = element.resolve(&context);
@@ -521,8 +526,8 @@ mod tests {
     }
 
     #[test]
-    fn test_header_footer_creation() {
-        let hf = HeaderFooter::new()
+    fn test_artifact_creation() {
+        let hf = Artifact::new()
             .with_left("Document Title")
             .with_right("{page}");
 
@@ -534,8 +539,8 @@ mod tests {
     #[test]
     fn test_page_template() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("My Document"))
-            .footer(HeaderFooter::right("{page} of {pages}"));
+            .header(Artifact::center("My Document"))
+            .footer(Artifact::right("{page} of {pages}"));
 
         assert!(template.header.is_some());
         assert!(template.footer.is_some());
@@ -545,7 +550,7 @@ mod tests {
     #[test]
     fn test_skip_first_page() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("Header"))
+            .header(Artifact::center("Header"))
             .skip_first_page();
 
         assert!(template.get_header(1).is_none());
@@ -555,8 +560,8 @@ mod tests {
     #[test]
     fn test_first_page_template() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("Regular Header"))
-            .first_page_header(HeaderFooter::center("Title Page"));
+            .header(Artifact::center("Regular Header"))
+            .first_page_header(Artifact::center("Title Page"));
 
         let first = template.get_header(1).unwrap();
         let second = template.get_header(2).unwrap();
@@ -574,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_hf_style() {
-        let style = HFStyle::new()
+        let style = ArtifactStyle::new()
             .font("Times-Roman", 12.0)
             .bold()
             .color(0.5, 0.5, 0.5)
@@ -592,7 +597,7 @@ mod tests {
             .with_title("My Document")
             .with_author("John Doe");
 
-        let element = HFElement::center("{title} by {author}");
+        let element = ArtifactElement::center("{title} by {author}");
         let resolved = element.resolve(&context);
 
         assert_eq!(resolved, "My Document by John Doe");
