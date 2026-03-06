@@ -9,12 +9,12 @@ fn out_of_range_page_index_returns_err() {
 
 #[test]
 fn empty_bytes_returns_err() {
-    let result = PdfDocument::open_from_bytes(vec![]);
+    let result = PdfDocument::from_bytes(vec![]);
     assert!(result.is_err(), "Empty bytes should return Err");
 }
 
 #[test]
 fn garbage_bytes_returns_err() {
-    let result = PdfDocument::open_from_bytes(vec![0xFF; 100]);
+    let result = PdfDocument::from_bytes(vec![0xFF; 100]);
     assert!(result.is_err(), "Garbage bytes should return Err");
 }

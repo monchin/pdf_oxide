@@ -599,8 +599,8 @@ impl DocumentEditor {
     ///
     /// This is the equivalent of `open()` but works with byte data instead of a file path,
     /// making it suitable for WASM environments where filesystem access is unavailable.
-    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
-        let mut source = PdfDocument::open_from_bytes(data)?;
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let mut source = PdfDocument::from_bytes(data)?;
         let page_count = source.page_count()?;
         let next_id = Self::find_max_object_id(&source) + 1;
         let page_order: Vec<i32> = (0..page_count as i32).collect();
@@ -631,6 +631,12 @@ impl DocumentEditor {
             deleted_form_fields: HashSet::new(),
             acroform_modified: false,
         })
+    }
+
+    /// Deprecated alias for `from_bytes`.
+    #[deprecated(since = "0.3.15", note = "Use `from_bytes` instead")]
+    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
+        Self::from_bytes(data)
     }
 
     /// Save the document to an in-memory byte vector.
@@ -958,7 +964,7 @@ impl DocumentEditor {
     ///
     /// Number of pages merged from the source PDF.
     pub fn merge_from_bytes(&mut self, data: &[u8]) -> Result<usize> {
-        let mut source_doc = PdfDocument::open_from_bytes(data.to_vec())?;
+        let mut source_doc = PdfDocument::from_bytes(data.to_vec())?;
         let source_page_count = source_doc.page_count()?;
 
         if source_page_count == 0 {

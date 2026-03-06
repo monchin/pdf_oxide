@@ -964,7 +964,7 @@ impl Pdf {
 
     fn ensure_editor(&mut self) -> Result<()> {
         if self.editor.is_none() && !self.bytes.is_empty() {
-            let editor = DocumentEditor::open_from_bytes(self.bytes.clone())?;
+            let editor = DocumentEditor::from_bytes(self.bytes.clone())?;
             self.editor = Some(editor);
         }
         Ok(())

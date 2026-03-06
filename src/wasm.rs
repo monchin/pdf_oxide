@@ -64,7 +64,7 @@ impl WasmPdfDocument {
     /// Ensure the editor is initialized, creating it from the raw bytes if needed.
     fn ensure_editor(&mut self) -> Result<Arc<Mutex<DocumentEditor>>, JsValue> {
         if self.editor.is_none() {
-            let editor = DocumentEditor::open_from_bytes(self.raw_bytes.to_vec())
+            let editor = DocumentEditor::from_bytes(self.raw_bytes.to_vec())
                 .map_err(|e| JsValue::from_str(&format!("Failed to open editor: {}", e)))?;
             self.editor = Some(Arc::new(Mutex::new(editor)));
         }
@@ -92,7 +92,7 @@ impl WasmPdfDocument {
         console_error_panic_hook::set_once();
 
         let bytes = data.to_vec();
-        let inner = PdfDocument::open_from_bytes(bytes.clone())
+        let inner = PdfDocument::from_bytes(bytes.clone())
             .map_err(|e| JsValue::from_str(&format!("Failed to open PDF: {}", e)))?;
 
         Ok(WasmPdfDocument {

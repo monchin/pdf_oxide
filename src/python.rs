@@ -61,7 +61,7 @@ impl PyPdfDocument {
             let editor = if let Some(ref path) = self.path {
                 RustDocumentEditor::open(path)
             } else if let Some(ref bytes) = self.raw_bytes {
-                RustDocumentEditor::open_from_bytes(bytes.clone())
+                RustDocumentEditor::from_bytes(bytes.clone())
             } else {
                 return Err(PyRuntimeError::new_err("No path or bytes available for editor"));
             };
@@ -122,7 +122,7 @@ impl PyPdfDocument {
     #[staticmethod]
     fn from_bytes(data: &[u8]) -> PyResult<Self> {
         let bytes = data.to_vec();
-        let doc = RustPdfDocument::open_from_bytes(bytes.clone())
+        let doc = RustPdfDocument::from_bytes(bytes.clone())
             .map_err(|e| PyIOError::new_err(format!("Failed to open PDF from bytes: {}", e)))?;
 
         Ok(PyPdfDocument {
@@ -1340,7 +1340,6 @@ impl PyPdfDocument {
     ///     >>> doc.erase_regions(0, [(72, 700, 200, 792), (300, 300, 500, 400)])
     ///     >>> doc.save("output.pdf")
     fn erase_regions(&mut self, page: usize, rects: Vec<(f32, f32, f32, f32)>) -> PyResult<()> {
-<<<<<<< HEAD
         for (llx, lly, urx, ury) in &rects {
             let rect = crate::geometry::Rect::new(*llx, *lly, *urx - *llx, *ury - *lly);
             self.inner
