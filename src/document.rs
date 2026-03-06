@@ -108,6 +108,8 @@ pub struct PageInfo {
 pub struct PdfDocument {
     /// PDF reader — file-backed on native, memory-backed on WASM.
     reader: PdfReader,
+    /// Raw bytes of the document (kept for duplication/editing)
+    pub source_bytes: Vec<u8>,
     /// PDF version (major, minor)
     version: (u8, u8),
     /// Cross-reference table mapping object IDs to byte offsets
@@ -289,8 +291,11 @@ impl PdfDocument {
     ///
     /// Returns an error if the PDF data is invalid or cannot be parsed.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let source_bytes = data.clone();
         let reader = PdfReader::Memory(BufReader::new(Cursor::new(data)));
-        Self::open_from_reader(reader)
+        let mut doc = Self::open_from_reader(reader)?;
+        doc.source_bytes = source_bytes;
+        Ok(doc)
     }
 
     /// Deprecated alias for `from_bytes`.
@@ -401,6 +406,7 @@ impl PdfDocument {
         // We now initialize eagerly to ensure the handler is ready when needed.
         let mut document = Self {
             reader,
+            source_bytes: Vec::new(),
             version,
             xref,
             trailer,
@@ -3201,6 +3207,8 @@ impl PdfDocument {
 
     /// Replace existing header content with new text.
     ///
+    /// Replace existing header content with new text.
+    ///
     /// Identifies existing text in the header area (top 15%),
     /// marks it for erasure, and provides a way to add new content.
     pub fn edit_header(&mut self, page_index: usize, new_text: &str) -> Result<()> {
@@ -3230,7 +3238,7 @@ impl PdfDocument {
     }
 
     /// Helper to replace content in a specific page area.
-    fn edit_page_area(&mut self, page_index: usize, area: PageArea, new_text: &str) -> Result<()> {
+    fn edit_page_area(&mut self, page_index: usize, area: PageArea, _new_text: &str) -> Result<()> {
         let height = self.get_page_media_box(page_index)?.3;
         let zone = match area {
             PageArea::Header => height * 0.85,
@@ -3248,18 +3256,6 @@ impl PdfDocument {
                 self.erase_region(page_index, span.bbox)?;
             }
         }
-
-        log::info!(
-            "Marked existing {} on page {} for replacement with: {}",
-            if area == PageArea::Header {
-                "header"
-            } else {
-                "footer"
-            },
-            page_index,
-            new_text
-        );
-
         Ok(())
     }
 
@@ -5358,37 +5354,85 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::layout::TextLine>> {
-        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine};
+        use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, TextLine, Word};
+        use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        // Reuse extract_words which now correctly respects reading order
-        let words = self.extract_words(page_index)?;
-        if words.is_empty() {
+        let spans = self.extract_spans(page_index)?;
+        if spans.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Get page media box for layout analysis
+        // Step 1: Partition page into logical blocks (columns/paragraphs) using XY-Cut
+        let strategy = XYCutStrategy::new();
+        let blocks = strategy.partition_region(&spans);
+
+        // Step 2: Compute adaptive parameters
         let media_box = self
             .get_page_media_box(page_index)
             .unwrap_or((0.0, 0.0, 612.0, 792.0));
         let page_bbox =
             crate::geometry::Rect::new(media_box.0, media_box.1, media_box.2, media_box.3);
 
-        // Analyze words for line-level properties
-        let all_chars: Vec<_> = words.iter().flat_map(|w| w.chars.clone()).collect();
+        let all_chars: Vec<_> = spans.iter().flat_map(|s| s.to_chars()).collect();
         let props =
             DocumentProperties::analyze(&all_chars, page_bbox).map_err(Error::LayoutAnalysis)?;
         let params = AdaptiveLayoutParams::from_properties(&props);
 
-        // Cluster words -> lines, respecting the order provided by extract_words
-        let line_clusters = clustering::cluster_words_into_lines(&words, params.line_gap_threshold);
+        // Step 3: Process each block independently
+        let mut all_lines = Vec::new();
 
-        let mut lines = Vec::new();
-        for cluster_indices in line_clusters {
-            let cluster_words: Vec<_> = cluster_indices.iter().map(|&i| words[i].clone()).collect();
-            lines.push(TextLine::new(cluster_words));
+        for block_spans in blocks {
+            let mut block_words = Vec::new();
+
+            // Extract words for this block (same logic as extract_words)
+            for span in block_spans {
+                let span_chars = span.to_chars();
+                if span_chars.is_empty() {
+                    continue;
+                }
+
+                let clusters =
+                    clustering::cluster_chars_into_words(&span_chars, params.word_gap_threshold);
+                for cluster_indices in clusters {
+                    let cluster_chars: Vec<_> = cluster_indices
+                        .iter()
+                        .map(|&i| span_chars[i].clone())
+                        .collect();
+                    let mut current_word_chars = Vec::new();
+                    for c in cluster_chars {
+                        if c.char.is_whitespace() || c.char == '\n' || c.char == '\r' {
+                            if !current_word_chars.is_empty() {
+                                block_words.push(Word::from_chars(current_word_chars));
+                                current_word_chars = Vec::new();
+                            }
+                        } else {
+                            current_word_chars.push(c);
+                        }
+                    }
+                    if !current_word_chars.is_empty() {
+                        block_words.push(Word::from_chars(current_word_chars));
+                    }
+                }
+            }
+
+            if block_words.is_empty() {
+                continue;
+            }
+
+            // Cluster words -> lines WITHIN THIS BLOCK
+            let line_clusters =
+                clustering::cluster_words_into_lines(&block_words, params.line_gap_threshold);
+
+            for cluster_indices in line_clusters {
+                let cluster_words: Vec<_> = cluster_indices
+                    .iter()
+                    .map(|&i| block_words[i].clone())
+                    .collect();
+                all_lines.push(TextLine::new(cluster_words));
+            }
         }
 
-        Ok(lines)
+        Ok(all_lines)
     }
 
     /// Apply intelligent text post-processing to extracted text spans.

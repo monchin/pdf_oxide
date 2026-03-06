@@ -2003,7 +2003,201 @@ impl WasmPdfDocument {
             .apply_all_redactions()
             .map_err(|e| JsValue::from_str(&format!("Failed to apply redactions: {}", e)))
     }
+}
 
+/// Style configuration for header/footer text.
+#[wasm_bindgen(js_name = "ArtifactStyle")]
+#[derive(Clone)]
+pub struct WasmArtifactStyle {
+    inner: crate::writer::ArtifactStyle,
+}
+
+#[wasm_bindgen(js_name = "ArtifactStyle")]
+impl WasmArtifactStyle {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::ArtifactStyle::new(),
+        }
+    }
+
+    pub fn font(mut self, name: &str, size: f32) -> Self {
+        self.inner = self.inner.font(name, size);
+        self
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.inner = self.inner.bold();
+        self
+    }
+
+    pub fn color(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.inner = self.inner.color(r, g, b);
+        self
+    }
+}
+
+/// A header or footer artifact definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmArtifact {
+    inner: crate::writer::Artifact,
+}
+
+#[wasm_bindgen]
+impl WasmArtifact {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::Artifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmArtifact)]
+    pub fn left(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmArtifact)]
+    pub fn center(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmArtifact)]
+    pub fn right(text: &str) -> WasmArtifact {
+        WasmArtifact {
+            inner: crate::writer::Artifact::right(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "withStyle")]
+    pub fn with_style(mut self, style: &WasmArtifactStyle) -> Self {
+        self.inner = self.inner.with_style(style.inner.clone());
+        self
+    }
+
+    #[wasm_bindgen(js_name = "withOffset")]
+    pub fn with_offset(mut self, offset: f32) -> Self {
+        self.inner = self.inner.with_offset(offset);
+        self
+    }
+}
+
+/// A header definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmHeader {
+    inner: WasmArtifact,
+}
+
+#[wasm_bindgen]
+impl WasmHeader {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: WasmArtifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmHeader)]
+    pub fn left(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmHeader)]
+    pub fn center(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmHeader)]
+    pub fn right(text: &str) -> WasmHeader {
+        WasmHeader {
+            inner: WasmArtifact::right(text),
+        }
+    }
+}
+
+/// A footer definition.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmFooter {
+    inner: WasmArtifact,
+}
+
+#[wasm_bindgen]
+impl WasmFooter {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: WasmArtifact::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "left", static_method_of = WasmFooter)]
+    pub fn left(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::left(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "center", static_method_of = WasmFooter)]
+    pub fn center(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::center(text),
+        }
+    }
+
+    #[wasm_bindgen(js_name = "right", static_method_of = WasmFooter)]
+    pub fn right(text: &str) -> WasmFooter {
+        WasmFooter {
+            inner: WasmArtifact::right(text),
+        }
+    }
+}
+
+/// A complete page template with header and footer.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmPageTemplate {
+    inner: crate::writer::PageTemplate,
+}
+
+#[wasm_bindgen]
+impl WasmPageTemplate {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::writer::PageTemplate::new(),
+        }
+    }
+
+    pub fn header(mut self, header: &WasmArtifact) -> Self {
+        self.inner = self.inner.header(header.inner.clone());
+        self
+    }
+
+    pub fn footer(mut self, footer: &WasmArtifact) -> Self {
+        self.inner = self.inner.footer(footer.inner.clone());
+        self
+    }
+
+    #[wasm_bindgen(js_name = "skipFirstPage")]
+    pub fn skip_first_page(mut self) -> Self {
+        self.inner = self.inner.skip_first_page();
+        self
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPdfDocument {
     // ========================================================================
     // Group 7: Editing — Image Manipulation
     // ========================================================================

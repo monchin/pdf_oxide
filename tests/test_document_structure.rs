@@ -5,9 +5,9 @@
 use pdf_oxide::geometry::Rect;
 use pdf_oxide::object::ObjectRef;
 use pdf_oxide::writer::{
-    AnnotationBuilder, BorderStyle, FitMode, HFAlignment, HFElement, HFStyle, HeaderFooter,
-    HighlightMode, LinkAction, LinkAnnotation, OutlineBuilder, OutlineDestination, OutlineItem,
-    OutlineStyle, PageNumberFormat, PageTemplate, Placeholder, PlaceholderContext,
+    AnnotationBuilder, Artifact, ArtifactAlignment, ArtifactElement, ArtifactStyle, BorderStyle,
+    FitMode, HighlightMode, LinkAction, LinkAnnotation, OutlineBuilder, OutlineDestination,
+    OutlineItem, OutlineStyle, PageNumberFormat, PageTemplate, Placeholder, PlaceholderContext,
 };
 
 // =============================================================================
@@ -328,19 +328,19 @@ mod template_tests {
 
     #[test]
     fn test_hf_element_alignments() {
-        let left = HFElement::left("Left text");
-        assert_eq!(left.alignment, HFAlignment::Left);
+        let left = ArtifactElement::left("Left text");
+        assert_eq!(left.alignment, ArtifactAlignment::Left);
 
-        let center = HFElement::center("Center text");
-        assert_eq!(center.alignment, HFAlignment::Center);
+        let center = ArtifactElement::center("Center text");
+        assert_eq!(center.alignment, ArtifactAlignment::Center);
 
-        let right = HFElement::right("Right text");
-        assert_eq!(right.alignment, HFAlignment::Right);
+        let right = ArtifactElement::right("Right text");
+        assert_eq!(right.alignment, ArtifactAlignment::Right);
     }
 
     #[test]
     fn test_hf_element_resolve() {
-        let element = HFElement::center("Page {page} of {pages}");
+        let element = ArtifactElement::center("Page {page} of {pages}");
         let context = PlaceholderContext::new(5, 20);
 
         let resolved = element.resolve(&context);
@@ -349,7 +349,7 @@ mod template_tests {
 
     #[test]
     fn test_hf_element_resolve_metadata() {
-        let element = HFElement::center("{title} by {author}");
+        let element = ArtifactElement::center("{title} by {author}");
         let context = PlaceholderContext::new(1, 1)
             .with_title("My Document")
             .with_author("John Doe");
@@ -360,7 +360,7 @@ mod template_tests {
 
     #[test]
     fn test_header_footer_creation() {
-        let hf = HeaderFooter::new()
+        let hf = Artifact::new()
             .with_left("Document Title")
             .with_center("Confidential")
             .with_right("{page}");
@@ -373,27 +373,27 @@ mod template_tests {
 
     #[test]
     fn test_header_footer_shorthand() {
-        let left_hf = HeaderFooter::left("Left only");
+        let left_hf = Artifact::left("Left only");
         assert!(left_hf.left.is_some());
         assert!(left_hf.center.is_none());
         assert!(left_hf.right.is_none());
 
-        let center_hf = HeaderFooter::center("Center only");
+        let center_hf = Artifact::center("Center only");
         assert!(center_hf.center.is_some());
 
-        let right_hf = HeaderFooter::right("Right only");
+        let right_hf = Artifact::right("Right only");
         assert!(right_hf.right.is_some());
     }
 
     #[test]
     fn test_header_footer_style() {
-        let style = HFStyle::new()
+        let style = ArtifactStyle::new()
             .font("Times-Roman", 10.0)
             .bold()
             .color(0.5, 0.5, 0.5)
             .with_separator(0.5);
 
-        let hf = HeaderFooter::center("Header").with_style(style);
+        let hf = Artifact::center("Header").with_style(style);
 
         assert_eq!(hf.style.font_name, "Times-Roman");
         assert_eq!(hf.style.font_size, 10.0);
@@ -402,15 +402,15 @@ mod template_tests {
 
     #[test]
     fn test_header_footer_offset() {
-        let hf = HeaderFooter::center("Header").with_offset(50.0);
+        let hf = Artifact::center("Header").with_offset(50.0);
         assert_eq!(hf.offset, 50.0);
     }
 
     #[test]
     fn test_page_template_basic() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("My Document"))
-            .footer(HeaderFooter::right("{page} of {pages}"));
+            .header(Artifact::center("My Document"))
+            .footer(Artifact::right("{page} of {pages}"));
 
         assert!(template.header.is_some());
         assert!(template.footer.is_some());
@@ -420,7 +420,7 @@ mod template_tests {
     #[test]
     fn test_page_template_skip_first() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("Header"))
+            .header(Artifact::center("Header"))
             .skip_first_page();
 
         assert!(template.get_header(1).is_none());
@@ -430,8 +430,8 @@ mod template_tests {
     #[test]
     fn test_page_template_different_first_page() {
         let template = PageTemplate::new()
-            .header(HeaderFooter::center("Regular Header"))
-            .first_page_header(HeaderFooter::center("Title Page Header"));
+            .header(Artifact::center("Regular Header"))
+            .first_page_header(Artifact::center("Title Page Header"));
 
         let first = template.get_header(1).unwrap();
         let second = template.get_header(2).unwrap();
@@ -473,8 +473,8 @@ mod template_tests {
     #[test]
     fn test_page_template_footer_variations() {
         // Test different footer configurations
-        let footer1 = HeaderFooter::center(PageNumberFormat::page_x_of_y());
-        let footer2 = HeaderFooter::new().with_left("{date}").with_right("{page}");
+        let footer1 = Artifact::center(PageNumberFormat::page_x_of_y());
+        let footer2 = Artifact::new().with_left("{date}").with_right("{page}");
 
         assert!(footer1.center.is_some());
         assert!(footer2.left.is_some());
@@ -483,7 +483,7 @@ mod template_tests {
 
     #[test]
     fn test_header_footer_elements() {
-        let hf = HeaderFooter::new()
+        let hf = Artifact::new()
             .with_left("Left")
             .with_center("Center")
             .with_right("Right");
@@ -494,8 +494,8 @@ mod template_tests {
 
     #[test]
     fn test_hf_element_with_style() {
-        let style = HFStyle::new().font("Courier", 8.0);
-        let element = HFElement::center("Code").with_style(style);
+        let style = ArtifactStyle::new().font("Courier", 8.0);
+        let element = ArtifactElement::center("Code").with_style(style);
 
         assert!(element.style.is_some());
         let s = element.style.as_ref().unwrap();
@@ -531,13 +531,9 @@ mod integration_tests {
 
         // Create page template
         let template = PageTemplate::new()
-            .header(
-                HeaderFooter::new()
-                    .with_left("{title}")
-                    .with_right("{date}"),
-            )
-            .footer(HeaderFooter::center("{page} / {pages}"))
-            .first_page_header(HeaderFooter::center("Document Title"))
+            .header(Artifact::new().with_left("{title}").with_right("{date}"))
+            .footer(Artifact::center("{page} / {pages}"))
+            .first_page_header(Artifact::center("Document Title"))
             .skip_first_page();
 
         // Verify structures

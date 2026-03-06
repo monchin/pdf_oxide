@@ -124,8 +124,8 @@ pub use outline_builder::{
 };
 pub use page_labels::PageLabelsBuilder;
 pub use page_template::{
-    HFAlignment, HFElement, HFStyle, HeaderFooter, PageNumberFormat, PageTemplate, Placeholder,
-    PlaceholderContext,
+    Artifact, ArtifactAlignment, ArtifactElement, ArtifactStyle, Footer, Header, PageNumberFormat,
+    PageTemplate, Placeholder, PlaceholderContext,
 };
 pub use pattern::{
     PatternPaintType, PatternPresets, PatternTilingType, ShadingPatternBuilder,

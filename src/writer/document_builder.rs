@@ -782,11 +782,11 @@ impl DocumentBuilder {
                         );
 
                         let x = match element.alignment {
-                            crate::writer::HFAlignment::Left => template.margin_left,
-                            crate::writer::HFAlignment::Center => {
+                            crate::writer::ArtifactAlignment::Left => template.margin_left,
+                            crate::writer::ArtifactAlignment::Center => {
                                 (page_data.width - text_width) / 2.0
                             },
-                            crate::writer::HFAlignment::Right => {
+                            crate::writer::ArtifactAlignment::Right => {
                                 page_data.width - template.margin_right - text_width
                             },
                         };
@@ -835,11 +835,11 @@ impl DocumentBuilder {
                         );
 
                         let x = match element.alignment {
-                            crate::writer::HFAlignment::Left => template.margin_left,
-                            crate::writer::HFAlignment::Center => {
+                            crate::writer::ArtifactAlignment::Left => template.margin_left,
+                            crate::writer::ArtifactAlignment::Center => {
                                 (page_data.width - text_width) / 2.0
                             },
-                            crate::writer::HFAlignment::Right => {
+                            crate::writer::ArtifactAlignment::Right => {
                                 page_data.width - template.margin_right - text_width
                             },
                         };

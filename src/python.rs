@@ -5271,18 +5271,18 @@ impl PyPatternPresets {
 }
 
 /// Style configuration for header/footer text.
-#[pyclass(name = "HFStyle")]
+#[pyclass(name = "ArtifactStyle")]
 #[derive(Clone)]
-pub struct PyHFStyle {
-    pub inner: crate::writer::HFStyle,
+pub struct PyArtifactStyle {
+    pub inner: crate::writer::ArtifactStyle,
 }
 
 #[pymethods]
-impl PyHFStyle {
+impl PyArtifactStyle {
     #[new]
     fn new() -> Self {
         Self {
-            inner: crate::writer::HFStyle::default(),
+            inner: crate::writer::ArtifactStyle::default(),
         }
     }
 
@@ -5315,18 +5315,18 @@ impl PyHFStyle {
 }
 
 /// A header or footer definition.
-#[pyclass(name = "HeaderFooter")]
+#[pyclass(name = "Artifact")]
 #[derive(Clone)]
-pub struct PyHeaderFooter {
-    pub inner: crate::writer::HeaderFooter,
+pub struct PyArtifact {
+    pub inner: crate::writer::Artifact,
 }
 
 #[pymethods]
-impl PyHeaderFooter {
+impl PyArtifact {
     #[new]
     fn new() -> Self {
         Self {
-            inner: crate::writer::HeaderFooter::new(),
+            inner: crate::writer::Artifact::new(),
         }
     }
 
@@ -5334,7 +5334,7 @@ impl PyHeaderFooter {
     #[staticmethod]
     fn center(text: &str) -> Self {
         Self {
-            inner: crate::writer::HeaderFooter::center(text),
+            inner: crate::writer::Artifact::center(text),
         }
     }
 
@@ -5342,7 +5342,7 @@ impl PyHeaderFooter {
     #[staticmethod]
     fn left(text: &str) -> Self {
         Self {
-            inner: crate::writer::HeaderFooter::left(text),
+            inner: crate::writer::Artifact::left(text),
         }
     }
 
@@ -5350,7 +5350,7 @@ impl PyHeaderFooter {
     #[staticmethod]
     fn right(text: &str) -> Self {
         Self {
-            inner: crate::writer::HeaderFooter::right(text),
+            inner: crate::writer::Artifact::right(text),
         }
     }
 
@@ -5375,7 +5375,7 @@ impl PyHeaderFooter {
     /// Set the default style.
     fn with_style<'a>(
         mut slf: PyRefMut<'a, Self>,
-        style: &PyHFStyle,
+        style: &PyArtifactStyle,
     ) -> PyResult<PyRefMut<'a, Self>> {
         slf.inner = slf.inner.clone().with_style(style.inner.clone());
         Ok(slf)
@@ -5384,6 +5384,170 @@ impl PyHeaderFooter {
     /// Set the vertical offset from page edge.
     fn with_offset<'a>(mut slf: PyRefMut<'a, Self>, offset: f32) -> PyResult<PyRefMut<'a, Self>> {
         slf.inner = slf.inner.clone().with_offset(offset);
+        Ok(slf)
+    }
+}
+
+/// A header definition.
+#[pyclass(name = "Header")]
+#[derive(Clone)]
+pub struct PyHeader {
+    pub inner: PyArtifact,
+}
+
+#[pymethods]
+impl PyHeader {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::new(),
+            },
+        }
+    }
+
+    /// Create with a single centered element.
+    #[staticmethod]
+    fn center(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::center(text),
+            },
+        }
+    }
+
+    /// Create with a single left-aligned element.
+    #[staticmethod]
+    fn left(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::left(text),
+            },
+        }
+    }
+
+    /// Create with a single right-aligned element.
+    #[staticmethod]
+    fn right(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::right(text),
+            },
+        }
+    }
+
+    /// Set the left element text.
+    fn with_left<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_left(text);
+        Ok(slf)
+    }
+
+    /// Set the center element text.
+    fn with_center<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_center(text);
+        Ok(slf)
+    }
+
+    /// Set the right element text.
+    fn with_right<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_right(text);
+        Ok(slf)
+    }
+
+    /// Set the default style.
+    fn with_style<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        style: &PyArtifactStyle,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_style(style.inner.clone());
+        Ok(slf)
+    }
+
+    /// Set the vertical offset from page edge.
+    fn with_offset<'a>(mut slf: PyRefMut<'a, Self>, offset: f32) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_offset(offset);
+        Ok(slf)
+    }
+}
+
+/// A footer definition.
+#[pyclass(name = "Footer")]
+#[derive(Clone)]
+pub struct PyFooter {
+    pub inner: PyArtifact,
+}
+
+#[pymethods]
+impl PyFooter {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::new(),
+            },
+        }
+    }
+
+    /// Create with a single centered element.
+    #[staticmethod]
+    fn center(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::center(text),
+            },
+        }
+    }
+
+    /// Create with a single left-aligned element.
+    #[staticmethod]
+    fn left(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::left(text),
+            },
+        }
+    }
+
+    /// Create with a single right-aligned element.
+    #[staticmethod]
+    fn right(text: &str) -> Self {
+        Self {
+            inner: PyArtifact {
+                inner: crate::writer::Artifact::right(text),
+            },
+        }
+    }
+
+    /// Set the left element text.
+    fn with_left<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_left(text);
+        Ok(slf)
+    }
+
+    /// Set the center element text.
+    fn with_center<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_center(text);
+        Ok(slf)
+    }
+
+    /// Set the right element text.
+    fn with_right<'a>(mut slf: PyRefMut<'a, Self>, text: &str) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_right(text);
+        Ok(slf)
+    }
+
+    /// Set the default style.
+    fn with_style<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        style: &PyArtifactStyle,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_style(style.inner.clone());
+        Ok(slf)
+    }
+
+    /// Set the vertical offset from page edge.
+    fn with_offset<'a>(mut slf: PyRefMut<'a, Self>, offset: f32) -> PyResult<PyRefMut<'a, Self>> {
+        slf.inner.inner = slf.inner.inner.clone().with_offset(offset);
         Ok(slf)
     }
 }
@@ -5407,18 +5571,32 @@ impl PyPageTemplate {
     /// Set the header.
     fn header<'a>(
         mut slf: PyRefMut<'a, Self>,
-        header: &PyHeaderFooter,
+        header: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'a, Self>> {
-        slf.inner = slf.inner.clone().header(header.inner.clone());
+        let artifact = if let Ok(h) = header.extract::<PyHeader>() {
+            h.inner.inner.clone()
+        } else if let Ok(a) = header.extract::<PyArtifact>() {
+            a.inner.clone()
+        } else {
+            return Err(PyRuntimeError::new_err("Expected Header or Artifact object"));
+        };
+        slf.inner = slf.inner.clone().header(artifact);
         Ok(slf)
     }
 
     /// Set the footer.
     fn footer<'a>(
         mut slf: PyRefMut<'a, Self>,
-        footer: &PyHeaderFooter,
+        footer: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'a, Self>> {
-        slf.inner = slf.inner.clone().footer(footer.inner.clone());
+        let artifact = if let Ok(f) = footer.extract::<PyFooter>() {
+            f.inner.inner.clone()
+        } else if let Ok(a) = footer.extract::<PyArtifact>() {
+            a.inner.clone()
+        } else {
+            return Err(PyRuntimeError::new_err("Expected Footer or Artifact object"));
+        };
+        slf.inner = slf.inner.clone().footer(artifact);
         Ok(slf)
     }
 
@@ -5431,18 +5609,32 @@ impl PyPageTemplate {
     /// Set a different header for the first page.
     fn first_page_header<'a>(
         mut slf: PyRefMut<'a, Self>,
-        header: &PyHeaderFooter,
+        header: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'a, Self>> {
-        slf.inner = slf.inner.clone().first_page_header(header.inner.clone());
+        let artifact = if let Ok(h) = header.extract::<PyHeader>() {
+            h.inner.inner.clone()
+        } else if let Ok(a) = header.extract::<PyArtifact>() {
+            a.inner.clone()
+        } else {
+            return Err(PyRuntimeError::new_err("Expected Header or Artifact object"));
+        };
+        slf.inner = slf.inner.clone().first_page_header(artifact);
         Ok(slf)
     }
 
     /// Set a different footer for the first page.
     fn first_page_footer<'a>(
         mut slf: PyRefMut<'a, Self>,
-        footer: &PyHeaderFooter,
+        footer: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'a, Self>> {
-        slf.inner = slf.inner.clone().first_page_footer(footer.inner.clone());
+        let artifact = if let Ok(f) = footer.extract::<PyFooter>() {
+            f.inner.inner.clone()
+        } else if let Ok(a) = footer.extract::<PyArtifact>() {
+            a.inner.clone()
+        } else {
+            return Err(PyRuntimeError::new_err("Expected Footer or Artifact object"));
+        };
+        slf.inner = slf.inner.clone().first_page_footer(artifact);
         Ok(slf)
     }
 }
@@ -5492,8 +5684,10 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Page Templates
     m.add_class::<PyPageTemplate>()?;
-    m.add_class::<PyHeaderFooter>()?;
-    m.add_class::<PyHFStyle>()?;
+    m.add_class::<PyArtifact>()?;
+    m.add_class::<PyHeader>()?;
+    m.add_class::<PyFooter>()?;
+    m.add_class::<PyArtifactStyle>()?;
 
     // Office conversion (optional, requires office feature)
     m.add_class::<PyOfficeConverter>()?;

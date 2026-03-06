@@ -595,6 +595,40 @@ impl DocumentEditor {
         })
     }
 
+    /// Open a PDF document for editing from an existing PdfDocument object.
+    pub fn from_document(mut source: PdfDocument) -> Result<Self> {
+        let page_count = source.page_count()?;
+        let next_id = Self::find_max_object_id(&source) + 1;
+        let page_order: Vec<i32> = (0..page_count as i32).collect();
+
+        Ok(Self {
+            source,
+            source_path: String::new(),
+            modified_objects: HashMap::new(),
+            new_objects: Vec::new(),
+            next_object_id: next_id,
+            modified_info: None,
+            page_order,
+            original_page_count: page_count,
+            is_modified: false,
+            modified_content: HashMap::new(),
+            resource_manager: ResourceManager::new(),
+            structure_modified: false,
+            modified_annotations: HashMap::new(),
+            modified_page_props: HashMap::new(),
+            erase_regions: HashMap::new(),
+            flatten_annotations_pages: std::collections::HashSet::new(),
+            apply_redactions_pages: std::collections::HashSet::new(),
+            image_modifications: HashMap::new(),
+            flatten_forms_pages: std::collections::HashSet::new(),
+            remove_acroform: false,
+            embedded_files: Vec::new(),
+            modified_form_fields: HashMap::new(),
+            deleted_form_fields: HashSet::new(),
+            acroform_modified: false,
+        })
+    }
+
     /// Open a PDF document for editing from in-memory bytes.
     ///
     /// This is the equivalent of `open()` but works with byte data instead of a file path,

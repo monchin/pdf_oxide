@@ -48,9 +48,11 @@ from .pdf_oxide import (
     # Advanced Graphics
     Color,
     ExtGState,
-    HeaderFooter,
     # Page Templates
-    HFStyle,
+    Artifact,
+    Header,
+    Footer,
+    ArtifactStyle,
     LinearGradient,
     LineCap,
     LineJoin,
@@ -85,8 +87,10 @@ __all__ = [
     "LineJoin",
     "PatternPresets",
     # Page Templates
-    "HFStyle",
-    "HeaderFooter",
+    "ArtifactStyle",
+    "Artifact",
+    "Header",
+    "Footer",
     "PageTemplate",
     # Extraction
     "TextSpan",
