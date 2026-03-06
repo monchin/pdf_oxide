@@ -194,42 +194,36 @@ class PdfDocument:
         """
         ...
 
-    def edit_header(self, page: int, new_text: str) -> None:
+    def erase_header(self, page: int) -> None:
         """
-        Replace existing header content with new text.
+        Erase existing header content.
 
-        Heuristically identifies existing text in the header area (top 15%),
-        marks it for erasure, and provides a way to add new content.
+        Heuristically identifies existing text in the header area (top 15%)
+        and marks it for erasure.
 
         Args:
             page: Page index (0-based)
-            new_text: Replacement text
         """
         ...
 
-    def edit_footer(self, page: int, new_text: str) -> None:
+    def erase_footer(self, page: int) -> None:
         """
-        Replace existing footer content with new text.
+        Erase existing footer content.
 
-        Heuristically identifies existing text in the footer area (bottom 15%),
-        marks it for erasure, and provides a way to add new content.
+        Heuristically identifies existing text in the footer area (bottom 15%)
+        and marks it for erasure.
 
         Args:
             page: Page index (0-based)
-            new_text: Replacement text
         """
         ...
 
-    def edit_artifacts(self, page: int, header_text: str, footer_text: str) -> None:
+    def erase_artifacts(self, page: int) -> None:
         """
-        Replace both header and footer content with new text.
-
-        This is a convenience method that calls both edit_header and edit_footer.
+        Erase both header and footer content.
 
         Args:
             page: Page index (0-based)
-            header_text: Replacement header text
-            footer_text: Replacement footer text
         """
         ...
 

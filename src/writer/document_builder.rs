@@ -805,6 +805,14 @@ impl DocumentBuilder {
                                     g: style.color.1,
                                     b: style.color.2,
                                 },
+                                weight: match style.font_weight {
+                                    crate::writer::font_manager::FontWeight::Normal => {
+                                        crate::layout::text_block::FontWeight::Normal
+                                    },
+                                    crate::writer::font_manager::FontWeight::Bold => {
+                                        crate::layout::text_block::FontWeight::Bold
+                                    },
+                                },
                                 ..Default::default()
                             },
                             reading_order: None,
@@ -857,6 +865,14 @@ impl DocumentBuilder {
                                     r: style.color.0,
                                     g: style.color.1,
                                     b: style.color.2,
+                                },
+                                weight: match style.font_weight {
+                                    crate::writer::font_manager::FontWeight::Normal => {
+                                        crate::layout::text_block::FontWeight::Normal
+                                    },
+                                    crate::writer::font_manager::FontWeight::Bold => {
+                                        crate::layout::text_block::FontWeight::Bold
+                                    },
                                 },
                                 ..Default::default()
                             },

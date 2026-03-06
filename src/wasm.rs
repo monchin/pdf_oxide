@@ -244,55 +244,44 @@ impl WasmPdfDocument {
             .map_err(|e| JsValue::from_str(&format!("Artifact removal failed: {}", e)))
     }
 
-    /// Replace existing header content with new text.
+    /// Erase existing header content.
     ///
-    /// Identifies existing text in the header area (top 15%),
-    /// marks it for erasure, and provides a way to add new content.
+    /// Identifies existing text in the header area (top 15%) and marks it for erasure.
     ///
     /// @param page_index - Zero-based page number
-    /// @param new_text - Replacement text
-    #[wasm_bindgen(js_name = "editHeader")]
-    pub fn edit_header(&mut self, page_index: usize, new_text: &str) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = "eraseHeader")]
+    pub fn erase_header(&mut self, page_index: usize) -> Result<(), JsValue> {
         self.inner
             .lock()
             .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .edit_header(page_index, new_text)
-            .map_err(|e| JsValue::from_str(&format!("Failed to edit header: {}", e)))
+            .erase_header(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase header: {}", e)))
     }
 
-    /// Replace existing footer content with new text.
+    /// Erase existing footer content.
     ///
-    /// Identifies existing text in the footer area (bottom 15%),
-    /// marks it for erasure, and provides a way to add new content.
+    /// Identifies existing text in the footer area (bottom 15%) and marks it for erasure.
     ///
     /// @param page_index - Zero-based page number
-    /// @param new_text - Replacement text
-    #[wasm_bindgen(js_name = "editFooter")]
-    pub fn edit_footer(&mut self, page_index: usize, new_text: &str) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = "eraseFooter")]
+    pub fn erase_footer(&mut self, page_index: usize) -> Result<(), JsValue> {
         self.inner
             .lock()
             .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .edit_footer(page_index, new_text)
-            .map_err(|e| JsValue::from_str(&format!("Failed to edit footer: {}", e)))
+            .erase_footer(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase footer: {}", e)))
     }
 
-    /// Replace both header and footer content with new text.
+    /// Erase both header and footer content.
     ///
     /// @param page_index - Zero-based page number
-    /// @param header_text - Replacement header text
-    /// @param footer_text - Replacement footer text
-    #[wasm_bindgen(js_name = "editArtifacts")]
-    pub fn edit_artifacts(
-        &mut self,
-        page_index: usize,
-        header_text: &str,
-        footer_text: &str,
-    ) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = "eraseArtifacts")]
+    pub fn erase_artifacts(&mut self, page_index: usize) -> Result<(), JsValue> {
         self.inner
             .lock()
             .map_err(|_| JsValue::from_str("Mutex lock failed"))?
-            .edit_artifacts(page_index, header_text, footer_text)
-            .map_err(|e| JsValue::from_str(&format!("Failed to edit artifacts: {}", e)))
+            .erase_artifacts(page_index)
+            .map_err(|e| JsValue::from_str(&format!("Failed to erase artifacts: {}", e)))
     }
 
     /// Focus extraction on a specific rectangular region of a page (v0.3.14).

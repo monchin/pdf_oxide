@@ -4203,7 +4203,7 @@ impl TextExtractor {
                 self.marked_content_stack.push(MarkedContentContext {
                     tag: tag.clone(),
                     is_artifact,
-                    artifact_type: None, // BMC doesn't have artifact type properties
+                    artifact_type: None, // No artifact classification; None for backward compatibility
                     actual_text: None,   // BMC doesn't have ActualText
                     expansion: None,     // BMC doesn't have expansion
                 });

@@ -3157,7 +3157,15 @@ impl PdfDocument {
         }
 
         let mut occurrences: HashMap<String, HashSet<usize>> = HashMap::new();
-        let min_occurrences = (page_count as f32 * threshold).ceil() as usize;
+
+        // Sanitize threshold to avoid min_occurrences becoming 0 for invalid inputs.
+        let clamped_threshold = if threshold.is_finite() {
+            threshold.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let raw_min = (page_count as f32 * clamped_threshold).ceil();
+        let min_occurrences = if raw_min < 1.0 { 1 } else { raw_min as usize };
 
         // Cache spans per page to avoid redundant extraction in Pass 2
         let mut page_spans: HashMap<usize, Vec<crate::layout::TextSpan>> = HashMap::new();
@@ -3205,40 +3213,31 @@ impl PdfDocument {
         Ok(removed_count)
     }
 
-    /// Replace existing header content with new text.
+    /// Erase existing header content.
     ///
-    /// Replace existing header content with new text.
-    ///
-    /// Identifies existing text in the header area (top 15%),
-    /// marks it for erasure, and provides a way to add new content.
-    pub fn edit_header(&mut self, page_index: usize, new_text: &str) -> Result<()> {
-        self.edit_page_area(page_index, PageArea::Header, new_text)
+    /// Identifies existing text in the header area (top 15%) and marks it for erasure.
+    pub fn erase_header(&mut self, page_index: usize) -> Result<()> {
+        self.erase_page_area_content(page_index, PageArea::Header)
     }
 
-    /// Replace existing footer content with new text.
+    /// Erase existing footer content.
     ///
-    /// Identifies existing text in the footer area (bottom 15%),
-    /// marks it for erasure, and provides a way to add new content.
-    pub fn edit_footer(&mut self, page_index: usize, new_text: &str) -> Result<()> {
-        self.edit_page_area(page_index, PageArea::Footer, new_text)
+    /// Identifies existing text in the footer area (bottom 15%) and marks it for erasure.
+    pub fn erase_footer(&mut self, page_index: usize) -> Result<()> {
+        self.erase_page_area_content(page_index, PageArea::Footer)
     }
 
-    /// Replace both header and footer content with new text.
+    /// Erase both header and footer content.
     ///
-    /// This is a convenience method that calls both edit_header and edit_footer.
-    pub fn edit_artifacts(
-        &mut self,
-        page_index: usize,
-        header_text: &str,
-        footer_text: &str,
-    ) -> Result<()> {
-        self.edit_header(page_index, header_text)?;
-        self.edit_footer(page_index, footer_text)?;
+    /// This is a convenience method that calls both erase_header and erase_footer.
+    pub fn erase_artifacts(&mut self, page_index: usize) -> Result<()> {
+        self.erase_header(page_index)?;
+        self.erase_footer(page_index)?;
         Ok(())
     }
 
-    /// Helper to replace content in a specific page area.
-    fn edit_page_area(&mut self, page_index: usize, area: PageArea, _new_text: &str) -> Result<()> {
+    /// Helper to erase content in a specific page area.
+    fn erase_page_area_content(&mut self, page_index: usize, area: PageArea) -> Result<()> {
         let height = self.get_page_media_box(page_index)?.3;
         let zone = match area {
             PageArea::Header => height * 0.85,

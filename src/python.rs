@@ -287,63 +287,68 @@ impl PyPdfDocument {
             for (page, regions) in self.inner.erase_regions.iter() {
                 editor.clear_erase_regions(*page);
                 for rect in regions {
-                    let _ = editor.erase_region(*page, [rect.x, rect.y, rect.width, rect.height]);
+                    let _ = editor.erase_region(
+                        *page,
+                        [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    /// Replace existing header content with new text.
+    /// Erase existing header content.
     ///
-    /// Identifies existing text in the header area (top 15%),
-    /// marks it for erasure, and provides a way to add new content.
+    /// Identifies existing text in the header area (top 15%) and marks it for erasure.
     ///
     /// Args:
     ///     page (int): Page index (0-based)
-    ///     new_text (str): Replacement text
-    fn edit_header(&mut self, page: usize, new_text: &str) -> PyResult<()> {
+    fn erase_header(&mut self, page: usize) -> PyResult<()> {
         // Ensure editor is active so we can track the addition even if erasure is empty
         self.ensure_editor()?;
 
         self.inner
-            .edit_header(page, new_text)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to edit header: {}", e)))?;
+            .erase_header(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to erase header: {}", e)))?;
 
         // Also update editor if it exists
         if let Some(ref mut editor) = self.editor {
             editor.clear_erase_regions(page);
             if let Some(regions) = self.inner.erase_regions.get(&page) {
                 for rect in regions {
-                    let _ = editor.erase_region(page, [rect.x, rect.y, rect.width, rect.height]);
+                    let _ = editor.erase_region(
+                        page,
+                        [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    /// Replace existing footer content with new text.
+    /// Erase existing footer content.
     ///
-    /// Identifies existing text in the footer area (bottom 15%),
-    /// marks it for erasure, and provides a way to add new content.
+    /// Identifies existing text in the footer area (bottom 15%) and marks it for erasure.
     ///
     /// Args:
     ///     page (int): Page index (0-based)
-    ///     new_text (str): Replacement text
-    fn edit_footer(&mut self, page: usize, new_text: &str) -> PyResult<()> {
+    fn erase_footer(&mut self, page: usize) -> PyResult<()> {
         // Ensure editor is active so we can track the addition even if erasure is empty
         self.ensure_editor()?;
 
         self.inner
-            .edit_footer(page, new_text)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to edit footer: {}", e)))?;
+            .erase_footer(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to erase footer: {}", e)))?;
 
         // Also update editor if it exists
         if let Some(ref mut editor) = self.editor {
             editor.clear_erase_regions(page);
             if let Some(regions) = self.inner.erase_regions.get(&page) {
                 for rect in regions {
-                    let _ = editor.erase_region(page, [rect.x, rect.y, rect.width, rect.height]);
+                    let _ = editor.erase_region(
+                        page,
+                        [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+                    );
                 }
             }
         }
@@ -351,27 +356,21 @@ impl PyPdfDocument {
     }
 
     /// Replace both header and footer content with new text.
+    /// Erase both header and footer content.
     ///
     /// Args:
     ///     page (int): Page index (0-based)
-    ///     header_text (str): Replacement header text
-    ///     footer_text (str): Replacement footer text
-    fn edit_artifacts(
-        &mut self,
-        page: usize,
-        header_text: &str,
-        footer_text: &str,
-    ) -> PyResult<()> {
+    fn erase_artifacts(&mut self, page: usize) -> PyResult<()> {
         self.inner
-            .edit_artifacts(page, header_text, footer_text)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to edit artifacts: {}", e)))
+            .erase_artifacts(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to erase artifacts: {}", e)))
     }
 
     /// Focus extraction on a specific rectangular region of a page (v0.3.14).
     ///
     /// Args:
     ///     page (int): Page index (0-based)
-    ///     bbox (tuple): (x, y, width, height) in points
+    ///     bbox (tuple): (llx, lly, urx, ury) in points
     ///
     /// Returns:
     ///     PdfPageRegion: A region object for scoped extraction
@@ -925,7 +924,10 @@ impl PyPdfDocument {
             for (page, regions) in self.inner.erase_regions.iter() {
                 editor.clear_erase_regions(*page);
                 for rect in regions {
-                    let _ = editor.erase_region(*page, [rect.x, rect.y, rect.width, rect.height]);
+                    let _ = editor.erase_region(
+                        *page,
+                        [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+                    );
                 }
             }
         }
