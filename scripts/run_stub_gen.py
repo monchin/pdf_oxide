@@ -6,6 +6,7 @@ Windows it must find e.g. python3xx.dll. This script prepends all likely
 Python DLL locations to PATH, then runs cargo so the child stub_gen.exe
 can load the DLL.
 """
+
 from __future__ import annotations
 
 import os

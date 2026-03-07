@@ -25,12 +25,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_stub_gen::derive::*;
 
 // Register module-level variable for .pyi (pyo3-stub-gen); matches m.add("VERSION", ...) below.
-pyo3_stub_gen::module_variable!(
-    "pdf_oxide.pdf_oxide",
-    "VERSION",
-    &str,
-    env!("CARGO_PKG_VERSION")
-);
+pyo3_stub_gen::module_variable!("pdf_oxide.pdf_oxide", "VERSION", &str, env!("CARGO_PKG_VERSION"));
 
 use crate::converters::ConversionOptions as RustConversionOptions;
 use crate::document::PdfDocument as RustPdfDocument;
@@ -131,9 +126,7 @@ impl PyPdfDocument {
     ///     ...     doc = PdfDocument.from_bytes(f.read())
     ///     >>> print(doc.page_count())
     #[staticmethod]
-    fn from_bytes(
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<Self> {
+    fn from_bytes(data: &Bound<'_, PyBytes>) -> PyResult<Self> {
         let bytes = data.as_bytes().to_vec();
         let doc = RustPdfDocument::from_bytes(bytes.clone())
             .map_err(|e| PyIOError::new_err(format!("Failed to open PDF from bytes: {}", e)))?;
@@ -2553,11 +2546,7 @@ impl PyPdfDocument {
     ///
     /// Raises:
     ///     RuntimeError: If embedding fails
-    fn embed_file(
-        &mut self,
-        name: &str,
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<()> {
+    fn embed_file(&mut self, name: &str, data: &Bound<'_, PyBytes>) -> PyResult<()> {
         self.ensure_editor()?;
         if let Some(ref mut editor) = self.editor {
             editor
@@ -3069,9 +3058,7 @@ impl PyPdf {
     /// Raises:
     ///     RuntimeError: If image loading or PDF creation fails
     #[staticmethod]
-    fn from_image_bytes(
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<Self> {
+    fn from_image_bytes(data: &Bound<'_, PyBytes>) -> PyResult<Self> {
         use crate::api::Pdf;
         let pdf = Pdf::from_image_bytes(data.as_bytes()).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create PDF from image bytes: {}", e))
@@ -3233,9 +3220,7 @@ impl PyOfficeConverter {
     ///     ...     pdf = OfficeConverter.from_docx_bytes(f.read())
     ///     >>> pdf.save("document.pdf")
     #[staticmethod]
-    fn from_docx_bytes(
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<PyPdf> {
+    fn from_docx_bytes(data: &Bound<'_, PyBytes>) -> PyResult<PyPdf> {
         let converter = RustOfficeConverter::new();
         let bytes = converter
             .convert_docx_bytes(data.as_bytes())
@@ -3283,9 +3268,7 @@ impl PyOfficeConverter {
     ///     ...     pdf = OfficeConverter.from_xlsx_bytes(f.read())
     ///     >>> pdf.save("spreadsheet.pdf")
     #[staticmethod]
-    fn from_xlsx_bytes(
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<PyPdf> {
+    fn from_xlsx_bytes(data: &Bound<'_, PyBytes>) -> PyResult<PyPdf> {
         let converter = RustOfficeConverter::new();
         let bytes = converter
             .convert_xlsx_bytes(data.as_bytes())
@@ -3333,9 +3316,7 @@ impl PyOfficeConverter {
     ///     ...     pdf = OfficeConverter.from_pptx_bytes(f.read())
     ///     >>> pdf.save("presentation.pdf")
     #[staticmethod]
-    fn from_pptx_bytes(
-        data: &Bound<'_, PyBytes>,
-    ) -> PyResult<PyPdf> {
+    fn from_pptx_bytes(data: &Bound<'_, PyBytes>) -> PyResult<PyPdf> {
         let converter = RustOfficeConverter::new();
         let bytes = converter
             .convert_pptx_bytes(data.as_bytes())
