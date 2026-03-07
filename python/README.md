@@ -16,8 +16,13 @@ The fastest Python PDF library for text extraction, image extraction, and docume
 ```python
 from pdf_oxide import PdfDocument
 
-# Open a PDF
+# Open a PDF (path can be str or pathlib.Path)
 doc = PdfDocument("document.pdf")
+
+# Or use as a context manager
+with PdfDocument("document.pdf") as doc:
+    text = doc.to_plain_text(0)
+    print(text)
 
 # Extract as plain text (with automatic reading order)
 text = doc.to_plain_text(0)

@@ -2,6 +2,13 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Features
+
+- **Python `PdfDocument` path-like** — `PdfDocument` now accepts `pathlib.Path` (or any path-like object) in addition to `str` for the file path.
+- **Python `PdfDocument` context manager** — `PdfDocument` supports the context manager protocol: use `with PdfDocument(path) as doc:` for scoped usage; exceptions inside the block are propagated (not swallowed).
+
 ## [0.3.15] - 2026-03-06
 > Header & Footer Management, Multi-Column Stability, and Font Fixes
 
