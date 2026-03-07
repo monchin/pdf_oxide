@@ -2,6 +2,7 @@
 
 All notable changes to PDFOxide are documented here.
 
+<<<<<<< HEAD
 ## [0.3.16] - 2026-03-07
 > Advanced Visual Table Detection and Automated Python Stubs
 
@@ -26,6 +27,15 @@ All notable changes to PDFOxide are documented here.
 ### 🏆 Community Contributors
 
 🥇 **@monchin** — Thank you for implementing automated Python stub generation (#220)! This significantly improves the developer experience for Python users by providing consistent, IDE-friendly type hints automatically synced with our Rust core. Outstanding contribution! 🚀
+||||||| 8f53f8b
+=======
+## [Unreleased]
+
+### Features
+
+- **Python `PdfDocument` path-like** — `PdfDocument` now accepts `pathlib.Path` (or any path-like object) in addition to `str` for the file path.
+- **Python `PdfDocument` context manager** — `PdfDocument` supports the context manager protocol: use `with PdfDocument(path) as doc:` for scoped usage; exceptions inside the block are propagated (not swallowed).
+>>>>>>> ebf0c3167254419adae1e393c3b41054b12f3ae0
 
 ## [0.3.15] - 2026-03-06
 > Header & Footer Management, Multi-Column Stability, and Font Fixes

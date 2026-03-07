@@ -281,9 +281,14 @@ jobs:
       - name: Install maturin
         run: uv pip install --system maturin
 
-      # Generate .pyi into python/pdf_oxide/pdf_oxide/__init__.pyi (pyo3-stub-gen); maturin bundles it into wheels.
-      - name: Generate .pyi from Rust
-        run: uv run python scripts/run_stub_gen.py
+      # Generate .pyi stubs automatically using mypy stubgen
+      - name: Generate type stubs
+        run: |
+          uv pip install mypy maturin
+          uv run maturin develop --features python
+          uv run stubgen -p pdf_oxide -o .
+          # Ensure stubs are moved to the correct package location for bundling
+          mv pdf_oxide/pdf_oxide.pyi python/pdf_oxide/pdf_oxide.pyi
 
       - name: Build wheels
         run: maturin build --release --features python --target ${{ matrix.target }} --out dist
