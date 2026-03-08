@@ -146,11 +146,17 @@ fn build_nested_xobject_pdf(depth: usize) -> Vec<u8> {
 /// chance of the UB manifesting as a crash.
 #[test]
 fn test_nested_xobject_extraction_does_not_segfault() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let pdf_bytes = build_nested_xobject_pdf(4);
     let mut doc = PdfDocument::from_bytes(pdf_bytes).expect("Failed to parse nested XObject PDF");
 
+    let options = pdf_oxide::converters::ConversionOptions {
+        extract_tables: false,
+        ..Default::default()
+    };
+
     let text = doc
-        .extract_text(0)
+        .extract_text_with_options(0, &options)
         .expect("Extraction failed (possible segfault from aliased &mut)");
 
     assert!(text.contains("Page level text"), "Missing page-level text, got: '{}'", text);
@@ -161,12 +167,16 @@ fn test_nested_xobject_extraction_does_not_segfault() {
 #[test]
 fn test_nested_xobject_stress() {
     let pdf_bytes = build_nested_xobject_pdf(5);
+    let options = pdf_oxide::converters::ConversionOptions {
+        extract_tables: false,
+        ..Default::default()
+    };
 
     for iteration in 0..50 {
         let mut doc =
             PdfDocument::from_bytes(pdf_bytes.clone()).expect("Failed to parse nested XObject PDF");
 
-        let result = doc.extract_text(0);
+        let result = doc.extract_text_with_options(0, &options);
         assert!(result.is_ok(), "Iteration {}: {:?}", iteration, result.err());
     }
 }
@@ -176,9 +186,13 @@ fn test_nested_xobject_stress() {
 fn test_deeply_nested_xobject_extraction() {
     let pdf_bytes = build_nested_xobject_pdf(8);
     let mut doc = PdfDocument::from_bytes(pdf_bytes).expect("Failed to parse deep XObject PDF");
+    let options = pdf_oxide::converters::ConversionOptions {
+        extract_tables: false,
+        ..Default::default()
+    };
 
     let text = doc
-        .extract_text(0)
+        .extract_text_with_options(0, &options)
         .expect("Extraction failed on deeply nested XObject PDF");
 
     assert!(text.contains("Page level text"), "Missing page-level text, got: '{}'", text);

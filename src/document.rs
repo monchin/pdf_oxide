@@ -2915,7 +2915,7 @@ impl PdfDocument {
             }
         }
 
-        if spans.is_empty() {
+        if spans.is_empty() && tables.is_empty() {
             // Even with no text content, check for non-widget annotation text
             let mut text = String::new();
             self.append_non_widget_annotation_text(page_index, &mut text);
