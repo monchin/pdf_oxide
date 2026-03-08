@@ -2797,8 +2797,10 @@ impl PdfDocument {
     pub fn extract_text(&mut self, page_index: usize) -> Result<String> {
         // Preserve historical behavior: do not extract tables by default in the main extract_text API.
         // Users can use extract_text_with_options or Markdown/HTML converters for table support.
-        let mut options = crate::converters::ConversionOptions::default();
-        options.extract_tables = false;
+        let options = crate::converters::ConversionOptions {
+            extract_tables: false,
+            ..Default::default()
+        };
         self.extract_text_with_options(page_index, &options)
     }
 
@@ -2892,7 +2894,10 @@ impl PdfDocument {
             #[cfg(feature = "ocr")]
             if spans.is_empty() || spans.iter().map(|s| s.text.len()).sum::<usize>() < 50 {
                 if let Ok(true) = crate::ocr::needs_ocr(self, page_index) {
-                    log::debug!("Page {} appears to be scanned, OCR available but not auto-enabled", page_index);
+                    log::debug!(
+                        "Page {} appears to be scanned, OCR available but not auto-enabled",
+                        page_index
+                    );
                 }
             }
 
@@ -2916,7 +2921,8 @@ impl PdfDocument {
                     let prev_end_x = prev.bbox.x + prev.bbox.width;
                     let span_end_x = span.bbox.x + span.bbox.width;
                     let y_same = (prev.bbox.y - span.bbox.y).abs() < 2.0;
-                    if y_same && span.bbox.x >= prev.bbox.x - 0.5 && span_end_x <= prev_end_x + 0.5 {
+                    if y_same && span.bbox.x >= prev.bbox.x - 0.5 && span_end_x <= prev_end_x + 0.5
+                    {
                         continue;
                     }
 
@@ -2936,10 +2942,12 @@ impl PdfDocument {
                             if !text.ends_with('\n') {
                                 text.push('\n');
                             }
-                        } else if prev.font_name != span.font_name && span_end_x > prev_end_x + 0.5 {
-                            if !text.ends_with(' ') && !text.ends_with('\n') {
-                                text.push(' ');
-                            }
+                        } else if prev.font_name != span.font_name
+                            && span_end_x > prev_end_x + 0.5
+                            && !text.ends_with(' ')
+                            && !text.ends_with('\n')
+                        {
+                            text.push(' ');
                         }
                     } else if Self::should_insert_space(prev, span) {
                         text.push(' ');
@@ -4781,14 +4789,6 @@ impl PdfDocument {
     /// This is the optimized version of `extract_text_structure_order` that uses
     /// the pre-built `structure_content_cache` for O(1) page content lookup instead
     /// of re-traversing the entire structure tree for each page.
-    fn extract_text_structure_order_cached(&mut self, page_index: usize) -> Result<String> {
-        // Fall back to new method with fresh spans
-        let mut all_spans = self.extract_spans(page_index)?;
-        let widget_spans = self.extract_widget_spans(page_index);
-        all_spans.extend(widget_spans);
-        self.extract_text_structure_order_cached_with_spans(page_index, all_spans)
-    }
-
     fn extract_text_structure_order_cached_with_spans(
         &mut self,
         page_index: usize,

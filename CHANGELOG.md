@@ -2,7 +2,7 @@
 
 All notable changes to PDFOxide are documented here.
 
-## [0.3.16] - 2026-03-07
+## [0.3.16] - 2026-03-08
 > Advanced Visual Table Detection and Automated Python Stubs
 
 ### Features
