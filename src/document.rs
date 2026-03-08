@@ -9443,7 +9443,7 @@ mod tests {
     #[test]
     fn test_load_object_from_cache() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Load catalog (object 1 0 R)
         let obj_ref = ObjectRef::new(1, 0);
@@ -9458,7 +9458,7 @@ mod tests {
     #[test]
     fn test_load_object_missing_returns_null() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
 
         // Try to load a non-existent object
         let obj_ref = ObjectRef::new(999, 0);
@@ -9559,7 +9559,7 @@ mod tests {
     #[test]
     fn test_authenticate_unencrypted_pdf() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         // Unencrypted PDF should always authenticate successfully
         let result = doc.authenticate(b"anypassword").unwrap();
         assert!(result);
@@ -10429,7 +10429,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_nonexistent_ref() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         // Non-existent object should return true (conservative)
         let result = doc.is_form_xobject(ObjectRef::new(999, 0));
         assert!(result);
@@ -10438,7 +10438,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_catalog_not_form() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         // Load catalog into cache first
         let _ = doc.load_object(ObjectRef::new(1, 0));
         // Catalog is not a Form XObject
@@ -12110,7 +12110,7 @@ mod tests {
             format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
                 .as_bytes(),
         );
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let obj = doc.load_object(ObjectRef::new(5, 0)).unwrap();
         assert!(obj.as_dict().is_some());
     }
@@ -12118,14 +12118,14 @@ mod tests {
     #[test]
     fn test_load_object_missing_returns_null_simple() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         assert!(matches!(doc.load_object(ObjectRef::new(999, 0)).unwrap(), Object::Null));
     }
 
     #[test]
     fn test_decode_stream_with_encryption_non_null() {
         let pdf = build_minimal_pdf(b"BT (Hello) Tj ET");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let stream_obj = doc.load_object(ObjectRef::new(4, 0)).unwrap();
         assert!(doc
             .decode_stream_with_encryption(&stream_obj, ObjectRef::new(4, 0))
@@ -12155,7 +12155,7 @@ mod tests {
     #[test]
     fn test_is_form_xobject_from_cache() {
         let pdf = build_minimal_pdf(b"");
-        let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+        let doc = PdfDocument::from_bytes(pdf).unwrap();
         let _ = doc.load_object(ObjectRef::new(1, 0)).unwrap();
         assert!(!doc.is_form_xobject(ObjectRef::new(1, 0)));
     }
