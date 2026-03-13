@@ -2169,11 +2169,11 @@ impl PyPdfPageRegion {
     }
     fn extract_words(&self, py: Python<'_>) -> PyResult<Vec<PyWord>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_words(self.page_index, Some(self.bbox()))
+        d.extract_words(self.page_index, Some(self.bbox()), None)
     }
     fn extract_text_lines(&self, py: Python<'_>) -> PyResult<Vec<PyTextLine>> {
         let mut d = self.doc.bind(py).borrow_mut();
-        d.extract_text_lines(self.page_index, Some(self.bbox()))
+        d.extract_text_lines(self.page_index, Some(self.bbox()), None, None)
     }
     #[pyo3(signature = (table_settings=None))]
     fn extract_tables(
