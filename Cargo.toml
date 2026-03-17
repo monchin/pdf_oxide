@@ -131,7 +131,7 @@ zip = { version = "8.2", optional = true, default-features = false, features = [
 
 [dev-dependencies]
 criterion = "0.8"
-proptest = "1.4"
+proptest = "1.10"
 regex = "1.12"
 tempfile = "3.10"
 crc32fast = "1.3"
