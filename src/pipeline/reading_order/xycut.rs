@@ -27,6 +27,16 @@ use crate::error::Result;
 use crate::layout::TextSpan;
 use crate::pipeline::{OrderedTextSpan, ReadingOrderInfo};
 
+/// Maximum density-array length for XY-cut projection profiles.
+///
+/// A normal PDF page is at most a few thousand points wide/tall. This limit of
+/// 100 000 bins is generous (≈ 33× a 3000-point A0 page) while being small
+/// enough to never cause an allocation problem.  Spans whose bounding-box span
+/// exceeds this limit are the result of a degenerate CTM; returning `None` from
+/// the projection safely skips the split instead of attempting a multi-terabyte
+/// allocation that would abort the process via `handle_alloc_error`.
+const MAX_PROJECTION_SIZE: usize = 100_000;
+
 /// XY-Cut recursive spatial partitioning strategy.
 ///
 /// Detects columns using projection profiles and white space analysis.
@@ -198,6 +208,14 @@ impl XYCutStrategy {
         }
 
         let width = (x_max - x_min).ceil() as usize;
+        if width > MAX_PROJECTION_SIZE {
+            log::warn!(
+                "XY-cut: horizontal projection width {} exceeds MAX_PROJECTION_SIZE {}, skipping region (degenerate CTM?)",
+                width,
+                MAX_PROJECTION_SIZE
+            );
+            return None;
+        }
         let mut density = vec![0.0; width];
 
         for &i in indices {
@@ -242,6 +260,14 @@ impl XYCutStrategy {
         }
 
         let height = (y_max - y_min).ceil() as usize;
+        if height > MAX_PROJECTION_SIZE {
+            log::warn!(
+                "XY-cut: vertical projection height {} exceeds MAX_PROJECTION_SIZE {}, skipping region (degenerate CTM?)",
+                height,
+                MAX_PROJECTION_SIZE
+            );
+            return None;
+        }
         let mut density = vec![0.0; height];
 
         for &i in indices {
@@ -567,5 +593,64 @@ mod tests {
         let groups = strategy.partition_region(&spans);
         // Gap is too narrow (< 15 points), should not split
         assert_eq!(groups.len(), 1);
+    }
+
+    /// Regression test for Bug 2: degenerate CTM places spans at ~100 trillion PDF points.
+    /// horizontal_projection_indexed must return None instead of attempting a
+    /// ~100-trillion-element vec allocation (which triggers handle_alloc_error → abort).
+    #[test]
+    fn test_degenerate_ctm_horizontal_projection_returns_none() {
+        let strategy = XYCutStrategy::new();
+        // Observed crash coordinate: 99_992_777_785_344 PDF points on a ~3968-point page.
+        let degenerate_x: f32 = 99_992_777_785_344.0;
+        let spans = vec![
+            make_span(10.0, 100.0, 30.0, 10.0),
+            make_span(degenerate_x, 100.0, 30.0, 10.0),
+        ];
+
+        // Must not panic or abort — projection should return None for oversized region.
+        let result = strategy.horizontal_projection(&spans);
+        assert!(
+            result.is_none(),
+            "expected None for projection spanning ~100 trillion points, got Some"
+        );
+    }
+
+    /// Vertical projection must also return None for degenerate CTM y-coordinates.
+    #[test]
+    fn test_degenerate_ctm_vertical_projection_returns_none() {
+        let strategy = XYCutStrategy::new();
+        let degenerate_y: f32 = 99_992_777_785_344.0;
+        let spans = vec![
+            make_span(10.0, 100.0, 30.0, 10.0),
+            make_span(10.0, degenerate_y, 30.0, 10.0),
+        ];
+
+        let result = strategy.vertical_projection(&spans);
+        assert!(
+            result.is_none(),
+            "expected None for projection spanning ~100 trillion points, got Some"
+        );
+    }
+
+    /// End-to-end: partition_region must return all spans (unsplit) rather than aborting
+    /// when the page contains a degenerate-CTM span.
+    #[test]
+    fn test_degenerate_ctm_partition_region_does_not_abort() {
+        let strategy = XYCutStrategy::new();
+        let degenerate_x: f32 = 99_992_777_785_344.0;
+        let spans = vec![
+            make_span(10.0, 100.0, 30.0, 10.0),
+            make_span(10.0, 85.0, 30.0, 10.0),
+            make_span(10.0, 70.0, 30.0, 10.0),
+            make_span(10.0, 55.0, 30.0, 10.0),
+            make_span(10.0, 40.0, 30.0, 10.0),
+            make_span(degenerate_x, 100.0, 30.0, 10.0),
+        ];
+
+        // Must complete without panicking and preserve all spans.
+        let groups = strategy.partition_region(&spans);
+        let total: usize = groups.iter().map(|g| g.len()).sum();
+        assert_eq!(total, spans.len(), "all spans must be preserved");
     }
 }
