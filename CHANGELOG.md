@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **Fixed process abort on degenerate CTM coordinates** — A malformed CTM could place text spans at ~10¹⁴ PDF points, causing XY-cut to attempt a multi-terabyte allocation and abort via `handle_alloc_error`. Projection functions now return `None` when the computed bin count exceeds `MAX_PROJECTION_SIZE`, safely skipping the split instead of crashing.
+
 ## [0.3.17] - 2026-03-08
 > Stable Recursion and Refined Table Heuristics
 
