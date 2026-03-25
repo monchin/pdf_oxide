@@ -10,6 +10,32 @@ use inflate::inflate_bytes_zlib;
 use libflate::zlib::Decoder as LibflateDecoder;
 use std::io::Read;
 
+/// Maximum number of bytes allowed for a decompressed FlateDecode stream.
+///
+/// Prevents zip-bomb / flate-bomb attacks where a tiny compressed stream
+/// expands to an arbitrarily large output, exhausting virtual memory and
+/// triggering an allocator abort (SIGABRT / exit 134).
+///
+/// 256 MB accommodates A4 @ 600 DPI RGB (~99 MB) with headroom. Callers that
+/// need higher limits should implement their own decoder or extend this with a
+/// configurable cap.
+const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Returns `Err` if `output` reached the decompression cap, indicating that the
+/// stream was truncated rather than fully decoded.
+#[inline]
+fn check_limit(output: &[u8]) -> Result<()> {
+    if output.len() as u64 >= MAX_DECOMPRESSED_BYTES {
+        return Err(Error::Decode(format!(
+            "FlateDecode output reached the {} MB decompression limit — \
+             stream may be a flate bomb or an unusually large image; increase \
+             MAX_DECOMPRESSED_BYTES if the PDF is legitimate",
+            MAX_DECOMPRESSED_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
+}
+
 /// FlateDecode filter implementation.
 ///
 /// Decompresses data using the zlib/deflate algorithm.
@@ -17,15 +43,19 @@ pub struct FlateDecoder;
 
 impl StreamDecoder for FlateDecoder {
     fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
-        let mut decoder = ZlibDecoder::new(input);
+        let mut decoder = ZlibDecoder::new(input).take(MAX_DECOMPRESSED_BYTES);
         let mut output = Vec::new();
 
         // Try to read all data with standard zlib
         match decoder.read_to_end(&mut output) {
-            Ok(_) => Ok(output),
+            Ok(_) => {
+                check_limit(&output)?;
+                Ok(output)
+            },
             Err(e) => {
                 // Partial recovery: if we got ANY data before the error, use it
                 if !output.is_empty() {
+                    check_limit(&output)?;
                     log::warn!(
                         "FlateDecode partial recovery: extracted {} bytes before corruption: {}",
                         output.len(),
@@ -38,15 +68,17 @@ impl StreamDecoder for FlateDecoder {
                 // Some PDFs have corrupt zlib headers but valid deflate data
                 log::info!("Zlib decode failed, trying raw deflate");
                 output.clear();
-                let mut deflate_decoder = DeflateDecoder::new(input);
+                let mut deflate_decoder = DeflateDecoder::new(input).take(MAX_DECOMPRESSED_BYTES);
 
                 match deflate_decoder.read_to_end(&mut output) {
                     Ok(_) => {
+                        check_limit(&output)?;
                         log::info!("Raw deflate recovery succeeded: {} bytes", output.len());
                         Ok(output)
                     },
                     Err(deflate_err) => {
                         if !output.is_empty() {
+                            check_limit(&output)?;
                             log::warn!(
                                 "Raw deflate partial recovery: extracted {} bytes before error",
                                 output.len()
@@ -60,10 +92,12 @@ impl StreamDecoder for FlateDecoder {
                                 "Trying deflate after skipping potential corrupt zlib header"
                             );
                             output.clear();
-                            let mut deflate_decoder = DeflateDecoder::new(&input[2..]);
+                            let mut deflate_decoder =
+                                DeflateDecoder::new(&input[2..]).take(MAX_DECOMPRESSED_BYTES);
 
                             match deflate_decoder.read_to_end(&mut output) {
                                 Ok(_) => {
+                                    check_limit(&output)?;
                                     log::info!(
                                         "Deflate with header skip succeeded: {} bytes",
                                         output.len()
@@ -72,6 +106,7 @@ impl StreamDecoder for FlateDecoder {
                                 },
                                 Err(_) => {
                                     if !output.is_empty() {
+                                        check_limit(&output)?;
                                         log::warn!(
                                             "Deflate with header skip partial recovery: {} bytes",
                                             output.len()
@@ -86,6 +121,7 @@ impl StreamDecoder for FlateDecoder {
                         log::info!("Trying inflate crate with zlib");
                         match inflate_bytes_zlib(input) {
                             Ok(data) => {
+                                check_limit(&data)?;
                                 log::info!(
                                     "Inflate crate recovery succeeded: {} bytes",
                                     data.len()
@@ -102,8 +138,11 @@ impl StreamDecoder for FlateDecoder {
                         output.clear();
                         match LibflateDecoder::new(input) {
                             Ok(mut libflate_decoder) => {
-                                match libflate_decoder.read_to_end(&mut output) {
+                                let mut limited =
+                                    (&mut libflate_decoder).take(MAX_DECOMPRESSED_BYTES);
+                                match limited.read_to_end(&mut output) {
                                     Ok(_) if !output.is_empty() => {
+                                        check_limit(&output)?;
                                         log::info!(
                                             "Libflate recovery succeeded: {} bytes",
                                             output.len()
@@ -111,6 +150,7 @@ impl StreamDecoder for FlateDecoder {
                                         return Ok(output);
                                     },
                                     Err(_) if !output.is_empty() => {
+                                        check_limit(&output)?;
                                         log::warn!(
                                             "Libflate partial recovery: {} bytes",
                                             output.len()
@@ -144,9 +184,11 @@ impl StreamDecoder for FlateDecoder {
                                 corrected[0] = (first_byte & 0xF0) | 0x08;
 
                                 output.clear();
-                                let mut decoder = ZlibDecoder::new(&corrected[..]);
+                                let mut decoder =
+                                    ZlibDecoder::new(&corrected[..]).take(MAX_DECOMPRESSED_BYTES);
                                 match decoder.read_to_end(&mut output) {
                                     Ok(_) if !output.is_empty() => {
+                                        check_limit(&output)?;
                                         log::info!(
                                             "Header correction recovery succeeded: {} bytes",
                                             output.len()
@@ -154,6 +196,7 @@ impl StreamDecoder for FlateDecoder {
                                         return Ok(output);
                                     },
                                     Err(_) if !output.is_empty() => {
+                                        check_limit(&output)?;
                                         log::warn!(
                                             "Header correction partial recovery: {} bytes",
                                             output.len()
@@ -178,10 +221,12 @@ impl StreamDecoder for FlateDecoder {
                             }
 
                             output.clear();
-                            let mut deflate_decoder = DeflateDecoder::new(&input[offset..]);
+                            let mut deflate_decoder =
+                                DeflateDecoder::new(&input[offset..]).take(MAX_DECOMPRESSED_BYTES);
 
                             match deflate_decoder.read_to_end(&mut output) {
                                 Ok(_) if !output.is_empty() => {
+                                    check_limit(&output)?;
                                     // Validate output quality - check for PDF operators
                                     let decoded_str = String::from_utf8_lossy(&output);
                                     let has_pdf_operators = decoded_str.contains("BT")
@@ -208,6 +253,7 @@ impl StreamDecoder for FlateDecoder {
                                     }
                                 },
                                 Err(_) if !output.is_empty() => {
+                                    check_limit(&output)?;
                                     // Validate partial recovery too
                                     let decoded_str = String::from_utf8_lossy(&output);
                                     let has_pdf_operators = decoded_str.contains("BT")
@@ -351,5 +397,21 @@ mod tests {
     fn test_flate_decoder_name() {
         let decoder = FlateDecoder;
         assert_eq!(decoder.name(), "FlateDecode");
+    }
+
+    #[test]
+    fn test_flate_bomb_rejected() {
+        // Verify that check_limit rejects output at or above the cap.
+        let large = vec![0u8; MAX_DECOMPRESSED_BYTES as usize];
+        let result = check_limit(&large);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("decompression limit"));
+    }
+
+    #[test]
+    fn test_check_limit_below_threshold() {
+        let small = vec![0u8; 1024];
+        assert!(check_limit(&small).is_ok());
     }
 }
