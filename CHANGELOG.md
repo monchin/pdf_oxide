@@ -2,6 +2,7 @@
 
 All notable changes to PDFOxide are documented here.
 
+<<<<<<< HEAD
 ## [0.3.18] - 2026-04-01
 > Rendering Engine Overhaul, Visual Parity, and Expanded API
 
