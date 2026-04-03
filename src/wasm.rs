@@ -528,12 +528,27 @@ impl WasmPdfDocument {
     ///
     /// Returns an array of objects with: text, bbox, font_name, font_size,
     /// font_weight, is_italic, color, etc.
+    ///
+    /// Optional `reading_order`: `"column_aware"` for XY-Cut column detection,
+    /// or `"top_to_bottom"` (default).
     #[wasm_bindgen(js_name = "extractSpans")]
     pub fn extract_spans(
         &mut self,
         page_index: usize,
         region: Option<Vec<f32>>,
+        reading_order: Option<String>,
     ) -> Result<JsValue, JsValue> {
+        let order = match reading_order.as_deref() {
+            Some("column_aware") => crate::document::ReadingOrder::ColumnAware,
+            Some("top_to_bottom") | None => crate::document::ReadingOrder::TopToBottom,
+            Some(other) => {
+                return Err(JsValue::from_str(&format!(
+                    "Unknown reading_order '{}'. Expected 'top_to_bottom' or 'column_aware'.",
+                    other
+                )));
+            },
+        };
+
         let mut inner = self
             .inner
             .lock()
@@ -548,7 +563,7 @@ impl WasmPdfDocument {
                 crate::layout::RectFilterMode::Intersects,
             )
         } else {
-            inner.extract_spans(page_index)
+            inner.extract_spans_with_reading_order(page_index, order)
         };
 
         let spans = spans_result

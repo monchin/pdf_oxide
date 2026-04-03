@@ -1134,12 +1134,30 @@ impl PyPdfDocument {
     }
 
     /// Extract text spans.
-    #[pyo3(signature = (page, region=None))]
+    ///
+    /// Args:
+    ///     page: Zero-based page index.
+    ///     region: Optional (x, y, w, h) bounding box to restrict extraction.
+    ///     reading_order: Optional reading order strategy. One of "top_to_bottom"
+    ///         (default) or "column_aware" (XY-Cut column detection).
+    #[pyo3(signature = (page, region=None, reading_order=None))]
     fn extract_spans(
         &mut self,
         page: usize,
         region: Option<(f32, f32, f32, f32)>,
+        reading_order: Option<&str>,
     ) -> PyResult<Vec<PyTextSpan>> {
+        let order = match reading_order {
+            Some("column_aware") => crate::document::ReadingOrder::ColumnAware,
+            Some("top_to_bottom") | None => crate::document::ReadingOrder::TopToBottom,
+            Some(other) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Unknown reading_order '{}'. Expected 'top_to_bottom' or 'column_aware'.",
+                    other
+                )));
+            },
+        };
+
         let res = if let Some(r) = region {
             self.inner.extract_spans_in_rect(
                 page,
@@ -1147,7 +1165,7 @@ impl PyPdfDocument {
                 crate::layout::RectFilterMode::Intersects,
             )
         } else {
-            self.inner.extract_spans(page)
+            self.inner.extract_spans_with_reading_order(page, order)
         };
         res.map(|spans| spans.into_iter().map(|s| PyTextSpan { inner: s }).collect())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))

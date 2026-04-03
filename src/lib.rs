@@ -256,7 +256,7 @@ pub use annotation_types::{
 };
 pub use annotations::{Annotation, LinkAction, LinkDestination};
 pub use config::{DocumentType, ExtractionProfile};
-pub use document::{ExtractedImageRef, ImageFormat, PdfDocument};
+pub use document::{ExtractedImageRef, ImageFormat, PdfDocument, ReadingOrder};
 pub use error::{Error, Result};
 pub use outline::{Destination, OutlineItem};
 
