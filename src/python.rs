@@ -2581,6 +2581,10 @@ impl PyTextSpan {
         self.inner.is_monospace
     }
     #[getter]
+    fn char_widths(&self) -> Vec<f32> {
+        self.inner.char_widths.clone()
+    }
+    #[getter]
     fn color(&self) -> (f32, f32, f32) {
         (self.inner.color.r, self.inner.color.g, self.inner.color.b)
     }

@@ -302,7 +302,10 @@ impl MarkdownOutputConverter {
     /// Uses the same heuristic as `PdfDocument::should_insert_space()`:
     /// - gap > 15% of font size  → space (typical space width ≈ 25% of em)
     /// - gap > 500% of font size → no space (likely a column boundary)
-    fn has_horizontal_gap(prev: &crate::layout::TextSpan, current: &crate::layout::TextSpan) -> bool {
+    fn has_horizontal_gap(
+        prev: &crate::layout::TextSpan,
+        current: &crate::layout::TextSpan,
+    ) -> bool {
         let font_size = prev.font_size.max(current.font_size).max(1.0);
         let prev_end_x = prev.bbox.x + prev.bbox.width;
         let gap = current.bbox.x - prev_end_x;

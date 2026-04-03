@@ -9,7 +9,7 @@ All notable changes to PDFOxide are documented here.
 
 - **`extract_page_text()` Single-Call DTO** (#268) — New `PageText` struct returns spans, characters, and page dimensions from a single extraction pass, eliminating redundant content stream parsing. Available across Rust, Python, and WASM.
 - **Column-Aware Reading Order** (#270) — `extract_spans()` now accepts an optional `ReadingOrder` parameter. `ReadingOrder::ColumnAware` uses XY-Cut spatial partitioning to detect columns and read each column top-to-bottom, fixing garbled text for multi-column PDFs.
-- **Per-Character Bounding Boxes from Font Metrics** (#269) — `TextSpan` now carries per-glyph advance widths captured during extraction. `to_chars()` produces accurate per-character bounding boxes using font metrics instead of uniform width division.
+- **Per-Character Bounding Boxes from Font Metrics** (#269) — `TextSpan` now carries per-glyph advance widths captured during extraction. `to_chars()` produces accurate per-character bounding boxes using font metrics instead of uniform width division. Available as `span.char_widths` in Python and `span.charWidths` in WASM (omitted when empty).
 - **`is_monospace` Flag on TextSpan/TextChar** (#271) — Exposes the PDF font descriptor FixedPitch bit, with fallback name heuristic (Courier, Consolas, Mono, Fixed). Eliminates the need for fragile font-name string matching.
 - **`Pdf::from_bytes()` Constructor** (#252) — Opens existing PDFs from in-memory bytes without requiring a file path. Available across Rust, Python (`Pdf.from_bytes(data)`), and WASM (`WasmPdf.fromBytes(data)`).
 - **Path Operations in Python** (#261) — `extract_paths()` now includes an `operations` list with individual path commands (move_to, line_to, curve_to, rectangle, close_path) and their coordinates. WASM `extractPaths()` also aligned.
@@ -31,6 +31,10 @@ All notable changes to PDFOxide are documented here.
 - **pyo3** 0.27.2 → 0.28.2 — Added `skip_from_py_object` / `from_py_object` annotations per new `FromPyObject` opt-in requirement.
 - **clap** 4.5.60 → 4.6.0
 - **codecov/codecov-action** 5 → 6
+
+### Breaking Changes (WASM only)
+
+- **WASM JSON field names now use camelCase** — `TextSpan`, `TextChar`, `PageText`, `TextBlock`, and `TextLine` serialized fields changed from snake_case to camelCase (e.g., `font_name` → `fontName`, `font_size` → `fontSize`, `is_italic` → `isItalic`, `page_width` → `pageWidth`). This aligns with JavaScript naming conventions. **Python and Rust APIs are unchanged.**
 
 ### 🏆 Community Contributors
 

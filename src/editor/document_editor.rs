@@ -1088,9 +1088,8 @@ impl DocumentEditor {
 
                 // Load and recursively import the referenced object
                 let loaded = source.load_object(*obj_ref)?;
-                let remapped = self.deep_import_object(
-                    source, &loaded, id_map, collected, visiting,
-                )?;
+                let remapped =
+                    self.deep_import_object(source, &loaded, id_map, collected, visiting)?;
 
                 visiting.remove(&obj_ref.id);
 
@@ -1098,40 +1097,37 @@ impl DocumentEditor {
                 collected.push((new_id, remapped));
 
                 Ok(Object::Reference(ObjectRef::new(new_id, 0)))
-            }
+            },
             Object::Dictionary(dict) => {
                 let mut new_dict = HashMap::with_capacity(dict.len());
                 for (key, value) in dict {
-                    let new_value = self.deep_import_object(
-                        source, value, id_map, collected, visiting,
-                    )?;
+                    let new_value =
+                        self.deep_import_object(source, value, id_map, collected, visiting)?;
                     new_dict.insert(key.clone(), new_value);
                 }
                 Ok(Object::Dictionary(new_dict))
-            }
+            },
             Object::Array(arr) => {
                 let mut new_arr = Vec::with_capacity(arr.len());
                 for item in arr {
-                    let new_item = self.deep_import_object(
-                        source, item, id_map, collected, visiting,
-                    )?;
+                    let new_item =
+                        self.deep_import_object(source, item, id_map, collected, visiting)?;
                     new_arr.push(new_item);
                 }
                 Ok(Object::Array(new_arr))
-            }
+            },
             Object::Stream { dict, data } => {
                 let mut new_dict = HashMap::with_capacity(dict.len());
                 for (key, value) in dict {
-                    let new_value = self.deep_import_object(
-                        source, value, id_map, collected, visiting,
-                    )?;
+                    let new_value =
+                        self.deep_import_object(source, value, id_map, collected, visiting)?;
                     new_dict.insert(key.clone(), new_value);
                 }
                 Ok(Object::Stream {
                     dict: new_dict,
                     data: data.clone(),
                 })
-            }
+            },
             // Primitive types need no remapping
             _ => Ok(obj.clone()),
         }
@@ -1779,8 +1775,13 @@ impl DocumentEditor {
                 };
 
                 let offset = writer.stream_position()?;
-                let bytes =
-                    serialize_obj(&serializer, pages_ref.id, 0, &final_pages_obj, &encryption_handler);
+                let bytes = serialize_obj(
+                    &serializer,
+                    pages_ref.id,
+                    0,
+                    &final_pages_obj,
+                    &encryption_handler,
+                );
                 writer.write_all(&bytes)?;
                 xref_entries.push((pages_ref.id, offset, 0, true));
 
@@ -2846,10 +2847,7 @@ impl DocumentEditor {
             let final_page_obj = if let Some(catalog_dict) = catalog_obj.as_dict() {
                 if let Some(pages_ref) = catalog_dict.get("Pages").and_then(|p| p.as_reference()) {
                     if let Object::Dictionary(mut dict) = page_data.page_object.clone() {
-                        dict.insert(
-                            "Parent".to_string(),
-                            Object::Reference(pages_ref),
-                        );
+                        dict.insert("Parent".to_string(), Object::Reference(pages_ref));
                         Object::Dictionary(dict)
                     } else {
                         page_data.page_object.clone()
@@ -2863,13 +2861,8 @@ impl DocumentEditor {
 
             // Write the page object
             let offset = writer.stream_position()?;
-            let bytes = serialize_obj(
-                &serializer,
-                page_id,
-                0,
-                &final_page_obj,
-                &encryption_handler,
-            );
+            let bytes =
+                serialize_obj(&serializer, page_id, 0, &final_page_obj, &encryption_handler);
             writer.write_all(&bytes)?;
             xref_entries.push((page_id, offset, 0, true));
 
@@ -2880,13 +2873,7 @@ impl DocumentEditor {
                     continue;
                 }
                 let offset = writer.stream_position()?;
-                let bytes = serialize_obj(
-                    &serializer,
-                    *obj_id,
-                    0,
-                    obj,
-                    &encryption_handler,
-                );
+                let bytes = serialize_obj(&serializer, *obj_id, 0, obj, &encryption_handler);
                 writer.write_all(&bytes)?;
                 xref_entries.push((*obj_id, offset, 0, true));
             }
@@ -9024,8 +9011,12 @@ mod tests {
     #[test]
     fn test_merge_from_bytes_preserves_content() {
         // Create two PDFs with distinct text content
-        let pdf1_bytes = crate::api::Pdf::from_text("Hello from document one").unwrap().into_bytes();
-        let pdf2_bytes = crate::api::Pdf::from_text("Goodbye from document two").unwrap().into_bytes();
+        let pdf1_bytes = crate::api::Pdf::from_text("Hello from document one")
+            .unwrap()
+            .into_bytes();
+        let pdf2_bytes = crate::api::Pdf::from_text("Goodbye from document two")
+            .unwrap()
+            .into_bytes();
 
         // Merge pdf2 into pdf1
         let mut editor = DocumentEditor::from_bytes(pdf1_bytes).unwrap();
@@ -9087,8 +9078,12 @@ mod tests {
     /// each page of the merged document.
     #[test]
     fn test_merge_text_extractable() {
-        let pdf_a = crate::api::Pdf::from_text("Hello from A").unwrap().into_bytes();
-        let pdf_b = crate::api::Pdf::from_text("Hello from B").unwrap().into_bytes();
+        let pdf_a = crate::api::Pdf::from_text("Hello from A")
+            .unwrap()
+            .into_bytes();
+        let pdf_b = crate::api::Pdf::from_text("Hello from B")
+            .unwrap()
+            .into_bytes();
 
         let mut editor = DocumentEditor::from_bytes(pdf_a).unwrap();
         let pages_merged = editor.merge_from_bytes(&pdf_b).unwrap();
@@ -9114,13 +9109,7 @@ mod tests {
         );
 
         // Verify no cross-contamination
-        assert!(
-            !text_page0.contains("Hello from B"),
-            "Page 0 should NOT contain text from B"
-        );
-        assert!(
-            !text_page1.contains("Hello from A"),
-            "Page 1 should NOT contain text from A"
-        );
+        assert!(!text_page0.contains("Hello from B"), "Page 0 should NOT contain text from B");
+        assert!(!text_page1.contains("Hello from A"), "Page 1 should NOT contain text from A");
     }
 }

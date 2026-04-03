@@ -12698,7 +12698,8 @@ mod tests {
         // positions (Y=700 and Y=699 — within the 2.0pt "same line" threshold)
         // but with different content.  The first string is wider so the second
         // is geometrically contained within it.
-        let content = b"BT /F1 12 Tf 50 700 Td (First line has longer text here) Tj 0 -1 Td (Second) Tj ET";
+        let content =
+            b"BT /F1 12 Tf 50 700 Td (First line has longer text here) Tj 0 -1 Td (Second) Tj ET";
 
         // We need a font in Resources for the extractor to work.
         let mut pdf = b"%PDF-1.4\n".to_vec();
@@ -12736,11 +12737,8 @@ mod tests {
         pdf.extend_from_slice(format!("{:010} 00000 n \n", off4).as_bytes());
         pdf.extend_from_slice(format!("{:010} 00000 n \n", off5).as_bytes());
         pdf.extend_from_slice(
-            format!(
-                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-                xref_off
-            )
-            .as_bytes(),
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_off)
+                .as_bytes(),
         );
 
         let mut doc = PdfDocument::from_bytes(pdf).unwrap();
@@ -12768,7 +12766,7 @@ mod tests {
             page_height: 792.0,
         };
         let json = serde_json::to_string(&page_text).unwrap();
-        assert!(json.contains("page_width"));
-        assert!(json.contains("page_height"));
+        assert!(json.contains("pageWidth"));
+        assert!(json.contains("pageHeight"));
     }
 }

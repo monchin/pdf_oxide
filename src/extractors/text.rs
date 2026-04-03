@@ -2904,7 +2904,7 @@ impl TextExtractor {
     /// - On the same line (Y coordinates within 1pt)
     /// - Very close horizontally (gap < 3pt, approximately average char width)
     ///
-    /// This matches the behavior of industry-standard tools like PyMuPDF.
+    /// This matches the behavior of industry-standard PDF tools.
     fn merge_adjacent_spans(&mut self) {
         if self.spans.is_empty() {
             return;
@@ -6845,37 +6845,21 @@ mod tests {
 
         // Font size 1 with Tm scale 10 — effective font size is 10pt.
         // TD(0, -1.3) in text space = 13pt in user space.
-        let stream =
-            b"BT /F1 1 Tf 10 0 0 10 72 700 Tm (Line one) Tj 0 -1.3 TD (Line two) Tj ET";
+        let stream = b"BT /F1 1 Tf 10 0 0 10 72 700 Tm (Line one) Tj 0 -1.3 TD (Line two) Tj ET";
         let chars = extractor.extract(stream).unwrap();
 
         // Collect unique text
         let text: String = chars.iter().map(|c| c.char).collect();
-        assert!(
-            text.contains("Line one"),
-            "Should contain 'Line one', got: {}",
-            text
-        );
-        assert!(
-            text.contains("Line two"),
-            "Should contain 'Line two', got: {}",
-            text
-        );
+        assert!(text.contains("Line one"), "Should contain 'Line one', got: {}", text);
+        assert!(text.contains("Line two"), "Should contain 'Line two', got: {}", text);
 
         // Verify the Y gap is ~13pt (1.3 * 10), not 1.3pt
         let line_one_y = chars.iter().find(|c| c.char == 'L').unwrap().bbox.y;
         let line_two_chars: Vec<_> = chars.iter().filter(|c| c.char == 'L').collect();
-        assert!(
-            line_two_chars.len() >= 2,
-            "Should have at least 2 'L' chars (one per line)"
-        );
+        assert!(line_two_chars.len() >= 2, "Should have at least 2 'L' chars (one per line)");
         let line_two_y = line_two_chars[1].bbox.y;
         let y_gap = (line_one_y - line_two_y).abs();
-        assert!(
-            y_gap > 5.0,
-            "Y gap should be ~13pt (Tm-scaled), got {:.1}pt",
-            y_gap
-        );
+        assert!(y_gap > 5.0, "Y gap should be ~13pt (Tm-scaled), got {:.1}pt", y_gap);
     }
 
     #[test]
