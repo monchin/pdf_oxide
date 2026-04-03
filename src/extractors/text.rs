@@ -4779,7 +4779,7 @@ impl TextExtractor {
             word_spacing: buffer.word_space, // Tw - captured from PDF content stream
             horizontal_scaling: buffer.horizontal_scaling, // Tz - captured from PDF content stream
             is_italic: is_italic_span,
-            is_monospace: false,
+            is_monospace: buffer.is_monospace,
             primary_detected: false,
             artifact_type: self.current_artifact_type(),
             char_widths: {

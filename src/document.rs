@@ -12766,7 +12766,8 @@ mod tests {
             page_height: 792.0,
         };
         let json = serde_json::to_string(&page_text).unwrap();
-        assert!(json.contains("pageWidth"));
-        assert!(json.contains("pageHeight"));
+        // Without the `wasm` feature, field names are snake_case
+        assert!(json.contains("page_width"));
+        assert!(json.contains("page_height"));
     }
 }

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 /// - Matches industry best practices
 /// - More robust for complex layouts
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", serde(rename_all = "camelCase"))]
 pub struct TextSpan {
     /// The complete text string
     pub text: String,
@@ -171,7 +171,7 @@ impl TextSpan {
 ///
 /// These properties match industry standards.
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", serde(rename_all = "camelCase"))]
 pub struct TextChar {
     /// The character itself
     pub char: char,
@@ -432,7 +432,7 @@ impl Color {
 /// The `chars` field is derived from spans via `TextSpan::to_chars()`, using
 /// font-metric widths when available for accurate per-glyph bounding boxes.
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", serde(rename_all = "camelCase"))]
 pub struct PageText {
     /// Text spans in reading order.
     pub spans: Vec<TextSpan>,
@@ -446,7 +446,7 @@ pub struct PageText {
 
 /// A text block (word, line, or paragraph).
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", serde(rename_all = "camelCase"))]
 pub struct TextBlock {
     /// Characters in this block
     pub chars: Vec<TextChar>,
@@ -542,7 +542,7 @@ pub type Word = TextBlock;
 
 /// A line of text containing multiple words.
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "wasm", serde(rename_all = "camelCase"))]
 pub struct TextLine {
     /// Words in this line
     pub words: Vec<Word>,

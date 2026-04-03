@@ -1498,6 +1498,7 @@ impl DocumentEditor {
         };
 
         let mut xref_entries: Vec<(u32, u64, u16, bool)> = Vec::new(); // (id, offset, gen, in_use)
+        let mut written_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         // Object 0 is always free
         xref_entries.push((0, 65535, 65535, false));
@@ -2504,14 +2505,19 @@ impl DocumentEditor {
                                                     _ => None,
                                                 };
                                                 if let Some(fdict) = font_dict {
+                                                    // Rebuild written_ids for O(1) dedup lookups
+                                                    written_ids.clear();
+                                                    written_ids.extend(
+                                                        xref_entries
+                                                            .iter()
+                                                            .map(|(id, _, _, _)| *id),
+                                                    );
                                                     for (_name, font_ref) in fdict.iter() {
                                                         if let Some(ref_obj) =
                                                             font_ref.as_reference()
                                                         {
                                                             // Check if we've already written this object
-                                                            if !xref_entries.iter().any(
-                                                                |(id, _, _, _)| *id == ref_obj.id,
-                                                            ) {
+                                                            if !written_ids.contains(&ref_obj.id) {
                                                                 if let Ok(font_obj) =
                                                                     self.source.load_object(ref_obj)
                                                                 {
@@ -2528,6 +2534,7 @@ impl DocumentEditor {
                                                                     xref_entries.push((
                                                                         ref_obj.id, offset, 0, true,
                                                                     ));
+                                                                    written_ids.insert(ref_obj.id);
                                                                 }
                                                             }
                                                         }
@@ -2842,6 +2849,9 @@ impl DocumentEditor {
         }
 
         // Write merged pages and their dependent objects
+        // Rebuild written_ids for O(1) dedup lookups in merged page loop
+        written_ids.clear();
+        written_ids.extend(xref_entries.iter().map(|(id, _, _, _)| *id));
         for (page_data, &page_id) in self.merged_pages.iter().zip(merged_page_ids.iter()) {
             // Set /Parent on the merged page to point to the Pages tree root
             let final_page_obj = if let Some(catalog_dict) = catalog_obj.as_dict() {
@@ -2865,17 +2875,19 @@ impl DocumentEditor {
                 serialize_obj(&serializer, page_id, 0, &final_page_obj, &encryption_handler);
             writer.write_all(&bytes)?;
             xref_entries.push((page_id, offset, 0, true));
+            written_ids.insert(page_id);
 
             // Write all dependent objects for this page
             for (obj_id, obj) in &page_data.objects {
                 // Skip if already written (dedup)
-                if xref_entries.iter().any(|(id, _, _, _)| *id == *obj_id) {
+                if written_ids.contains(obj_id) {
                     continue;
                 }
                 let offset = writer.stream_position()?;
                 let bytes = serialize_obj(&serializer, *obj_id, 0, obj, &encryption_handler);
                 writer.write_all(&bytes)?;
                 xref_entries.push((*obj_id, offset, 0, true));
+                written_ids.insert(*obj_id);
             }
         }
 
