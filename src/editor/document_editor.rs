@@ -1025,27 +1025,28 @@ impl DocumentEditor {
         let page_ref = source.get_page_ref(page_index)?;
         let page_obj = source.load_object(page_ref)?;
 
+        // Strip /Parent before deep import to avoid pulling in the entire
+        // source page tree (which causes cycles and imports unreachable objects)
+        let stripped_page = if let Object::Dictionary(mut dict) = page_obj {
+            dict.remove("Parent");
+            Object::Dictionary(dict)
+        } else {
+            page_obj
+        };
+
         // Map from source object ID -> new object ID in this document
         let mut id_map: HashMap<u32, u32> = HashMap::new();
         // Collected objects: new_id -> remapped object
         let mut collected: Vec<(u32, Object)> = Vec::new();
 
         // Deep-copy the page object, recursively importing all referenced objects
-        let remapped_page = self.deep_import_object(
+        let final_page = self.deep_import_object(
             source,
-            &page_obj,
+            &stripped_page,
             &mut id_map,
             &mut collected,
             &mut HashSet::new(),
         )?;
-
-        // Remove /Parent from the page dict since it will get a new parent
-        let final_page = if let Object::Dictionary(mut dict) = remapped_page {
-            dict.remove("Parent");
-            Object::Dictionary(dict)
-        } else {
-            remapped_page
-        };
 
         Ok(MergedPageData {
             page_object: final_page,
