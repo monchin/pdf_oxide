@@ -2953,8 +2953,16 @@ impl PdfDocument {
                 if let Some(prev) = prev_span {
                     let prev_end_x = prev.bbox.x + prev.bbox.width;
                     let span_end_x = span.bbox.x + span.bbox.width;
+                    // Containment check: skip a span only if it is geometrically
+                    // contained within the previous span AND has identical text.
+                    // Without the text comparison, distinct lines that happen to
+                    // overlap spatially (e.g., due to small Tm-scaled offsets)
+                    // would be silently dropped (issue #254).
                     let y_same = (prev.bbox.y - span.bbox.y).abs() < 2.0;
-                    if y_same && span.bbox.x >= prev.bbox.x - 0.5 && span_end_x <= prev_end_x + 0.5
+                    if y_same
+                        && span.bbox.x >= prev.bbox.x - 0.5
+                        && span_end_x <= prev_end_x + 0.5
+                        && span.text == prev.text
                     {
                         continue;
                     }

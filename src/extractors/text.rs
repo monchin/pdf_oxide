@@ -3370,8 +3370,12 @@ impl TextExtractor {
                 // Flush Tj buffer before changing text position
                 self.flush_tj_span_buffer()?;
                 let state = self.state_stack.current_mut();
+                // Per ISO 32000-1:2008 §9.4.2, Table 108:
+                // Tlm_new = T(tx,ty) × Tlm_old
+                // The translation is in text-line space, so it must be
+                // pre-multiplied to be scaled by the existing Tlm transform.
                 let tm = Matrix::translation(tx, ty);
-                state.text_line_matrix = state.text_line_matrix.multiply(&tm);
+                state.text_line_matrix = tm.multiply(&state.text_line_matrix);
                 state.text_matrix = state.text_line_matrix;
             },
             Operator::TD { tx, ty } => {
@@ -3381,8 +3385,9 @@ impl TextExtractor {
                 // TD is like Td but also sets leading
                 let state = self.state_stack.current_mut();
                 state.leading = -ty;
+                // Per ISO 32000-1:2008 §9.4.2: Tlm_new = T(tx,ty) × Tlm_old
                 let tm = Matrix::translation(tx, ty);
-                state.text_line_matrix = state.text_line_matrix.multiply(&tm);
+                state.text_line_matrix = tm.multiply(&state.text_line_matrix);
                 state.text_matrix = state.text_line_matrix;
             },
             Operator::TStar => {
@@ -3392,8 +3397,9 @@ impl TextExtractor {
                 // Move to start of next line (using leading)
                 let leading = self.state_stack.current().leading;
                 let state = self.state_stack.current_mut();
+                // Per ISO 32000-1:2008 §9.4.2: Tlm_new = T(0,-TL) × Tlm_old
                 let tm = Matrix::translation(0.0, -leading);
-                state.text_line_matrix = state.text_line_matrix.multiply(&tm);
+                state.text_line_matrix = tm.multiply(&state.text_line_matrix);
                 state.text_matrix = state.text_line_matrix;
             },
 
@@ -3638,8 +3644,9 @@ impl TextExtractor {
                 let leading = self.state_stack.current().leading;
                 {
                     let state = self.state_stack.current_mut();
+                    // Per ISO 32000-1:2008 §9.4.2: Tlm_new = T(0,-TL) × Tlm_old
                     let tm = Matrix::translation(0.0, -leading);
-                    state.text_line_matrix = state.text_line_matrix.multiply(&tm);
+                    state.text_line_matrix = tm.multiply(&state.text_line_matrix);
                     state.text_matrix = state.text_line_matrix;
                 }
 
@@ -3670,8 +3677,9 @@ impl TextExtractor {
                     state.word_space = word_space;
                     state.char_space = char_space;
                     let leading = state.leading;
+                    // Per ISO 32000-1:2008 §9.4.2: Tlm_new = T(0,-TL) × Tlm_old
                     let tm = Matrix::translation(0.0, -leading);
-                    state.text_line_matrix = state.text_line_matrix.multiply(&tm);
+                    state.text_line_matrix = tm.multiply(&state.text_line_matrix);
                     state.text_matrix = state.text_line_matrix;
                 }
 
@@ -6763,6 +6771,51 @@ mod tests {
         // After Td(100, 700), position should be near (100, 700)
         assert!((chars[0].bbox.x - 100.0).abs() < 2.0);
         assert!((chars[0].bbox.y - 700.0).abs() < 2.0);
+    }
+
+    /// Issue #254: TD Y offset must be scaled by the text matrix.
+    /// Pattern: `/F1 1 Tf 10 0 0 10 72 700 Tm (Line one) Tj 0 -1.3 TD (Line two) Tj`
+    /// The Tm sets a 10x scale, so `0 -1.3 TD` should produce a 13pt vertical gap,
+    /// not 1.3pt. Both lines must appear in extracted text.
+    #[test]
+    fn test_issue_254_tm_scale_td_offset() {
+        let mut extractor = TextExtractor::new();
+        let font = create_test_font();
+        extractor.add_font("F1".to_string(), font);
+
+        // Font size 1 with Tm scale 10 — effective font size is 10pt.
+        // TD(0, -1.3) in text space = 13pt in user space.
+        let stream =
+            b"BT /F1 1 Tf 10 0 0 10 72 700 Tm (Line one) Tj 0 -1.3 TD (Line two) Tj ET";
+        let chars = extractor.extract(stream).unwrap();
+
+        // Collect unique text
+        let text: String = chars.iter().map(|c| c.char).collect();
+        assert!(
+            text.contains("Line one"),
+            "Should contain 'Line one', got: {}",
+            text
+        );
+        assert!(
+            text.contains("Line two"),
+            "Should contain 'Line two', got: {}",
+            text
+        );
+
+        // Verify the Y gap is ~13pt (1.3 * 10), not 1.3pt
+        let line_one_y = chars.iter().find(|c| c.char == 'L').unwrap().bbox.y;
+        let line_two_chars: Vec<_> = chars.iter().filter(|c| c.char == 'L').collect();
+        assert!(
+            line_two_chars.len() >= 2,
+            "Should have at least 2 'L' chars (one per line)"
+        );
+        let line_two_y = line_two_chars[1].bbox.y;
+        let y_gap = (line_one_y - line_two_y).abs();
+        assert!(
+            y_gap > 5.0,
+            "Y gap should be ~13pt (Tm-scaled), got {:.1}pt",
+            y_gap
+        );
     }
 
     #[test]
