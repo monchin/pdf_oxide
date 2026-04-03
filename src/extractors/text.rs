@@ -1285,6 +1285,8 @@ struct TjBuffer {
     font_weight: FontWeight,
     /// Pre-computed italic flag from cached font reference.
     is_italic: bool,
+    /// Whether the font is monospaced (from FixedPitch flag or name heuristic).
+    is_monospace: bool,
     /// Pre-computed user-space position (CTM applied to text matrix origin).
     /// Avoids two transform_point calls per flush.
     user_pos_x: f32,
@@ -1312,6 +1314,16 @@ impl TjBuffer {
             _ => FontWeight::Normal,
         };
         let is_italic = cached_font.as_ref().map(|f| f.is_italic()).unwrap_or(false);
+        let is_monospace = cached_font.as_ref().is_some_and(|f| {
+            if f.flags.is_some_and(|flags| flags & 1 != 0) {
+                return true;
+            }
+            let name = f.base_font.to_uppercase();
+            name.contains("COURIER")
+                || name.contains("CONSOLAS")
+                || name.contains("MONO")
+                || name.contains("FIXED")
+        });
         // Pre-compute user-space position: text_matrix origin → CTM transform
         let text_pos = state.text_matrix.transform_point(0.0, 0.0);
         let user_pos = state.ctm.transform_point(text_pos.x, text_pos.y);
@@ -1329,6 +1341,7 @@ impl TjBuffer {
             effective_font_size,
             font_weight,
             is_italic,
+            is_monospace,
             user_pos_x: user_pos.x,
             user_pos_y: user_pos.y,
             user_h_scale,
@@ -3582,6 +3595,7 @@ impl TextExtractor {
                                             color: Color::new(r, g, b),
                                             mcid: self.current_mcid,
                                             is_italic: is_italic_space,
+                                            is_monospace: false,
                                             // Transformation properties (v0.3.1)
                                             origin_x: pos.x,
                                             origin_y: pos.y,
@@ -4750,6 +4764,7 @@ impl TextExtractor {
             word_spacing: buffer.word_space, // Tw - captured from PDF content stream
             horizontal_scaling: buffer.horizontal_scaling, // Tz - captured from PDF content stream
             is_italic: is_italic_span,
+            is_monospace: false,
             primary_detected: false,
             artifact_type: self.current_artifact_type(),
         };
@@ -5183,6 +5198,7 @@ impl TextExtractor {
             word_spacing: state.word_space,
             horizontal_scaling: state.horizontal_scaling,
             is_italic,
+            is_monospace: false,
             primary_detected: true,
             artifact_type: None,
         };
@@ -5648,6 +5664,7 @@ impl TextExtractor {
             word_spacing: state.word_space, // Tw - captured from PDF content stream
             horizontal_scaling: state.horizontal_scaling, // Tz - captured from PDF content stream
             is_italic: is_italic_space,
+            is_monospace: false,
             primary_detected: false,
             artifact_type: self.current_artifact_type(),
         };
@@ -5730,6 +5747,7 @@ impl TextExtractor {
                     word_spacing: 0.0, // Tw - per ISO 32000-1:2008 Section 9.3.1
                     horizontal_scaling: 100.0, // Tz - per ISO 32000-1:2008 Section 9.3.1
                     is_italic: is_italic_buf,
+                    is_monospace: buffer.is_monospace,
                     primary_detected: false,
                     artifact_type: None,
                 };
@@ -5884,6 +5902,7 @@ impl TextExtractor {
                         color,
                         mcid: self.current_mcid,
                         is_italic: is_italic_char,
+                        is_monospace: false,
                         origin_x: char_origin_x,
                         origin_y: char_origin_y,
                         rotation_degrees,
@@ -6462,6 +6481,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -6486,6 +6506,7 @@ mod tests {
                 offset_semantic: false,
                 primary_detected: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -7805,6 +7826,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -7820,6 +7842,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.5,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -7847,6 +7870,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -7862,6 +7886,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 680.0,
                 rotation_degrees: 0.0,
@@ -7902,6 +7927,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -7920,6 +7946,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -7967,6 +7994,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -7996,6 +8024,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 680.0,
                 rotation_degrees: 0.0,
@@ -8011,6 +8040,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -8039,6 +8069,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 200.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -8054,6 +8085,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -8081,6 +8113,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 0.0,
                 origin_y: 0.0,
                 rotation_degrees: 0.0,
@@ -8096,6 +8129,7 @@ mod tests {
                 color: Color::black(),
                 mcid: None,
                 is_italic: false,
+                is_monospace: false,
                 origin_x: 100.0,
                 origin_y: 700.0,
                 rotation_degrees: 0.0,
@@ -8132,6 +8166,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8150,6 +8185,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8182,6 +8218,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8200,6 +8237,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8237,6 +8275,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8255,6 +8294,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8285,6 +8325,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8303,6 +8344,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: true, // TJ offset space
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -8321,6 +8363,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10470,6 +10513,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10488,6 +10532,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10516,6 +10561,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10534,6 +10580,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10622,6 +10669,7 @@ mod tests {
             split_boundary_before: false,
             offset_semantic: false,
             is_italic: false,
+            is_monospace: false,
             char_spacing: 0.0,
             word_spacing: 0.0,
             horizontal_scaling: 100.0,
@@ -10651,6 +10699,7 @@ mod tests {
             split_boundary_before: false,
             offset_semantic: false,
             is_italic: false,
+            is_monospace: false,
             char_spacing: 0.0,
             word_spacing: 0.0,
             horizontal_scaling: 100.0,
@@ -10827,6 +10876,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10845,6 +10895,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10919,6 +10970,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -10937,6 +10989,7 @@ mod tests {
                 split_boundary_before: true, // forces merge-with-space path
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -11227,6 +11280,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -11245,6 +11299,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -11359,6 +11414,7 @@ mod tests {
                 split_boundary_before: false,
                 offset_semantic: false,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,
@@ -11377,6 +11433,7 @@ mod tests {
                 split_boundary_before: true, // forcing merge path
                 offset_semantic: true,
                 is_italic: false,
+                is_monospace: false,
                 char_spacing: 0.0,
                 word_spacing: 0.0,
                 horizontal_scaling: 100.0,

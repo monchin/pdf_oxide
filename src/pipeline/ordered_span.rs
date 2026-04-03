@@ -291,6 +291,7 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: Color::new(0.0, 0.0, 0.0),
             mcid: None,
             sequence: 0,

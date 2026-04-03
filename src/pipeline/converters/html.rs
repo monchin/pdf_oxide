@@ -429,6 +429,7 @@ mod tests {
                 font_size,
                 font_weight: weight,
                 is_italic: false,
+                is_monospace: false,
                 color: Color::black(),
                 mcid: None,
                 sequence: 0,

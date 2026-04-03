@@ -323,6 +323,7 @@ mod tests {
                 font_size: 12.0,
                 font_weight: crate::layout::FontWeight::Normal,
                 is_italic: false,
+                is_monospace: false,
                 color: crate::layout::Color {
                     r: 0.0,
                     g: 0.0,
@@ -345,6 +346,7 @@ mod tests {
                 font_size: 12.0,
                 font_weight: crate::layout::FontWeight::Normal,
                 is_italic: false,
+                is_monospace: false,
                 color: crate::layout::Color {
                     r: 0.0,
                     g: 0.0,

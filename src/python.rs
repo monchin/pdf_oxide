@@ -2434,6 +2434,10 @@ impl PyTextChar {
         self.inner.is_italic
     }
     #[getter]
+    fn is_monospace(&self) -> bool {
+        self.inner.is_monospace
+    }
+    #[getter]
     fn color(&self) -> (f32, f32, f32) {
         (self.inner.color.r, self.inner.color.g, self.inner.color.b)
     }
@@ -2494,6 +2498,10 @@ impl PyTextSpan {
     #[getter]
     fn is_italic(&self) -> bool {
         self.inner.is_italic
+    }
+    #[getter]
+    fn is_monospace(&self) -> bool {
+        self.inner.is_monospace
     }
     #[getter]
     fn color(&self) -> (f32, f32, f32) {

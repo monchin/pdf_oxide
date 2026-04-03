@@ -32,6 +32,8 @@ pub struct TextSpan {
     pub font_weight: FontWeight,
     /// Font style: italic or normal
     pub is_italic: bool,
+    /// Whether the font is monospaced (from PDF font descriptor FixedPitch flag)
+    pub is_monospace: bool,
     /// Text color
     pub color: Color,
     /// Marked Content ID (for Tagged PDFs)
@@ -63,6 +65,7 @@ impl Default for TextSpan {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: Color::black(),
             mcid: None,
             sequence: 0,
@@ -101,6 +104,7 @@ impl TextSpan {
                 font_size: self.font_size,
                 font_weight: self.font_weight,
                 is_italic: self.is_italic,
+                is_monospace: self.is_monospace,
                 color: self.color,
                 mcid: self.mcid,
                 origin_x: self.bbox.x + (i as f32) * char_width,
@@ -142,6 +146,8 @@ pub struct TextChar {
     pub font_weight: FontWeight,
     /// Font style: italic or normal
     pub is_italic: bool,
+    /// Whether the font is monospaced (from PDF font descriptor FixedPitch flag)
+    pub is_monospace: bool,
     /// Text color
     pub color: Color,
     /// Marked Content ID (for Tagged PDFs)
@@ -207,6 +213,7 @@ impl Default for TextChar {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: Color::black(),
             mcid: None,
             origin_x: 0.0,
@@ -281,6 +288,7 @@ impl TextChar {
             font_size,
             font_weight: FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: Color::black(),
             mcid: None,
             origin_x: bbox.x,
@@ -524,6 +532,7 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: Color::black(),
             mcid: None,
             origin_x: bbox.x,
@@ -547,5 +556,49 @@ mod tests {
         let block = TextBlock::from_chars(chars);
         assert_eq!(block.text, "Hello");
         assert_eq!(block.avg_font_size, 12.0);
+    }
+
+    #[test]
+    fn test_text_span_is_monospace_default() {
+        let span = TextSpan::default();
+        assert!(!span.is_monospace, "Default spans should not be monospace");
+    }
+
+    #[test]
+    fn test_text_span_is_monospace_set() {
+        let span = TextSpan {
+            is_monospace: true,
+            text: "AB".to_string(),
+            bbox: Rect::new(0.0, 0.0, 20.0, 12.0),
+            ..TextSpan::default()
+        };
+        assert!(span.is_monospace);
+
+        // to_chars should propagate is_monospace
+        let chars = span.to_chars();
+        for c in &chars {
+            assert!(c.is_monospace, "TextChar should inherit is_monospace from span");
+        }
+    }
+
+    #[test]
+    fn test_text_char_is_monospace() {
+        let c = TextChar {
+            char: 'A',
+            bbox: Rect::new(0.0, 0.0, 10.0, 12.0),
+            font_name: "Courier".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            is_italic: false,
+            is_monospace: true,
+            color: Color::black(),
+            mcid: None,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            rotation_degrees: 0.0,
+            advance_width: 10.0,
+            matrix: None,
+        };
+        assert!(c.is_monospace);
     }
 }

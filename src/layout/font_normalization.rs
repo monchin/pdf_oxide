@@ -123,6 +123,7 @@ mod tests {
                 FontWeight::Normal
             },
             is_italic: false,
+            is_monospace: false,
             color: Color::black(),
             mcid: Some(0),
             sequence: 0,

@@ -3960,6 +3960,7 @@ impl PdfDocument {
                 font_size,
                 font_weight: crate::layout::text_block::FontWeight::Normal,
                 is_italic: false,
+                is_monospace: false,
                 color: crate::layout::text_block::Color {
                     r: 0.0,
                     g: 0.0,
@@ -6002,6 +6003,7 @@ impl PdfDocument {
                     crate::layout::FontWeight::Normal
                 },
                 is_italic: w.is_italic,
+                is_monospace: false,
                 color: crate::layout::Color::black(),
                 mcid: w.mcid,
                 sequence: 0,
@@ -7030,6 +7032,7 @@ impl PdfDocument {
                     crate::layout::FontWeight::Normal
                 },
                 is_italic: w.is_italic,
+                is_monospace: false,
                 color: crate::layout::Color::black(),
                 mcid: w.mcid,
                 sequence: 0,
@@ -9728,6 +9731,7 @@ mod tests {
             font_size,
             font_weight: crate::layout::FontWeight::Normal,
             is_italic: false,
+            is_monospace: false,
             color: crate::layout::Color::new(0.0, 0.0, 0.0),
             mcid: None,
             sequence: 0,
