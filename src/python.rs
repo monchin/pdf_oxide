@@ -3497,6 +3497,34 @@ impl PyPageTemplate {
     }
 }
 
+// pyo3_log caches Python logger levels per target for performance. When
+// users change Python logger configuration (or call `set_log_level`) after
+// the cache has been populated, the cache must be reset for the change to
+// take effect on already-seen targets. We hold the ResetHandle returned by
+// `pyo3_log::try_init()` so both `setup_logging` and `set_log_level` can
+// clear the cache.
+static PYO3_LOG_RESET_HANDLE: std::sync::OnceLock<pyo3_log::ResetHandle> =
+    std::sync::OnceLock::new();
+
+fn init_pyo3_log_handle() {
+    PYO3_LOG_RESET_HANDLE.get_or_init(|| {
+        pyo3_log::try_init().unwrap_or_else(|_| {
+            // Another logger was already installed (e.g. by an embedding
+            // host). In that case, do not replace the global logger;
+            // instead, create a standalone default `Logger` value and take
+            // its `ResetHandle`. `reset_handle()` is available on any
+            // `Logger` instance and does not itself perform installation.
+            pyo3_log::Logger::default().reset_handle()
+        })
+    });
+}
+
+fn reset_pyo3_log_cache() {
+    if let Some(handle) = PYO3_LOG_RESET_HANDLE.get() {
+        handle.reset();
+    }
+}
+
 /// Bridge Rust `log` macros into Python's `logging` module.
 ///
 /// After this is called, all log messages emitted by pdf_oxide flow through
@@ -3513,8 +3541,10 @@ impl PyPageTemplate {
 /// compatibility.
 #[pyfunction]
 fn setup_logging() {
-    // pyo3_log::try_init is idempotent and safe to call multiple times.
-    let _ = pyo3_log::try_init();
+    init_pyo3_log_handle();
+    // Reset the level cache in case Python-side logger config changed since
+    // the last time any target was checked.
+    reset_pyo3_log_cache();
 }
 
 /// Set the maximum log level for pdf_oxide messages that cross into Python.
@@ -3522,9 +3552,11 @@ fn setup_logging() {
 /// Accepts one of: `"off"`, `"error"`, `"warn"` / `"warning"`, `"info"`,
 /// `"debug"`, `"trace"`. Case-insensitive.
 ///
-/// This is a thin wrapper over Rust's `log::set_max_level` — it controls the
-/// Rust-side filter gate. For full control, use Python's `logging` module
-/// directly (e.g. `logging.getLogger("pdf_oxide").setLevel(logging.INFO)`).
+/// This sets Rust's `log::max_level` filter gate *and* clears pyo3_log's
+/// per-target level cache so the change takes effect on targets that have
+/// already been logged to. Without the cache reset, loggers like
+/// `pdf_oxide.xref` — which pyo3_log probes and caches on first use — would
+/// keep their stale level and ignore subsequent calls to this function.
 #[pyfunction]
 fn set_log_level(level: &str) -> PyResult<()> {
     use log::LevelFilter;
@@ -3543,6 +3575,7 @@ fn set_log_level(level: &str) -> PyResult<()> {
         },
     };
     log::set_max_level(filter);
+    reset_pyo3_log_cache();
     Ok(())
 }
 
@@ -3551,15 +3584,39 @@ fn set_log_level(level: &str) -> PyResult<()> {
 #[pyfunction]
 fn disable_logging() {
     log::set_max_level(log::LevelFilter::Off);
+    reset_pyo3_log_cache();
+}
+
+/// Return the current Rust-side log level filter as a lowercase string.
+///
+/// One of: `"off"`, `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`.
+///
+/// This mirrors the gate controlled by `set_log_level` and is useful for
+/// tests or context managers that want to save/restore the log level
+/// around a block without hard-coding a "default".
+#[pyfunction]
+fn get_log_level() -> &'static str {
+    match log::max_level() {
+        log::LevelFilter::Off => "off",
+        log::LevelFilter::Error => "error",
+        log::LevelFilter::Warn => "warn",
+        log::LevelFilter::Info => "info",
+        log::LevelFilter::Debug => "debug",
+        log::LevelFilter::Trace => "trace",
+    }
 }
 
 #[pymodule]
 fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Bridge Rust `log` to Python `logging` (silent by default, user
     // configures with `logging.basicConfig(level=...)`). Fixes issue #280.
-    let _ = pyo3_log::try_init();
+    // We hold the ResetHandle so `set_log_level` can flush pyo3_log's
+    // per-target cache — fixes issue #283 regression where per-logger
+    // cached levels survived set_log_level calls.
+    init_pyo3_log_handle();
     m.add_function(wrap_pyfunction!(setup_logging, m)?)?;
     m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
+    m.add_function(wrap_pyfunction!(get_log_level, m)?)?;
     m.add_function(wrap_pyfunction!(disable_logging, m)?)?;
     m.add_class::<PyPdfDocument>()?;
     m.add_class::<PyPdf>()?;

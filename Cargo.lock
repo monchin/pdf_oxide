@@ -2553,7 +2553,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pdf_oxide"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "aes",
  "barcoders",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "pdf_oxide_cli"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "clap",
  "is-terminal",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "pdf_oxide_mcp"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "pdf_oxide",
  "serde",
@@ -3023,6 +3023,7 @@ version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e368e7ddfdeb98c9bca7f8383be1648fd84ab466bf2bc015e94008db6d35611e"
 dependencies = [
+ "python3-dll-a",
  "target-lexicon",
 ]
 
@@ -3070,6 +3071,15 @@ dependencies = [
  "pyo3-build-config",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "python3-dll-a"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d381ef313ae70b4da5f95f8a4de773c6aa5cd28f73adec4b4a31df70b66780d8"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
