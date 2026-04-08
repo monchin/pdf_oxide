@@ -2689,6 +2689,13 @@ pub fn detect_tables_with_lines(
     // Filter out invalid line-based tables BEFORE overlap checking so that
     // spurious line-based tables don't shadow valid text-based ones.
     final_tables.retain(is_valid_table);
+    // Skip text fallback when line-based paths are present. Pages with
+    // lines/rectangles that didn't form tables are graphical (charts,
+    // diagrams), not text-table pages. The column-aware text detection
+    // is expensive on pages with diverse layouts.
+    if !lines.is_empty() {
+        return final_tables;
+    }
     let text_candidates = detect_tables_from_spans_column_aware(spans, config);
     for text_table in text_candidates {
         if let Some(text_bbox) = text_table.bbox {

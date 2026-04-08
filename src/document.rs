@@ -214,6 +214,8 @@ pub struct PdfDocument {
         RefCell<HashMap<ObjectRef, Vec<crate::extractors::PdfImage>>>,
     /// Regions marked for erasure per page
     pub(crate) erase_regions: HashMap<usize, Vec<crate::geometry::Rect>>,
+    /// Cached decompressed content stream for last accessed page.
+    page_content_cache: RefCell<Option<(usize, std::sync::Arc<Vec<u8>>)>>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -437,6 +439,7 @@ impl PdfDocument {
             xobject_spans_cache: RefCell::new(HashMap::new()),
             form_xobject_images_cache: RefCell::new(HashMap::new()),
             erase_regions: HashMap::new(),
+            page_content_cache: RefCell::new(None),
         };
 
         // Initialize encryption immediately
@@ -2153,12 +2156,11 @@ impl PdfDocument {
             return Ok(cached.clone());
         }
 
-        // On first cache miss, walk the page tree once and populate ALL pages.
-        // This turns O(n) per-page lookups into a single O(n) walk, avoiding
-        // O(n²) total cost when iterating sequentially through many pages.
-        // The flag ensures we only attempt this once, even if it fails or
-        // produces an incomplete cache (e.g., malformed page trees).
-        if !self.page_cache_populated {
+        // Defer bulk page tree walk until enough pages are accessed.
+        const LAZY_THRESHOLD: usize = 64;
+        let cache_misses = self.page_cache.len();
+
+        if !self.page_cache_populated && cache_misses >= LAZY_THRESHOLD {
             self.page_cache_populated = true;
             if let Err(e) = self.populate_page_cache() {
                 log::warn!(
@@ -2166,16 +2168,13 @@ impl PdfDocument {
                     e
                 );
             }
-            // DISABLED: extremely slow on large/malformed documents
-            // self.prefetch_xobject_subtypes();
+            // Check cache after bulk population
+            if let Some(cached) = self.page_cache.get(&page_index) {
+                return Ok(cached.clone());
+            }
         }
 
-        // Check cache again after bulk population
-        if let Some(cached) = self.page_cache.get(&page_index) {
-            return Ok(cached.clone());
-        }
-
-        // Fallback: per-page tree traversal (for malformed page trees where bulk walk fails)
+        // Per-page tree traversal: walks only the branches needed to find target page
         let catalog = self.catalog()?;
         let catalog_dict = catalog.as_dict().ok_or_else(|| Error::InvalidObjectType {
             expected: "Dictionary".to_string(),
@@ -2580,8 +2579,24 @@ impl PdfDocument {
             .ok_or_else(|| Error::InvalidPdf("Page tree node missing /Type".to_string()))?;
 
         match node_type {
+            "Pages" if *current_index < target_index => {
+                // Skip entire subtree if /Count shows target is past this node.
+                if let Some(count) = node_dict.get("Count").and_then(|c| c.as_integer()) {
+                    let count = count as usize;
+                    if *current_index + count <= target_index {
+                        *current_index += count;
+                        return Err(Error::InvalidPdf(format!(
+                            "Page index {} not found in tree",
+                            target_index
+                        )));
+                    }
+                }
+            },
+            _ => {},
+        }
+
+        match node_type {
             "Page" => {
-                // This is a leaf page
                 if *current_index == target_index {
                     // Apply inherited attributes to this page
                     // PDF Spec: "If not present in the page dictionary, the value is inherited
@@ -2648,7 +2663,6 @@ impl PdfDocument {
                         Error::InvalidPdf("Kid in /Kids array is not a reference".to_string())
                     })?;
 
-                    // Pass inherited attributes to children
                     match self.get_page_from_tree_inner(
                         kid_ref,
                         target_index,
@@ -2941,31 +2955,36 @@ impl PdfDocument {
         options: &crate::converters::ConversionOptions,
     ) -> Result<String> {
         self.require_authenticated()?;
-        // 1. Check if this is a Tagged PDF with structure tree (cached after first check).
-        // Uses Arc to avoid expensive deep clones of the tree on every page.
+
+        let base_spans = self.extract_spans(page_index)?;
+
+        // Structure tree: check MarkInfo first (cheap) to skip non-tagged PDFs.
         let cached_tree = match &self.structure_tree_cache {
-            Some(cached) => cached.clone(), // Arc clone = cheap ref count bump
+            Some(cached) => cached.clone(),
             None => {
-                let tree = self.structure_tree().ok().flatten().map(Arc::new);
-                self.structure_tree_cache = Some(tree.clone());
-                tree
+                let is_marked = self.mark_info().map(|m| m.marked).unwrap_or(false);
+                if is_marked {
+                    let tree = self.structure_tree().ok().flatten().map(Arc::new);
+                    self.structure_tree_cache = Some(tree.clone());
+                    tree
+                } else {
+                    self.structure_tree_cache = Some(None);
+                    None
+                }
             },
         };
-
-        // 2. Extract Spans Early (needed for table detection and both paths)
-        let mut all_spans = self.extract_spans(page_index)?;
         let widget_spans = self.extract_widget_spans(page_index);
-        all_spans.extend(widget_spans);
 
-        // 3. Table Detection (if enabled)
+        // Table detection uses base spans only (no widget spans).
         let tables = if options.extract_tables {
-            self.extract_page_tables(page_index, &all_spans, options)
+            self.extract_page_tables(page_index, &base_spans, options)
         } else {
             Vec::new()
         };
 
-        // Fast pre-check: skip pages that cannot produce text BEFORE the expensive
-        // structure tree parse.
+        let mut all_spans = base_spans;
+        all_spans.extend(widget_spans);
+
         if all_spans.is_empty() {
             let page = self.get_page(page_index)?;
             let page_dict = page.as_dict().ok_or_else(|| Error::ParseError {
@@ -5556,10 +5575,19 @@ impl PdfDocument {
     /// }
     /// ```
     pub fn extract_words(&mut self, page_index: usize) -> Result<Vec<crate::layout::Word>> {
+        let spans = self.extract_spans(page_index)?;
+        self.words_from_spans(page_index, &spans)
+    }
+
+    /// Build words from pre-extracted spans.
+    fn words_from_spans(
+        &mut self,
+        page_index: usize,
+        spans: &[crate::layout::TextSpan],
+    ) -> Result<Vec<crate::layout::Word>> {
         use crate::layout::{clustering, AdaptiveLayoutParams, DocumentProperties, Word};
         use crate::pipeline::reading_order::xycut::XYCutStrategy;
 
-        let spans = self.extract_spans(page_index)?;
         if spans.is_empty() {
             return Ok(Vec::new());
         }
@@ -5845,6 +5873,12 @@ impl PdfDocument {
     /// This returns the decoded content stream bytes for the specified page.
     /// The content stream contains PDF operators that define the page's appearance.
     pub fn get_page_content_data(&mut self, page_index: usize) -> Result<Vec<u8>> {
+        if let Some((cached_page, ref data)) = *self.page_content_cache.borrow() {
+            if cached_page == page_index {
+                return Ok(data.as_ref().clone());
+            }
+        }
+
         // Ensure encryption is initialized if needed
         self.ensure_encryption_initialized()?;
 
@@ -5949,6 +5983,10 @@ impl PdfDocument {
             page_index,
             String::from_utf8_lossy(&content_data)
         );
+
+        *self.page_content_cache.borrow_mut() =
+            Some((page_index, std::sync::Arc::new(content_data.clone())));
+
         Ok(content_data)
     }
 
@@ -5992,9 +6030,9 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::elements::PathContent>> {
-        use crate::content::{parse_content_stream, GraphicsStateStack, Operator};
+        use crate::content::{parse_content_stream_paths_only, Operator};
         use crate::elements::{LineCap, LineJoin};
-        use crate::extractors::paths::{FillRule, PathExtractor};
+        use crate::extractors::paths::{FillRule, PathExtractor, PathGraphicsStateStack};
         use crate::layout::Color;
 
         // Get page object and content stream
@@ -6017,8 +6055,7 @@ impl PdfDocument {
             },
         };
 
-        // Parse content stream into operators
-        let operators = match parse_content_stream(&content_data) {
+        let operators = match parse_content_stream_paths_only(&content_data) {
             Ok(ops) => ops,
             Err(e) => {
                 log::warn!(
@@ -6030,9 +6067,8 @@ impl PdfDocument {
             },
         };
 
-        // Create path extractor and graphics state stack
         let mut extractor = PathExtractor::new();
-        let mut state_stack = GraphicsStateStack::new();
+        let mut state_stack = PathGraphicsStateStack::new();
 
         // Resolve and set page resources for XObject processing
         if let Some(resources) = page_dict.get("Resources") {
@@ -6053,7 +6089,7 @@ impl PdfDocument {
                 },
                 Operator::RestoreState => {
                     state_stack.restore();
-                    extractor.update_from_state(state_stack.current());
+                    extractor.update_from_path_state(state_stack.current());
                 },
                 Operator::Cm { a, b, c, d, e, f } => {
                     let state = state_stack.current_mut();
@@ -6318,65 +6354,19 @@ impl PdfDocument {
         &mut self,
         name: &str,
         extractor: &mut crate::extractors::paths::PathExtractor,
-        state_stack: &mut crate::content::GraphicsStateStack,
+        state_stack: &mut crate::extractors::paths::PathGraphicsStateStack,
     ) -> Result<()> {
-        use crate::content::{parse_content_stream, Matrix, Operator};
+        use crate::content::{parse_content_stream_paths_only, Matrix, Operator};
         use crate::elements::{LineCap, LineJoin};
         use crate::extractors::paths::FillRule;
         use crate::layout::Color;
 
-        // Get resources from extractor
-        let resources = match extractor.get_resources() {
+        let xobject_ref = match extractor.resolve_xobject_ref(name, |ref_obj| self.load_object(ref_obj)) {
             Some(r) => r,
-            None => return Ok(()), // No resources, can't process XObjects
-        };
-
-        // Resolve indirect reference to resources if needed
-        let resolved_resources = if let Some(ref_obj) = resources.as_reference() {
-            match self.load_object(ref_obj) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(()),
-            }
-        } else {
-            resources.clone()
-        };
-
-        // Get XObject dictionary from resources
-        let resources_dict = match resolved_resources.as_dict() {
-            Some(dict) => dict,
             None => return Ok(()),
         };
 
-        let xobject_obj = match resources_dict.get("XObject") {
-            Some(obj) => obj,
-            None => return Ok(()),
-        };
-
-        // Resolve indirect reference to XObject dictionary if needed
-        let resolved_xobject_obj = if let Some(ref_obj) = xobject_obj.as_reference() {
-            match self.load_object(ref_obj) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(()),
-            }
-        } else {
-            xobject_obj.clone()
-        };
-
-        let xobject_dict = match resolved_xobject_obj.as_dict() {
-            Some(dict) => dict,
-            None => return Ok(()),
-        };
-
-        // Get XObject reference
-        let xobject_ref = match xobject_dict.get(name) {
-            Some(obj) => match obj.as_reference() {
-                Some(r) => r,
-                None => return Ok(()),
-            },
-            None => return Ok(()),
-        };
-
-        // Cycle detection: skip if already processing this XObject
+        // Cycle detection
         if !extractor.can_process_xobject(xobject_ref) {
             return Ok(());
         }
@@ -6420,17 +6410,34 @@ impl PdfDocument {
             },
         }
 
-        // Get and decode the stream
-        let stream_data = match self.decode_stream_with_encryption(&xobject, xobject_ref) {
-            Ok(data) => data,
-            Err(e) => {
-                extractor.pop_xobject();
-                return Err(e);
-            },
+        // Decode stream — reuse document-level cache shared with text extraction.
+        let cached_stream =
+            { self.xobject_stream_cache.borrow().get(&xobject_ref).cloned() };
+        let stream_data = if let Some(cached) = cached_stream {
+            cached.as_ref().clone()
+        } else {
+            match self.decode_stream_with_encryption(&xobject, xobject_ref) {
+                Ok(data) => {
+                    const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
+                    if self.xobject_stream_cache_bytes.get() + data.len()
+                        <= MAX_STREAM_CACHE_BYTES
+                    {
+                        self.xobject_stream_cache_bytes
+                            .set(self.xobject_stream_cache_bytes.get() + data.len());
+                        self.xobject_stream_cache
+                            .borrow_mut()
+                            .insert(xobject_ref, std::sync::Arc::new(data.clone()));
+                    }
+                    data
+                },
+                Err(e) => {
+                    extractor.pop_xobject();
+                    return Err(e);
+                },
+            }
         };
 
-        // Parse operators from the stream
-        let operators = match parse_content_stream(&stream_data) {
+        let operators = match parse_content_stream_paths_only(&stream_data) {
             Ok(ops) => ops,
             Err(e) => {
                 extractor.pop_xobject();
@@ -6502,7 +6509,7 @@ impl PdfDocument {
                 },
                 Operator::RestoreState => {
                     state_stack.restore();
-                    extractor.update_from_state(state_stack.current());
+                    extractor.update_from_path_state(state_stack.current());
                 },
                 Operator::Cm { a, b, c, d, e, f } => {
                     let state = state_stack.current_mut();
@@ -6618,7 +6625,7 @@ impl PdfDocument {
 
         // Restore graphics state
         state_stack.restore();
-        extractor.update_from_state(state_stack.current());
+        extractor.update_from_path_state(state_stack.current());
 
         // Pop from XObject processing stack
         extractor.pop_xobject();
@@ -7015,7 +7022,6 @@ impl PdfDocument {
                     for (name, font_arc) in &cached_set {
                         extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
                     }
-                    // share_truetype_cmaps already applied before caching — skip it
                     return Ok(());
                 }
             }
@@ -7231,7 +7237,21 @@ impl PdfDocument {
         options: &crate::converters::ConversionOptions,
     ) -> Vec<crate::structure::ExtractedTable> {
         // Strategy 1: Structure tree (tagged PDFs)
-        if let Ok(Some(struct_tree)) = self.structure_tree() {
+        let struct_tree_opt = match &self.structure_tree_cache {
+            Some(cached) => cached.clone(),
+            None => {
+                let is_marked = self.mark_info().map(|m| m.marked).unwrap_or(false);
+                if is_marked {
+                    let tree = self.structure_tree().ok().flatten().map(Arc::new);
+                    self.structure_tree_cache = Some(tree.clone());
+                    tree
+                } else {
+                    self.structure_tree_cache = Some(None);
+                    None
+                }
+            },
+        };
+        if let Some(ref struct_tree) = struct_tree_opt {
             let table_elems =
                 crate::structure::find_table_elements(&struct_tree, page_index as u32);
             if !table_elems.is_empty() {
@@ -7241,7 +7261,7 @@ impl PdfDocument {
                         Ok(mut table) if !table.is_empty() => {
                             // Compute bbox from spans matching the table's MCIDs
                             if table.bbox.is_none() {
-                                let all_mcids: Vec<u32> = table
+                                let all_mcids: HashSet<u32> = table
                                     .rows
                                     .iter()
                                     .flat_map(|r| {
@@ -7295,9 +7315,29 @@ impl PdfDocument {
         // Extract vector paths (lines/rects) for visual detection
         let paths = self.extract_paths(page_index).unwrap_or_default();
 
-        // Use words instead of raw spans for better granularity in untagged PDFs.
-        // This ensures that strings with spaces are split into separate columns.
-        let words = self.extract_words(page_index).unwrap_or_default();
+        // Filter to table-relevant paths (lines and rectangles only).
+        // Chart/plot pages often have hundreds of curves and fills that
+        // extract_edges ignores anyway — passing them through the full
+        // detection pipeline wastes O(n²) time.
+        const LINE_TOL: f32 = 2.0;
+        let table_paths: Vec<_> = paths
+            .into_iter()
+            .filter(|p| p.is_horizontal_line(LINE_TOL) || p.is_vertical_line(LINE_TOL) || p.is_rectangle())
+            .collect();
+
+        if table_paths.is_empty() {
+            use crate::structure::spatial_table_detector::TableStrategy;
+            let is_text_only = matches!(
+                (config.horizontal_strategy, config.vertical_strategy),
+                (TableStrategy::Text, TableStrategy::Text)
+            );
+            if !is_text_only {
+                return Vec::new();
+            }
+        }
+        let paths = table_paths;
+
+        let words = self.words_from_spans(page_index, spans).unwrap_or_default();
         let word_spans: Vec<crate::layout::TextSpan> = words
             .into_iter()
             .map(|w| crate::layout::TextSpan {
@@ -7392,29 +7432,22 @@ impl PdfDocument {
         options: &crate::converters::ConversionOptions,
     ) -> Result<String> {
         self.require_authenticated()?;
-        // Step 1: Extract raw spans (unchanged - this is the foundation)
-        let mut spans = self.extract_spans(page_index)?;
+        let base_spans = self.extract_spans(page_index)?;
 
-        // Step 1b: Merge widget annotation spans (form field values) if enabled
-        if options.include_form_fields {
-            spans.extend(self.extract_widget_spans(page_index));
-        }
-
-        // Step 2: Extract tables if enabled
         let tables = if options.extract_tables {
-            self.extract_page_tables(page_index, &spans, options)
+            self.extract_page_tables(page_index, &base_spans, options)
         } else {
             Vec::new()
         };
 
-        // Step 3: Create pipeline config from options (using adapter from Phase 2)
+        let mut spans = base_spans;
+        if options.include_form_fields {
+            spans.extend(self.extract_widget_spans(page_index));
+        }
+
         let pipeline_config = TextPipelineConfig::from_conversion_options(options);
 
-        // Step 4: Handle structure tree context for reading order
-        // Use cached structure tree (same cache as extract_text) to avoid
-        // re-traversing the entire tree for each page — O(1) lookup instead of O(tree_size).
         let mcid_order = {
-            // Ensure structure tree is cached (Arc clone = cheap ref count bump)
             let cached_tree = match &self.structure_tree_cache {
                 Some(cached) => cached.clone(),
                 None => {
@@ -7702,22 +7735,19 @@ impl PdfDocument {
         options: &crate::converters::ConversionOptions,
     ) -> Result<String> {
         self.require_authenticated()?;
-        // Step 1: Extract raw spans (unchanged - this is the foundation)
-        let mut spans = self.extract_spans(page_index)?;
+        let base_spans = self.extract_spans(page_index)?;
 
-        // Step 1b: Merge widget annotation spans (form field values) if enabled
-        if options.include_form_fields {
-            spans.extend(self.extract_widget_spans(page_index));
-        }
-
-        // Step 2: Extract tables if enabled
         let tables = if options.extract_tables {
-            self.extract_page_tables(page_index, &spans, options)
+            self.extract_page_tables(page_index, &base_spans, options)
         } else {
             Vec::new()
         };
 
-        // Step 3: Create pipeline config from options (using adapter from Phase 2)
+        let mut spans = base_spans;
+        if options.include_form_fields {
+            spans.extend(self.extract_widget_spans(page_index));
+        }
+
         let pipeline_config = TextPipelineConfig::from_conversion_options(options);
 
         // Step 4: Create pipeline with config

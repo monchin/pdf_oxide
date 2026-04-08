@@ -4422,13 +4422,9 @@ impl TextExtractor {
     /// graphics (charts, plots) with no text content.
     const MAX_XOBJECT_DEPTH: u32 = 10;
 
-    /// Maximum number of XObject streams decoded per page. Pages with thousands
-    /// of Form XObjects (e.g., matplotlib plots) cause O(n) decompression overhead.
-    /// Real text content rarely requires more than ~100 XObject decodes.
     const MAX_XOBJECT_DECODES: u32 = 500;
 
     /// Resolve XObject name to ObjectRef using cached mapping.
-    /// Builds the cache on first call for the current resources context.
     fn resolve_xobject_ref(&mut self, name: &str) -> Result<Option<ObjectRef>> {
         // Check cache first (O(1) lookup)
         if let Some(cached) = self.cached_xobject_refs.get(name) {
@@ -4485,11 +4481,7 @@ impl TextExtractor {
         Ok(self.cached_xobject_refs.get(name).copied().flatten())
     }
 
-    /// Process a Form XObject invoked by the Do operator.
-    ///
-    /// This extracts text from Form XObjects while avoiding duplicate processing.
     fn process_xobject(&mut self, name: &str) -> Result<()> {
-        // Budget checks: avoid pathological cases with thousands of XObjects
         if self.xobject_depth >= Self::MAX_XOBJECT_DEPTH {
             return Ok(());
         }
@@ -4518,16 +4510,14 @@ impl TextExtractor {
             None => return Ok(()),
         };
 
+        if doc.xobject_text_free_cache.borrow().contains(&xobject_ref) {
+            return Ok(());
+        }
+
         // Quick Subtype check: skip Image XObjects without loading the full object.
         // Image XObjects can be megabytes of compressed pixel data — loading them
         // just to discover Subtype=Image is a major bottleneck (10-15ms per image).
         if !doc.is_form_xobject(xobject_ref) {
-            return Ok(());
-        }
-
-        // Document-level cache: skip Form XObjects already known to contain no text.
-        // Avoids repeated decompression of shared graphics-only XObjects across pages.
-        if doc.xobject_text_free_cache.borrow().contains(&xobject_ref) {
             return Ok(());
         }
 
@@ -4628,9 +4618,6 @@ impl TextExtractor {
                     }
                 };
 
-                // Quick scan: skip XObjects that contain no text operators (BT) and
-                // no nested XObject invocations (Do). This avoids expensive font loading
-                // and content stream parsing for pure vector-graphics Form XObjects.
                 if !crate::document::PdfDocument::may_contain_text(&stream_data) {
                     log::debug!(
                         "Skipping text-free Form XObject '{}' ({} bytes)",

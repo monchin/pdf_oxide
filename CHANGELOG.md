@@ -2,6 +2,26 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.22] - 2026-04-08
+> Performance: Caching, Parsing, Table Detection, Page Access
+
+### Performance
+
+- **Cache structure tree** — parsed once and cached; non-tagged PDFs skip parsing via MarkInfo check.
+- **Cache decompressed page content stream** — avoids re-decompression when multiple extractors access the same page.
+- **Shared XObject stream cache for path extraction** — reuses decompressed Form XObject streams already cached by text extraction.
+- **Cached XObject dictionary for path extraction** — avoids re-resolving Resources → XObject dict chain on every Do operator.
+- **Byte-level path extraction parser** — skips BT/ET text blocks and parses path/state/color operators without Object allocation.
+- **Allocation-free graphics state for paths** — Copy-only state struct eliminates heap allocations on q/Q save/restore.
+- **Index-based font tracking in prescan** — replaces String cloning on every q operator with index into font table.
+- **Prescan: drop Do positions when Do-dominated** — prevents region merging that defeats the prescan optimization.
+- **Reuse spans in table detection** — reuses pre-extracted spans instead of re-parsing the content stream.
+- **Pre-filter non-table paths** — filters to lines/rectangles before the detection pipeline.
+- **Skip text-only table fallback on graphical pages** — pages with line/rectangle paths skip expensive column-aware text detection.
+- **O(1) MCID lookup** — HashSet instead of linear search for marked-content identifier matching.
+- **O(log n) page tree traversal** — uses /Count to skip subtrees instead of linear counting.
+- **Lazy page tree population** — defers bulk page tree walk until needed.
+
 ## [0.3.21] - 2026-04-04
 > Log Level Honored in Python, Multi-Arch Wheels
 
