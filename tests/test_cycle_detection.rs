@@ -424,9 +424,7 @@ mod struct_tree_cycle {
         );
 
         let obj2 = pdf.len();
-        pdf.extend_from_slice(
-            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
 
         let obj3 = pdf.len();
         pdf.extend_from_slice(
@@ -435,21 +433,15 @@ mod struct_tree_cycle {
 
         // StructTreeRoot with /K pointing to element A
         let obj4 = pdf.len();
-        pdf.extend_from_slice(
-            b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
 
         // StructElem A: /K → B (6 0 R)
         let obj5 = pdf.len();
-        pdf.extend_from_slice(
-            b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n");
 
         // StructElem B: /K → A (5 0 R) — creates the cycle
         let obj6 = pdf.len();
-        pdf.extend_from_slice(
-            b"6 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"6 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
 
         finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5, obj6]);
         pdf
@@ -467,9 +459,7 @@ mod struct_tree_cycle {
         );
 
         let obj2 = pdf.len();
-        pdf.extend_from_slice(
-            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
 
         let obj3 = pdf.len();
         pdf.extend_from_slice(
@@ -477,15 +467,11 @@ mod struct_tree_cycle {
         );
 
         let obj4 = pdf.len();
-        pdf.extend_from_slice(
-            b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
 
         // StructElem A: /K → itself (5 0 R)
         let obj5 = pdf.len();
-        pdf.extend_from_slice(
-            b"5 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
 
         finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5]);
         pdf
@@ -503,9 +489,7 @@ mod struct_tree_cycle {
         );
 
         let obj2 = pdf.len();
-        pdf.extend_from_slice(
-            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n");
 
         let obj3 = pdf.len();
         pdf.extend_from_slice(
@@ -513,27 +497,19 @@ mod struct_tree_cycle {
         );
 
         let obj4 = pdf.len();
-        pdf.extend_from_slice(
-            b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"4 0 obj\n<< /Type /StructTreeRoot /K [5 0 R] >>\nendobj\n\n");
 
         // A → B
         let obj5 = pdf.len();
-        pdf.extend_from_slice(
-            b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"5 0 obj\n<< /Type /StructElem /S /P /K 6 0 R >>\nendobj\n\n");
 
         // B → C
         let obj6 = pdf.len();
-        pdf.extend_from_slice(
-            b"6 0 obj\n<< /Type /StructElem /S /P /K 7 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"6 0 obj\n<< /Type /StructElem /S /P /K 7 0 R >>\nendobj\n\n");
 
         // C → A (closes the cycle)
         let obj7 = pdf.len();
-        pdf.extend_from_slice(
-            b"7 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n",
-        );
+        pdf.extend_from_slice(b"7 0 obj\n<< /Type /StructElem /S /P /K 5 0 R >>\nendobj\n\n");
 
         finalize_pdf(&mut pdf, &[0, obj1, obj2, obj3, obj4, obj5, obj6, obj7]);
         pdf
