@@ -382,18 +382,18 @@ lines = doc.extract_text_lines(0, profile=ExtractionProfile.academic())
 # thresholds control word/line clustering)
 words = doc.extract_words(0, word_gap_threshold=1.5, profile=ExtractionProfile.aggressive())
 
-# 5. Image metadata
+# 7. Image metadata
 images = doc.extract_images(0)
 for img in images:
     print(f"{img['width']}x{img['height']} {img['color_space']}")
 
-# 6. Bookmarks / table of contents
+# 8. Bookmarks / table of contents
 outline = doc.get_outline()  # None if no outline
 if outline:
     for item in outline:
         print(f"{item['title']} -> page {item.get('page')}")
 
-# 7. Vector paths (lines, curves, shapes)
+# 9. Vector paths (lines, curves, shapes)
 paths = doc.extract_paths(0)
 for path in paths:
     print(f"bbox={path['bbox']}, stroke={path.get('stroke_color')}")
