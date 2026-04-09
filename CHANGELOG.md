@@ -10,6 +10,8 @@ All notable changes to PDFOxide are documented here.
 
 - **`vertical_strategy` now parsed from Python `table_settings`** — `vertical_strategy` was never read from the Python settings dict, so it always defaulted to `Both` regardless of what the caller passed. This made `vertical_strategy="lines"` a no-op from Python.
 
+- **Structure tree cycle SIGSEGV** — Cyclic `/K` indirect references in malformed tagged PDFs caused runaway mutual recursion and stack overflow. A visited-object set now breaks cycles before they overflow the stack.
+
 ## [0.3.21] - 2026-04-04
 > Log Level Honored in Python, Multi-Arch Wheels
 
