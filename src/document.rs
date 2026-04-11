@@ -3351,7 +3351,7 @@ impl PdfDocument {
             }
         }
 
-        let text = if let Some(struct_tree) = cached_tree {
+        let text = if let Some(ref struct_tree) = cached_tree {
             // Build per-page traversal cache once, then O(1) lookup per page.
             if self.structure_content_cache.is_none() {
                 let all_content = crate::structure::traverse_structure_tree_all_pages(&struct_tree);
@@ -3412,10 +3412,75 @@ impl PdfDocument {
                     && s.font_size.is_finite()
             });
 
+            // Inline table insertion (issue #315).
+            //
+            // Tables were previously rendered in a single block appended
+            // at the end of the page text, after all flow spans. That
+            // matches how `extract_text` historically worked but it means
+            // tabular content appears far away from the prose that
+            // surrounds it in reading order — on product data sheets
+            // like ORAFOL 5900 the "Physical and Chemical Properties"
+            // label/value rows showed up 20+ lines below the section
+            // they belong to, which the reporter of #315 perceived as
+            // the content being dropped entirely.
+            //
+            // Instead, maintain a sorted queue of tables keyed by their
+            // top-Y (the larger Y coordinate of the table's bbox, per PDF
+            // user-space conventions where Y grows upward). As we walk
+            // the flow spans in row-aware reading order, whenever the
+            // next span's top-Y falls below the top-Y of the queue's
+            // leading table, we flush that table's rendered text at
+            // that point, then continue. A final pass at the end emits
+            // any tables whose top-Y is below all remaining spans (or
+            // that have no flow spans at all).
+            //
+            // Tables are emitted at most once regardless of how many
+            // spans sit above them, preserving existing behaviour
+            // semantics while inlining the rendering at its spatial
+            // reading-order position.
+            let mut pending_tables: Vec<(f32, &crate::structure::table_extractor::ExtractedTable)> =
+                tables
+                    .iter()
+                    .filter_map(|t| t.bbox.map(|b| (b.y + b.height, t)))
+                    .collect();
+            // Sort descending by top-Y so `pop()` returns the next table
+            // to emit in reading order (larger Y first).
+            pending_tables
+                .sort_by(|(a, _), (b, _)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+            let flush_table =
+                |text: &mut String, table: &crate::structure::table_extractor::ExtractedTable| {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push('\n');
+                    text.push_str(&table.render_text());
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                };
+
             let mut text = String::with_capacity(spans.len() * 20);
             let mut prev_span: Option<&TextSpan> = None;
 
             for span in &spans {
+                // Flush any tables that sit above this span in PDF
+                // reading order (their top-Y is greater than or equal
+                // to the span's top-Y, meaning they should appear first).
+                while let Some(&(table_top_y, table)) = pending_tables.last() {
+                    let span_top_y = span.bbox.y + span.bbox.height;
+                    if table_top_y >= span_top_y {
+                        flush_table(&mut text, table);
+                        pending_tables.pop();
+                        // Reset prev_span so the flow-text glue logic
+                        // doesn't try to stitch the table's rendered
+                        // block together with the next flow span.
+                        prev_span = None;
+                    } else {
+                        break;
+                    }
+                }
+
                 if let Some(prev) = prev_span {
                     let prev_end_x = prev.bbox.x + prev.bbox.width;
                     let span_end_x = span.bbox.x + span.bbox.width;
@@ -3500,6 +3565,15 @@ impl PdfDocument {
                 }
                 prev_span = Some(span);
             }
+
+            // Drain any tables that sit below all flow spans (or the
+            // page had no flow spans at all). Without this final
+            // pass they would be silently dropped now that the
+            // end-of-page `for table in tables` block has been
+            // removed.
+            while let Some((_, table)) = pending_tables.pop() {
+                flush_table(&mut text, table);
+            }
             text
         };
 
@@ -3519,8 +3593,12 @@ impl PdfDocument {
         // Apply whitespace cleanup
         let mut cleaned_text = crate::converters::whitespace::cleanup_plain_text(&final_text);
 
-        // Append ASCII tables at the end (for both tagged and untagged)
-        if !tables.is_empty() {
+        // Tagged PDFs use their own structure-tree traversal path and
+        // still need the historical end-of-page table block. Untagged
+        // PDFs now inline tables with the flow spans above, so the
+        // end-of-page dump is only run when we came through the
+        // structure-tree branch.
+        if cached_tree.is_some() && !tables.is_empty() {
             for table in tables {
                 cleaned_text.push_str("\n\n");
                 cleaned_text.push_str(&table.render_text());
