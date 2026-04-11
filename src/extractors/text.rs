@@ -3015,6 +3015,45 @@ impl TextExtractor {
             let current_end_x = current.bbox.x + current.bbox.width;
             let gap = span.bbox.x - current_end_x;
 
+            // Fallback-width correction (issue #328): When the previous
+            // span's font has no explicit `/Widths` array, every glyph in
+            // that span reports the 500/550/600-thousandths-of-em fallback
+            // from `FontInfo::new`. For proportional Latin fonts whose
+            // real glyphs are narrower than that fallback (`SR` in the
+            // NASA Apollo report is a concrete example), the span's
+            // `bbox.width` is systematically inflated and `current_end_x`
+            // overshoots the actual end of the rendered text — often by
+            // enough to swallow the real inter-word gap entirely, turning
+            // the visible word boundary into a negative `gap` value and
+            // tripping merge logic that then glues the words without a
+            // space.
+            //
+            // `space_gap` is a corrected gap value used ONLY for the
+            // space-insertion decision below. The original `gap` is left
+            // unchanged so the merge-vs-column decision, the decimal-merge
+            // heuristic, and any downstream branch that reasons about the
+            // actual bbox layout still see the real layout and don't
+            // suddenly reclassify legitimate adjacent words as column
+            // boundaries. In other words: the merge still happens exactly
+            // as before on fallback-width fonts, but once we're inside the
+            // merge branch we consult a more honest gap to decide whether
+            // a space is warranted.
+            let space_gap = {
+                let prev_font = self.fonts.get(&current.font_name);
+                let reliable = prev_font.map(|f| f.has_explicit_widths()).unwrap_or(true);
+                if !reliable && current.bbox.width > 0.0 && !current.text.is_empty() {
+                    // 0.55 / 0.45 ≈ 1.22 matches the per-glyph inflation
+                    // observed on the NASA Apollo corpus (subagent analysis
+                    // in issue #328). Keeping the correction modest avoids
+                    // over-reporting gaps on fonts where 0.55 em is actually
+                    // the correct average advance.
+                    let corrected_end_x = current.bbox.x + current.bbox.width / 1.22;
+                    span.bbox.x - corrected_end_x
+                } else {
+                    gap
+                }
+            };
+
             // COLUMN BOUNDARY CHECK: Don't merge spans with large gaps
             // Use configured threshold to detect column separation
             let large_gap_indicates_column = gap > self.merging_config.column_boundary_threshold_pt;
@@ -3122,7 +3161,7 @@ impl TextExtractor {
                     let space_decision = should_insert_space(
                         &current.text,
                         &span.text,
-                        gap,
+                        space_gap,
                         current.font_size,
                         &current.font_name,
                         &self.fonts,

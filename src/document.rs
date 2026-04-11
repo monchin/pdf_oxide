@@ -3435,6 +3435,7 @@ impl PdfDocument {
 
                     let y_diff = (prev.bbox.y - span.bbox.y).abs();
                     let gap = span.bbox.x - prev_end_x;
+                    let delta_x = span.bbox.x - prev.bbox.x;
 
                     if y_diff > 2.0 {
                         let font_size = span.font_size.max(10.0);
@@ -3454,6 +3455,28 @@ impl PdfDocument {
                             && !text.ends_with(' ')
                             && !text.ends_with('\n')
                         {
+                            text.push(' ');
+                        } else if delta_x > fs * 1.5
+                            && !text.ends_with(' ')
+                            && !text.ends_with('\n')
+                        {
+                            // Inflated-width overlap recovery (issue #328).
+                            // A negative raw gap here usually comes from a
+                            // font whose `/Widths` array is missing and
+                            // `FontInfo::new` fell back to the 550/1000-em
+                            // constant, which over-reports each glyph's
+                            // advance and drags `prev_end_x` past the real
+                            // start of the next span. When the two spans'
+                            // actual origins (`delta_x`) are separated by
+                            // more than 1.5 em, they cannot both belong to
+                            // the same word — the overlap is a width-table
+                            // artifact, not real kerning — so insert a
+                            // space to preserve the word boundary. This
+                            // rescues cases like "STATION" + "FREEDOM" and
+                            // "UTILIZATION" + "CONFERENCE" in the NASA
+                            // Apollo report header where raw gaps of
+                            // -1.75 pt and -12.75 pt sit alongside
+                            // delta_x values of 56 pt and 78 pt.
                             text.push(' ');
                         }
                     } else if Self::should_insert_space(prev, span) {
