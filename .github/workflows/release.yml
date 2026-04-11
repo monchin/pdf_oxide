@@ -632,23 +632,40 @@ jobs:
           set -euxo pipefail
           # Prove the binding is AOT-safe: publish a tiny consumer with
           # PublishAot=true on net10.0 and make sure the trim/AOT analyzer
-          # surfaces no warnings. If LibraryImport regressed, this step fails
-          # with clear IL2026/IL3050 diagnostics instead of a silent runtime
-          # crash in an end-user's published binary.
+          # surfaces no warnings. If LibraryImport regresses, this step
+          # fails with IL2026 / IL3050 / SYSLIB10xx diagnostics instead of
+          # a silent runtime crash in an end-user's published binary.
+          #
+          # AotSmoke lives in a throw-away $TMPDIR directory so the SDK's
+          # default `<Compile Include="**/*.cs">` wildcard can't walk back
+          # into csharp/PdfOxide/ and duplicate every type. Earlier the
+          # step placed a `PdfOxide.link` symlink inside the temp project
+          # as a "ProjectReference fallback", and the wildcard pulled every
+          # .cs file from the main library in through the link — producing
+          # ~80 CS0436 / CS0579 errors. The absolute-path ProjectReference
+          # below needs no symlink at all.
+          #
+          # AllowUnsafeBlocks is mandatory: LibraryImport's source generator
+          # emits `fixed byte*` pinning for every `string` parameter in the
+          # generated P/Invoke stub, which requires unsafe codegen even
+          # though no user-visible unsafe code is involved (SYSLIB1062).
+          PDF_OXIDE_PROJ="$PWD/PdfOxide.csproj"
+          PDF_OXIDE_SO="$(realpath "$PWD/../../target/release/libpdf_oxide.so")"
           AOT_DIR="$(mktemp -d)"
           mkdir -p "$AOT_DIR/AotSmoke"
-          cat > "$AOT_DIR/AotSmoke/AotSmoke.csproj" <<'EOT'
+          cat > "$AOT_DIR/AotSmoke/AotSmoke.csproj" <<EOT
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
               <OutputType>Exe</OutputType>
               <TargetFramework>net10.0</TargetFramework>
               <Nullable>enable</Nullable>
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
               <PublishAot>true</PublishAot>
               <InvariantGlobalization>true</InvariantGlobalization>
               <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
             </PropertyGroup>
             <ItemGroup>
-              <ProjectReference Include="../../PdfOxide.csproj" />
+              <ProjectReference Include="${PDF_OXIDE_PROJ}" />
             </ItemGroup>
           </Project>
           EOT
@@ -656,19 +673,20 @@ jobs:
           using PdfOxide.Core;
 
           using var pdf = Pdf.FromMarkdown("# verify-csharp-aot\n\nbody text.");
-          var outPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "verify.pdf");
+          var outPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "verify-aot.pdf");
           pdf.Save(outPath);
           using var doc = PdfDocument.Open(outPath);
           System.Console.WriteLine($"ok pages={doc.PageCount}");
           EOT
-          # Link the temp project into the solution via a file symlink so
-          # ProjectReference's relative path resolves to the real library.
-          ln -s "$PWD" "$AOT_DIR/AotSmoke/PdfOxide.link"
-          # Rewrite the ProjectReference to absolute path (simpler than ln).
-          sed -i "s|../../PdfOxide.csproj|$PWD/PdfOxide.csproj|" "$AOT_DIR/AotSmoke/AotSmoke.csproj"
-          dotnet publish "$AOT_DIR/AotSmoke/AotSmoke.csproj" -c Release -r linux-x64 -o "$AOT_DIR/out"
+          dotnet publish "$AOT_DIR/AotSmoke/AotSmoke.csproj" \
+            -c Release -r linux-x64 -o "$AOT_DIR/out"
+          # C# still uses dynamic P/Invoke against libpdf_oxide.so at
+          # runtime (the staticlib path from #334 is Go-only), so stage
+          # the Linux cdylib next to the AOT binary before we execute it.
+          cp "$PDF_OXIDE_SO" "$AOT_DIR/out/"
           # Run the AOT-compiled binary — no .NET runtime required.
-          "$AOT_DIR/out/AotSmoke" || { echo "AOT smoke test failed"; exit 1; }
+          env -i PATH=/usr/bin:/bin "$AOT_DIR/out/AotSmoke" \
+            || { echo "AOT smoke test failed"; exit 1; }
 
       - name: Upload NuGet package
         uses: actions/upload-artifact@v7
