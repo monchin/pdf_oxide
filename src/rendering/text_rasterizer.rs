@@ -43,17 +43,63 @@ impl<'a> OutlineBuilder for SkiaOutlineBuilder<'a> {
     }
 }
 
+/// Process-wide cache for the system font database.
+///
+/// `fontdb::Database::load_system_fonts()` walks every font directory on
+/// the host and parses each face it finds, which typically takes several
+/// seconds on first call. Before this cache was introduced, every
+/// `TextRasterizer::new()` (and therefore every `PageRenderer::new()`)
+/// paid that cost, and callers who constructed a fresh `PageRenderer`
+/// per page — which is the obvious first-draft usage from the Python /
+/// CLI surface — hit the scan once per page. A cold-cache ORAFOL 5400
+/// render took ~4.1 s on a warm machine for a single page because of
+/// this. See issue #331.
+///
+/// Switching to a process-wide `OnceLock<Arc<fontdb::Database>>` loads
+/// the database exactly once per process, and every subsequent
+/// `TextRasterizer` constructor takes a cheap `Arc::clone`. Wrapping
+/// in `Arc` is important so that the cache is still cheaply shareable
+/// across `TextRasterizer` instances in different rendering contexts
+/// without re-copying the full parsed font metadata. Callers that want
+/// a private / modified database can still construct one by hand and
+/// bypass this cache via `TextRasterizer::with_fontdb()`.
+static SYSTEM_FONTDB: std::sync::OnceLock<std::sync::Arc<fontdb::Database>> =
+    std::sync::OnceLock::new();
+
+fn system_fontdb() -> std::sync::Arc<fontdb::Database> {
+    SYSTEM_FONTDB
+        .get_or_init(|| {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
 /// Rasterizer for PDF text operations.
 pub struct TextRasterizer {
-    /// Font database for system font fallback
-    fontdb: fontdb::Database,
+    /// Font database for system font fallback.
+    ///
+    /// Shared across rasterizers via a process-wide `OnceLock` cache so
+    /// we don't re-scan the system font directories on every new
+    /// `PageRenderer`. See the `SYSTEM_FONTDB` docstring for the
+    /// measurement that motivated the switch.
+    fontdb: std::sync::Arc<fontdb::Database>,
 }
 
 impl TextRasterizer {
-    /// Create a new text rasterizer.
+    /// Create a new text rasterizer using the cached system font database.
     pub fn new() -> Self {
-        let mut fontdb = fontdb::Database::new();
-        fontdb.load_system_fonts();
+        Self {
+            fontdb: system_fontdb(),
+        }
+    }
+
+    /// Construct with a caller-supplied font database. Bypasses the
+    /// process-wide cache — useful for tests or callers that need to
+    /// pre-populate the database with non-system fonts.
+    #[allow(dead_code)]
+    pub fn with_fontdb(fontdb: std::sync::Arc<fontdb::Database>) -> Self {
         Self { fontdb }
     }
 
