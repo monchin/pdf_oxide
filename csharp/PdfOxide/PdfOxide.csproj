@@ -19,8 +19,7 @@
     <!-- Package Description and Metadata -->
     <Description>Complete .NET bindings for pdf_oxide Rust PDF processing library. Provides idiomatic C# APIs for reading, creating, and editing PDFs with support for text extraction, format conversion (Markdown/HTML), element and annotation access, full text search, and async operations.</Description>
     <Summary>Production-ready C# bindings for the pdf_oxide Rust PDF library</Summary>
-    <PackageIcon>icon.png</PackageIcon>
-    <ReadmeFile>README.md</ReadmeFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <!-- Release Notes -->
     <PackageReleaseNotes>
@@ -96,6 +95,11 @@ v0.3.24 — First public release of PdfOxide for .NET
     <DebugType>embedded</DebugType>
     <DebugSymbols>true</DebugSymbols>
   </PropertyGroup>
+
+  <!-- Package README: the canonical C# binding README lives one level up in csharp/ -->
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <!-- Include native libraries in NuGet package -->
   <ItemGroup>
