@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yfedoseev/pdfoxide"
+	"github.com/yfedoseev/pdf_oxide/go"
 )
 
 func main() {

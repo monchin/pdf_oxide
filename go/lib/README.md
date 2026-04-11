@@ -2,7 +2,7 @@
 
 This directory contains prebuilt native `libpdf_oxide` shared libraries for each platform.
 They are populated by the release CI pipeline and committed to the Go module so that
-`go get github.com/yfedoseev/pdfoxide` works without requiring users to build Rust.
+`go get github.com/yfedoseev/pdf_oxide/go` works without requiring users to build Rust.
 
 ## Directory Structure
 

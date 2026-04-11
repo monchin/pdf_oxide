@@ -279,7 +279,7 @@ cargo install pdf_oxide_mcp             # Cargo
 
 ### Other languages
 
-- **Go** — `go get github.com/yfedoseev/pdfoxide` — see [go/README.md](go/README.md)
+- **Go** — `go get github.com/yfedoseev/pdf_oxide/go` — see [go/README.md](go/README.md)
 - **JavaScript / TypeScript (Node.js)** — `npm install pdf-oxide` — see [js/README.md](js/README.md)
 - **C# / .NET** — `dotnet add package PdfOxide` — see [csharp/README.md](csharp/README.md)
 

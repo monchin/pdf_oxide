@@ -10,7 +10,7 @@ This release ships official bindings for JavaScript/TypeScript, Go, and C#, buil
 ### Features
 
 - **JavaScript / TypeScript bindings** (`pdf-oxide` on npm) — N-API native module with `Buffer`/`Uint8Array` input, `openWithPassword()`, worker thread pool, `Symbol.dispose`, rich error hierarchy, and complete API coverage: document editor, forms, rendering, signatures/TSA, compliance, annotations, extraction with bbox. Full TypeScript type definitions included.
-- **Go bindings** (`github.com/yfedoseev/pdfoxide`) — Full API with goroutine-safe `PdfDocument` (`sync.RWMutex`), `io.Reader` support, functional options pattern, `SetLogLevel()`, and ARM64 CGo targets.
+- **Go bindings** (`github.com/yfedoseev/pdf_oxide/go`) — Full API with goroutine-safe `PdfDocument` (`sync.RWMutex`), `io.Reader` support, functional options pattern, `SetLogLevel()`, and ARM64 CGo targets.
 - **C# / .NET bindings** (`PdfOxide` on NuGet) — P/Invoke with `NativeHandle` (SafeHandle), `IDisposable`, `ReaderWriterLockSlim` thread safety, `async Task<T>` + `CancellationToken`, fluent builders, LINQ extensions, plugin system. ARM64 NuGet targets (linux-arm64, osx-arm64, win-arm64).
 - **C FFI layer (`src/ffi.rs`)** — 270+ `extern "C"` functions covering the full Rust API surface.
 - **Shared C header (`include/pdf_oxide_c/pdf_oxide.h`)** — Portable header for all FFI consumers.

@@ -243,7 +243,7 @@ asyncio.run(main())
 PDF Oxide ships the same Rust core through six bindings:
 
 - **Rust** — `cargo add pdf_oxide` — see [docs.rs/pdf_oxide](https://docs.rs/pdf_oxide)
-- **Go** — `go get github.com/yfedoseev/pdfoxide` — see [go/README.md](../go/README.md)
+- **Go** — `go get github.com/yfedoseev/pdf_oxide/go` — see [go/README.md](../go/README.md)
 - **JavaScript / TypeScript (Node.js)** — `npm install pdf-oxide` — see [js/README.md](../js/README.md)
 - **C# / .NET** — `dotnet add package PdfOxide` — see [csharp/README.md](../csharp/README.md)
 - **WASM (browsers, Deno, Bun, edge runtimes)** — `npm install pdf-oxide-wasm` — see [wasm-pkg/README.md](../wasm-pkg/README.md)

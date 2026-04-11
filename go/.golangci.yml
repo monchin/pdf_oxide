@@ -133,7 +133,7 @@ linters-settings:
 
   # Import sorting (goimports)
   goimports:
-    local-prefixes: github.com/yfedoseev/pdfoxide
+    local-prefixes: github.com/yfedoseev/pdf_oxide/go
 
   # Error handling
   errorlint:

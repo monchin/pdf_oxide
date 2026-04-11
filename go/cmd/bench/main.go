@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
-	pdfoxide "github.com/yfedoseev/pdfoxide"
+	pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 )
 
 const iterations = 5

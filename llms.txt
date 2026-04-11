@@ -8,7 +8,7 @@
 
 - Python: `pip install pdf-oxide`
 - Rust: `cargo add pdf_oxide`
-- Go: `go get github.com/yfedoseev/pdfoxide`
+- Go: `go get github.com/yfedoseev/pdf_oxide/go`
 - JavaScript/Node.js: `npm install pdf-oxide`
 - C#/.NET: `dotnet add package PdfOxide`
 - Documentation: https://pdf.oxide.fyi

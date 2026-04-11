@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yfedoseev/pdfoxide"
+	"github.com/yfedoseev/pdf_oxide/go"
 )
 
 type result struct {

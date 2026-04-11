@@ -182,7 +182,7 @@ PDF Oxide ships the same Rust core through six bindings:
 
 - **Rust** — `cargo add pdf_oxide` — see [docs.rs/pdf_oxide](https://docs.rs/pdf_oxide)
 - **Python** — `pip install pdf_oxide` — see [python/README.md](https://github.com/yfedoseev/pdf_oxide/blob/main/python/README.md)
-- **Go** — `go get github.com/yfedoseev/pdfoxide` — see [go/README.md](https://github.com/yfedoseev/pdf_oxide/blob/main/go/README.md)
+- **Go** — `go get github.com/yfedoseev/pdf_oxide/go` — see [go/README.md](https://github.com/yfedoseev/pdf_oxide/blob/main/go/README.md)
 - **JavaScript / TypeScript (Node.js native)** — `npm install pdf-oxide` — see [js/README.md](https://github.com/yfedoseev/pdf_oxide/blob/main/js/README.md)
 - **C# / .NET** — `dotnet add package PdfOxide` — see [csharp/README.md](https://github.com/yfedoseev/pdf_oxide/blob/main/csharp/README.md)
 

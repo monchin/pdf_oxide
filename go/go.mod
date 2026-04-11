@@ -1,4 +1,4 @@
-module github.com/yfedoseev/pdfoxide
+module github.com/yfedoseev/pdf_oxide/go
 
 go 1.21
 

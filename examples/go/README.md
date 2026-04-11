@@ -1,7 +1,7 @@
 # PDF Oxide — Go Examples
 
 ```bash
-go get github.com/yfedoseev/pdfoxide
+go get github.com/yfedoseev/pdf_oxide/go
 go run examples/go/01-extract-text/main.go document.pdf
 ```
 

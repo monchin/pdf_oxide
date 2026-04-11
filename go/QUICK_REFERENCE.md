@@ -3,13 +3,13 @@
 ## Installation
 
 ```bash
-go get github.com/yfedoseev/pdfoxide
+go get github.com/yfedoseev/pdf_oxide/go
 ```
 
 Import as:
 
 ```go
-import pdfoxide "github.com/yfedoseev/pdfoxide"
+import pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 ```
 
 ## Basic Usage
@@ -22,7 +22,7 @@ import (
     "fmt"
     "log"
 
-    pdfoxide "github.com/yfedoseev/pdfoxide"
+    pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 )
 
 func main() {

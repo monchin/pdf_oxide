@@ -10,7 +10,7 @@ No Rust toolchain required — prebuilt native libraries are bundled in the modu
 ## Installation
 
 ```bash
-go get github.com/yfedoseev/pdfoxide
+go get github.com/yfedoseev/pdf_oxide/go
 ```
 
 Prebuilt `libpdf_oxide` binaries for Linux, macOS, and Windows (x64 + ARM64) live in the
@@ -19,7 +19,7 @@ module's `lib/` directory. CGo links against them automatically.
 Import as:
 
 ```go
-import pdfoxide "github.com/yfedoseev/pdfoxide"
+import pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 ```
 
 ## Your First Program
@@ -32,7 +32,7 @@ import (
     "fmt"
     "log"
 
-    pdfoxide "github.com/yfedoseev/pdfoxide"
+    pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 )
 
 func main() {
@@ -357,7 +357,7 @@ codesign -f -s - /path/to/libpdf_oxide.dylib
 1. **Read `README.md`** for a full API tour.
 2. **Check `QUICK_REFERENCE.md`** for a condensed cheat sheet.
 3. **Browse `examples/`** for runnable programs.
-4. **Open pkg.go.dev** for GoDoc-generated reference: `https://pkg.go.dev/github.com/yfedoseev/pdfoxide`.
+4. **Open pkg.go.dev** for GoDoc-generated reference: `https://pkg.go.dev/github.com/yfedoseev/pdf_oxide/go`.
 
 ## Support
 

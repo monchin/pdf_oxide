@@ -2,7 +2,7 @@
 
 The fastest Go PDF library for text extraction, image extraction, and markdown conversion. Powered by a pure-Rust core, exposed to Go through CGo. 0.8ms mean per document, 5× faster than PyMuPDF, 15× faster than pypdf. 100% pass rate on 3,830 real-world PDFs. MIT / Apache-2.0 licensed.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/yfedoseev/pdfoxide.svg)](https://pkg.go.dev/github.com/yfedoseev/pdfoxide)
+[![Go Reference](https://pkg.go.dev/badge/github.com/yfedoseev/pdf_oxide/go.svg)](https://pkg.go.dev/github.com/yfedoseev/pdf_oxide/go)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://opensource.org/licenses)
 
 > **Part of the [PDF Oxide](https://github.com/yfedoseev/pdf_oxide) toolkit.** Same Rust core, same speed, same 100% pass rate as the [Rust](https://docs.rs/pdf_oxide), [Python](../python/README.md), [JavaScript / TypeScript](../js/README.md), [C# / .NET](../csharp/README.md), and [WASM](../wasm-pkg/README.md) bindings.
@@ -10,7 +10,7 @@ The fastest Go PDF library for text extraction, image extraction, and markdown c
 ## Quick Start
 
 ```bash
-go get github.com/yfedoseev/pdfoxide
+go get github.com/yfedoseev/pdf_oxide/go
 ```
 
 ```go
@@ -20,7 +20,7 @@ import (
     "fmt"
     "log"
 
-    pdfoxide "github.com/yfedoseev/pdfoxide"
+    pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 )
 
 func main() {
@@ -63,7 +63,7 @@ Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mo
 ## Installation
 
 ```bash
-go get github.com/yfedoseev/pdfoxide
+go get github.com/yfedoseev/pdf_oxide/go
 ```
 
 Pre-built native libraries for Linux (x64, ARM64), macOS (x64, Apple Silicon), and Windows (x64, ARM64) ship with the module under `lib/<os>_<arch>/`. CGo is required (`CGO_ENABLED=1`, the default). No Rust toolchain is needed to consume the library.
@@ -285,7 +285,7 @@ A bug fix in the Rust core lands in every binding on the next release.
 ## Documentation
 
 - **[Full Documentation](https://pdf.oxide.fyi)** — Complete documentation site
-- **[Go API Reference](https://pkg.go.dev/github.com/yfedoseev/pdfoxide)** — Full Go API on pkg.go.dev
+- **[Go API Reference](https://pkg.go.dev/github.com/yfedoseev/pdf_oxide/go)** — Full Go API on pkg.go.dev
 - **[Main Repository](https://github.com/yfedoseev/pdf_oxide)** — Rust core, CLI, MCP server, all bindings
 - **[Performance Benchmarks](https://pdf.oxide.fyi/docs/performance)** — Full benchmark methodology and results
 - **[GitHub Issues](https://github.com/yfedoseev/pdf_oxide/issues)** — Bug reports and feature requests
